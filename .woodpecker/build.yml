@@ -1,0 +1,51 @@
+when:
+  branch: main
+  event: [push, manual]
+
+steps:
+  - name: check
+    image: rust:1.78
+    commands:
+      - cargo fmt -p backend -p shared --check
+      - cargo clippy -p backend -p shared -- -D warnings
+      - cargo test -p backend -p shared
+
+  - name: build-and-push
+    image: woodpecker/docker-buildx:latest
+    environment:
+      REGISTRY_USER:
+        from_secret: registry_user
+      REGISTRY_PASSWORD:
+        from_secret: registry_password
+    commands:
+      - |
+        echo "${REGISTRY_PASSWORD}" | docker login registry.desync.link -u "${REGISTRY_USER}" --password-stdin
+        CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | sed 's/\.[0-9]*$//')
+        VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}
+        docker buildx build --push \
+          -t registry.desync.link/bored:${CI_COMMIT_SHA} \
+          -t registry.desync.link/bored:${VERSION} .
+
+  - name: tag-release
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - |
+        CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | sed 's/\.[0-9]*$//')
+        VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}
+        git tag v${VERSION}
+        git push https://x-token:${GITHUB_TOKEN}@github.com/${CI_REPO}.git v${VERSION}
+
+  - name: deploy
+    image: alpine/ssh
+    environment:
+      MINI_SSH_KEY:
+        from_secret: mini_ssh_key
+    commands:
+      - |
+        mkdir -p ~/.ssh
+        echo "${MINI_SSH_KEY}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no vincent@mini "./run-stack.sh bored-stack up -d --pull always"
