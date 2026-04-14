@@ -1,0 +1,4 @@
+[workspace]
+members = ["shared", "backend", "frontend"]
+default-members = ["shared", "backend"]
+resolver = "2"
