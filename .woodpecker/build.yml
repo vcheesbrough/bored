@@ -1,5 +1,4 @@
 when:
-  branch: main
   event: [push, manual]
 
 steps:
