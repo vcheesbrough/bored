@@ -1,5 +1,22 @@
 {
+  "env": {
+    "WOODPECKER_TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoidXNlciIsInVzZXItaWQiOiIxIn0.9tdGiBnabwZrWe8zXmgd-KDuO0IuNukIMPPTalWVxHc"
+  },
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git push*)",
+            "command": "node W:/bored/.claude/watch-woodpecker.js",
+            "statusMessage": "Watching Woodpecker CI build...",
+            "timeout": 660
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -7,21 +24,21 @@
           {
             "type": "command",
             "if": "Bash(git commit*)",
-            "command": "cargo build -p backend -p shared",
+            "command": "wsl -e bash -c 'cd /mnt/w/bored && /home/vincent/.cargo/bin/cargo build -p backend -p shared'",
             "statusMessage": "Building before commit...",
             "timeout": 120
           },
           {
             "type": "command",
             "if": "Bash(git commit*)",
-            "command": "cargo test -p backend -p shared",
+            "command": "wsl -e bash -c 'cd /mnt/w/bored && /home/vincent/.cargo/bin/cargo test -p backend -p shared'",
             "statusMessage": "Running unit tests before commit...",
             "timeout": 300
           },
           {
             "type": "command",
             "if": "Bash(git push*)",
-            "command": "cargo test -p backend -p shared",
+            "command": "wsl -e bash -c 'cd /mnt/w/bored && /home/vincent/.cargo/bin/cargo test -p backend -p shared'",
             "statusMessage": "Running unit tests before push...",
             "timeout": 300
           }
