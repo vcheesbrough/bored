@@ -51,4 +51,4 @@ steps:
         mkdir -p ~/.ssh
         echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no vincent@10.0.0.29 "./run-stack.sh bored-stack up -d --pull always"
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no vincent@10.0.0.29 "/srv/dev/mini-config/run-stack.sh bored-stack up -d --pull always"
