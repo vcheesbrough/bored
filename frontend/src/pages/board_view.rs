@@ -4,7 +4,7 @@ use leptos_router::hooks::use_params_map;
 #[component]
 pub fn BoardView() -> impl IntoView {
     let params = use_params_map();
-    let board_id = move || params.with(|p| p.get("id").cloned().unwrap_or_default());
+    let board_id = move || params.with(|p| p.get("id").unwrap_or_default());
 
     let columns = RwSignal::new(Vec::<shared::Column>::new());
     let new_col_name = RwSignal::new(String::new());
