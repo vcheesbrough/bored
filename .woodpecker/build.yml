@@ -11,6 +11,8 @@ steps:
       - cargo test -p backend -p shared
 
   build-and-push:
+    when:
+      - event: [push, manual]
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -30,6 +32,8 @@ steps:
           -t registry.desync.link/bored:latest .
 
   tag-release:
+    when:
+      - event: [push, manual]
     image: alpine/git
     environment:
       GITHUB_TOKEN:
@@ -42,6 +46,8 @@ steps:
         git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
 
   deploy:
+    when:
+      - event: [push, manual]
     image: alpine
     environment:
       MINI_SSH_KEY:
