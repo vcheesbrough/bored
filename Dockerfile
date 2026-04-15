@@ -17,5 +17,7 @@ RUN openssl req -x509 -newkey rsa:4096 \
         -days 3650 \
         -nodes \
         -subj "/CN=bored"
+ENV TLS_CERT=/app/cert.pem
+ENV TLS_KEY=/app/key.pem
 EXPOSE 443
 CMD ["./backend"]
