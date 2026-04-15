@@ -19,8 +19,11 @@ steps:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
+      THING:
+        from_secret: github_token
     commands:
       - |
+        echo "THING length: $(echo -n "${THING}" | wc -c)"
         echo "REGISTRY_USER length: $(echo -n "${REGISTRY_USER}" | wc -c)"
         echo "REGISTRY_PASSWORD length: $(echo -n "${REGISTRY_PASSWORD}" | wc -c)"
         echo "${REGISTRY_PASSWORD}" | docker login registry.desync.link -u "${REGISTRY_USER}" --password-stdin
