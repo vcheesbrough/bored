@@ -3,3 +3,4 @@
 /frontend/pkg
 .env
 *.bak
+lcov.info

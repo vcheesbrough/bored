@@ -15,19 +15,28 @@ pub fn app() -> Router {
 async fn main() {
     let _obs = observability::init();
 
-    let cert = std::env::var("TLS_CERT").unwrap_or_else(|_| "/app/cert.pem".to_string());
-    let key = std::env::var("TLS_KEY").unwrap_or_else(|_| "/app/key.pem".to_string());
+    let cert = std::env::var("TLS_CERT");
+    let key = std::env::var("TLS_KEY");
 
-    let config = RustlsConfig::from_pem_file(&cert, &key)
-        .await
-        .expect("failed to load TLS config");
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], 443));
-    tracing::info!(%addr, "bored backend listening");
-    axum_server::bind_rustls(addr, config)
-        .serve(app().into_make_service())
-        .await
-        .unwrap();
+    match (cert, key) {
+        (Ok(cert), Ok(key)) => {
+            let config = RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .expect("failed to load TLS config");
+            let addr = SocketAddr::from(([0, 0, 0, 0], 443));
+            tracing::info!(%addr, "bored backend listening (TLS)");
+            axum_server::bind_rustls(addr, config)
+                .serve(app().into_make_service())
+                .await
+                .unwrap();
+        }
+        _ => {
+            let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+            tracing::info!(%addr, "bored backend listening (plain HTTP)");
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            axum::serve(listener, app()).await.unwrap();
+        }
+    }
 }
 
 async fn health() -> &'static str {
