@@ -8,9 +8,8 @@ pub struct ObservabilityGuard {
 
 /// Initialise structured logging. Call once as the first statement in main().
 /// The returned guard must be kept alive for the process lifetime — dropping it
-/// shuts down the Loki background task is **not** guaranteed — dropping the
-/// guard detaches the task. Hold it for the process lifetime to ensure
-/// structured shutdown ordering.
+/// detaches the Loki background task (the task continues running). Shutdown
+/// ordering is not guaranteed, so buffered log events may be lost at process exit.
 pub fn init() -> ObservabilityGuard {
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
     let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
@@ -35,12 +34,13 @@ pub fn init() -> ObservabilityGuard {
     };
     layers.push(fmt);
 
-    // Optional Loki layer — omitted when LOKI_URL is unset
+    // Loki layer
     let loki_task = if let Some(url_str) = loki_url {
-        let url = url::Url::parse(&url_str).expect("LOKI_URL is not a valid URL");
+        let url = url::Url::parse(&url_str)
+            .unwrap_or_else(|e| panic!("LOKI_URL '{url_str}' is not a valid URL: {e}"));
         let (loki_layer, controller) = tracing_loki::builder()
             .label("app", "bored")
-            .unwrap()
+            .expect("hardcoded label \"app\" is invalid — should never happen")
             .label("env", &app_env)
             .expect("APP_ENV contains characters invalid in a Loki label value")
             .label("version", version)
