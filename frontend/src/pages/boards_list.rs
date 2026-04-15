@@ -10,8 +10,10 @@ pub fn BoardsList() -> impl IntoView {
     // Fetch boards on mount
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
-            let fetched = crate::api::fetch_boards().await;
-            boards.set(fetched);
+            match crate::api::fetch_boards().await {
+                Ok(fetched) => boards.set(fetched),
+                Err(e) => leptos::logging::error!("failed to fetch boards: {e}"),
+            }
             loading.set(false);
         });
     });
@@ -23,9 +25,13 @@ pub fn BoardsList() -> impl IntoView {
             return;
         }
         wasm_bindgen_futures::spawn_local(async move {
-            let board = crate::api::create_board(name).await;
-            boards.update(|bs| bs.push(board));
-            new_board_name.set(String::new());
+            match crate::api::create_board(name).await {
+                Ok(board) => {
+                    boards.update(|bs| bs.push(board));
+                    new_board_name.set(String::new());
+                }
+                Err(e) => leptos::logging::error!("failed to create board: {e}"),
+            }
         });
     };
 

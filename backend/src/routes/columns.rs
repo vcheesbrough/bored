@@ -115,11 +115,13 @@ pub async fn delete_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let _: Option<DbColumn> = state
+    match state
         .db
-        .delete(("columns", &col_id))
+        .delete::<Option<DbColumn>>(("columns", &col_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(StatusCode::NO_CONTENT)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        Some(_) => Ok(StatusCode::NO_CONTENT),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }

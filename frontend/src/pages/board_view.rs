@@ -17,8 +17,10 @@ pub fn BoardView() -> impl IntoView {
             return;
         }
         wasm_bindgen_futures::spawn_local(async move {
-            let fetched = crate::api::fetch_columns(&id).await;
-            columns.set(fetched);
+            match crate::api::fetch_columns(&id).await {
+                Ok(fetched) => columns.set(fetched),
+                Err(e) => leptos::logging::error!("failed to fetch columns: {e}"),
+            }
             loading.set(false);
         });
     });
@@ -32,9 +34,13 @@ pub fn BoardView() -> impl IntoView {
         let id = board_id();
         let next_position = columns.get_untracked().len() as i32;
         wasm_bindgen_futures::spawn_local(async move {
-            let col = crate::api::create_column(&id, name, next_position).await;
-            columns.update(|cs| cs.push(col));
-            new_col_name.set(String::new());
+            match crate::api::create_column(&id, name, next_position).await {
+                Ok(col) => {
+                    columns.update(|cs| cs.push(col));
+                    new_col_name.set(String::new());
+                }
+                Err(e) => leptos::logging::error!("failed to create column: {e}"),
+            }
         });
     };
 
