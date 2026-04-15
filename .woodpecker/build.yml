@@ -3,7 +3,7 @@ when:
 
 steps:
   check:
-    image: rust:1.85
+    image: rust:1.86
     commands:
       - rustup component add rustfmt clippy
       - cargo fmt -p backend -p shared --check
