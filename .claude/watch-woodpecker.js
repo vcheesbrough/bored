@@ -1,14 +1,24 @@
 #!/usr/bin/env node
 // Watches Woodpecker CI for the latest pipeline after a git push.
 // Outputs JSON with additionalContext summarizing results.
+// Set WOODPECKER_TOKEN env var for authenticated log access.
 
 const BASE = 'https://woodpecker.desync.link/api/repos/3';
 const POLL_INTERVAL = 8000; // ms
 const MAX_WAIT = 600000;    // 10 minutes total
+const TOKEN = process.env.WOODPECKER_TOKEN;
+
+function authHeaders() {
+  return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
+}
 
 async function api(path) {
-  const r = await fetch(`${BASE}${path}`);
+  const r = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${path}`);
+  const ct = r.headers.get('content-type') || '';
+  if (!ct.includes('application/json') && !ct.includes('json')) {
+    throw new Error(`Expected JSON but got ${ct} for ${path}`);
+  }
   return r.json();
 }
 
@@ -19,13 +29,14 @@ async function getLatestPipelineNumber() {
 }
 
 async function waitForNewPipeline(knownNumber) {
-  const deadline = Date.now() + 60000; // 60s to appear
+  const deadline = Date.now() + 90000; // 90s to appear
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL);
-    const latest = await getLatestPipelineNumber();
-    if (latest > knownNumber) return latest;
+    try {
+      const latest = await getLatestPipelineNumber();
+      if (latest > knownNumber) return latest;
+    } catch (_) { /* retry */ }
   }
-  // If no new pipeline, return the latest (might be from this push)
   return await getLatestPipelineNumber();
 }
 
@@ -43,26 +54,45 @@ async function pollUntilDone(pipelineNum) {
   throw new Error('Timed out waiting for pipeline');
 }
 
-async function getFailedLogs(pipelineNum) {
-  const steps = await api(`/pipelines/${pipelineNum}/steps`);
-  const failed = steps.filter(s => s.state === 'failure' || s.state === 'error');
+async function getFailedLogs(pipeline) {
   const logs = [];
-  for (const step of failed) {
-    try {
-      const logEntries = await api(`/pipelines/${pipelineNum}/logs/${step.id}`);
-      const text = logEntries
-        .map(e => {
-          try {
-            return Buffer.from(e.data, 'base64').toString('utf8');
-          } catch {
-            return e.data || '';
+  const workflows = pipeline.workflows || [];
+  for (const wf of workflows) {
+    const steps = wf.children || wf.steps || [];
+    const failed = steps.filter(s => s.state === 'failure' || s.state === 'error');
+    for (const step of failed) {
+      try {
+        let logEntries;
+        try {
+          // Try with auth if available
+          const r = await fetch(`${BASE}/pipelines/${pipeline.number}/logs/${step.id}`, {
+            headers: authHeaders(),
+          });
+          const ct = r.headers.get('content-type') || '';
+          if (ct.includes('json')) {
+            logEntries = await r.json();
+          } else {
+            throw new Error('not json');
           }
-        })
-        .join('')
-        .trim();
-      logs.push(`=== Step: ${step.name} (${step.state}) ===\n${text}`);
-    } catch (err) {
-      logs.push(`=== Step: ${step.name} (${step.state}) === [could not fetch logs: ${err.message}]`);
+        } catch {
+          logEntries = null;
+        }
+
+        if (logEntries) {
+          const text = logEntries
+            .map(e => {
+              try { return Buffer.from(e.data, 'base64').toString('utf8'); }
+              catch { return e.data || ''; }
+            })
+            .join('')
+            .trim();
+          logs.push(`=== Step: ${step.name} [${wf.name}] (${step.state}) ===\n${text}`);
+        } else {
+          logs.push(`=== Step: ${step.name} [${wf.name}] (${step.state}) === [logs unavailable — set WOODPECKER_TOKEN env var]`);
+        }
+      } catch (err) {
+        logs.push(`=== Step: ${step.name} [${wf.name}] (${step.state}) === [error fetching logs: ${err.message}]`);
+      }
     }
   }
   return logs;
@@ -75,11 +105,9 @@ function sleep(ms) {
 async function main() {
   let context;
   try {
-    // Record the pipeline number before we start (to detect new one)
     const before = await getLatestPipelineNumber();
     process.stderr.write(`Latest pipeline before push: #${before}\n`);
 
-    // Wait for a new pipeline to appear
     process.stderr.write('Waiting for new pipeline...\n');
     const pipelineNum = await waitForNewPipeline(before);
     process.stderr.write(`Watching pipeline #${pipelineNum}\n`);
@@ -88,11 +116,17 @@ async function main() {
     const status = pipeline.status;
     const url = `https://woodpecker.desync.link/repos/3/pipeline/${pipelineNum}`;
 
+    // Summarize step results
+    const workflows = pipeline.workflows || [];
+    const stepSummary = workflows.flatMap(wf =>
+      (wf.children || wf.steps || []).map(s => `  ${wf.name}/${s.name}: ${s.state}`)
+    ).join('\n');
+
     if (status === 'success') {
-      context = `Woodpecker pipeline #${pipelineNum} PASSED. ${url}`;
+      context = `Woodpecker pipeline #${pipelineNum} PASSED.\n${url}\nSteps:\n${stepSummary}`;
     } else {
-      const logs = await getFailedLogs(pipelineNum);
-      context = `Woodpecker pipeline #${pipelineNum} FAILED (${status}).\n${url}\n\nFailed step logs:\n${logs.join('\n\n')}`;
+      const logs = await getFailedLogs(pipeline);
+      context = `Woodpecker pipeline #${pipelineNum} FAILED (${status}).\n${url}\n\nStep summary:\n${stepSummary}\n\nFailed step logs:\n${logs.join('\n\n')}`;
     }
   } catch (err) {
     context = `Woodpecker watcher error: ${err.message}`;
