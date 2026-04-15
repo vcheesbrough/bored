@@ -8,7 +8,9 @@ pub struct ObservabilityGuard {
 
 /// Initialise structured logging. Call once as the first statement in main().
 /// The returned guard must be kept alive for the process lifetime — dropping it
-/// shuts down the Loki background task.
+/// shuts down the Loki background task is **not** guaranteed — dropping the
+/// guard detaches the task. Hold it for the process lifetime to ensure
+/// structured shutdown ordering.
 pub fn init() -> ObservabilityGuard {
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
     let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
@@ -40,6 +42,7 @@ pub fn init() -> ObservabilityGuard {
             .label("app", "bored")
             .unwrap()
             .label("env", &app_env)
+            .expect("APP_ENV contains characters invalid in a Loki label value")  
             .unwrap()
             .label("version", version)
             .unwrap()
