@@ -549,6 +549,7 @@ dependencies = [
  "axum",
  "axum-server",
  "axum-test",
+ "rustls",
  "serde",
  "serde_json",
  "shared",

@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.7"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
 tokio = { version = "1", features = ["full"] }
 shared = { path = "../shared" }
 tracing = "0.1"
