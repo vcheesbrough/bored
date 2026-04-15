@@ -51,8 +51,6 @@ steps:
     environment:
       MINI_SSH_KEY:
         from_secret: mini_ssh_key
-      LOKI_URL:
-        from_secret: loki_url
     # StrictHostKeyChecking is fine here, it is not practical to add the server's host key to the image and this is a private network
     commands:
       - |
@@ -65,4 +63,4 @@ steps:
         SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
         ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /srv/dev/mini-config/bored-stack"
         scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/srv/dev/mini-config/bored-stack/docker-compose.yml
-        ssh $$SSH_OPTS vincent@10.0.0.29 "cd /srv/dev/mini-config && BORED_VERSION=$$VERSION LOKI_URL=$$LOKI_URL ./run-stack.sh bored-stack up -d --pull always"
+        ssh $$SSH_OPTS vincent@10.0.0.29 "cd /srv/dev/mini-config && BORED_VERSION=$$VERSION ./run-stack.sh bored-stack up -d --pull always"
