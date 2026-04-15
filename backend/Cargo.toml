@@ -15,8 +15,13 @@ shared = { path = "../shared" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-loki = { version = "0.2", features = ["compat-0-2-1"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "fs"] }
 url = "2"
+surrealdb = { version = "2", features = ["kv-mem", "kv-surrealkv"] }
+ulid = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+axum-test = "15"
