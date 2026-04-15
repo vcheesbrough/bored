@@ -21,14 +21,12 @@ steps:
         from_secret: zot_ci_password
     commands:
       - |
-        echo "REGISTRY_USER length: $(echo -n "${REGISTRY_USER}" | wc -c)"
-        echo "REGISTRY_PASSWORD length: $(echo -n "${REGISTRY_PASSWORD}" | wc -c)"
-        echo "${REGISTRY_PASSWORD}" | docker login registry.desync.link -u "${REGISTRY_USER}" --password-stdin
+        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
         CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=${CARGO_VERSION}.${CI_PIPELINE_NUMBER}
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
         docker buildx build --push \
-          -t registry.desync.link/bored:${CI_COMMIT_SHA} \
-          -t registry.desync.link/bored:${VERSION} .
+          -t registry.desync.link/bored:$$CI_COMMIT_SHA \
+          -t registry.desync.link/bored:$$VERSION .
 
   tag-release:
     image: alpine/git
@@ -38,9 +36,9 @@ steps:
     commands:
       - |
         CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=${CARGO_VERSION}.${CI_PIPELINE_NUMBER}
-        git tag v${VERSION}
-        git push https://x-token:${GITHUB_TOKEN}@github.com/${CI_REPO}.git v${VERSION}
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
+        git tag v$$VERSION
+        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
 
   deploy:
     image: alpine/ssh
@@ -50,6 +48,6 @@ steps:
     commands:
       - |
         mkdir -p ~/.ssh
-        echo "${MINI_SSH_KEY}" > ~/.ssh/id_rsa
+        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
         ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no vincent@mini "./run-stack.sh bored-stack up -d --pull always"
