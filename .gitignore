@@ -4,3 +4,4 @@
 .env
 *.bak
 lcov.info
+.claude/settings.local.json
