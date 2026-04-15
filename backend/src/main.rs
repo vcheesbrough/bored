@@ -3,7 +3,10 @@ mod models;
 mod observability;
 mod routes;
 
-use axum::{routing::{delete, get, post, put}, Router};
+use axum::{
+    routing::{delete, get, post, put},
+    Router,
+};
 use axum_server::tls_rustls::RustlsConfig;
 use routes::boards::AppState;
 use std::net::SocketAddr;
@@ -35,8 +38,7 @@ pub async fn app(state: AppState) -> Router {
 async fn main() {
     let _obs = observability::init();
 
-    let db_path =
-        std::env::var("DATABASE_PATH").unwrap_or_else(|_| "/data/bored.db".to_string());
+    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "/data/bored.db".to_string());
     let db = db::connect_persistent(&db_path)
         .await
         .expect("failed to connect to database");
@@ -174,9 +176,7 @@ mod tests {
             .await;
         let board: shared::Board = create_resp.json();
 
-        let del_resp = server
-            .delete(&format!("/api/boards/{}", board.id))
-            .await;
+        let del_resp = server.delete(&format!("/api/boards/{}", board.id)).await;
         del_resp.assert_status(StatusCode::NO_CONTENT);
 
         let get_resp = server.get(&format!("/api/boards/{}", board.id)).await;
