@@ -18,11 +18,12 @@ Semantic versioning (`MAJOR.MINOR.PATCH`) with `0.x` signalling pre-stability. `
 | Iteration | `Cargo.toml` version | Example built version |
 |---|---|---|
 | 1 — Walking Skeleton | `0.1` | `0.1.42` |
-| 2 — Boards & Columns | `0.2` | `0.2.7` |
-| 3 — Cards | `0.3` | `0.3.15` |
-| 4 — Auth | `0.4` | `0.4.3` |
-| 5 — SSE + Drag-drop | `0.5` | `0.5.11` |
-| 6 — Git Links | `0.6` | `0.6.2` |
+| 2 — Structured Logging | `0.2` | `0.2.3` |
+| 3 — Boards & Columns | `0.3` | `0.3.7` |
+| 4 — Cards | `0.4` | `0.4.15` |
+| 5 — Auth | `0.5` | `0.5.3` |
+| 6 — SSE + Drag-drop | `0.6` | `0.6.11` |
+| 7 — Git Links | `0.7` | `0.7.2` |
 | Public release | `1.0` | `1.0.1` |
 
 **On merge to main**, Woodpecker constructs `VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}`, tags the git commit (`v0.x.N`), and tags the Docker image with `:<sha>` and `:0.x.N`. No `:latest` tag is applied — deployments must reference an explicit version.
@@ -333,7 +334,7 @@ steps:
         claude --no-interactive -p "
         You are reviewing a pull request for **bored**, a full-stack Rust Kanban board app.
         Stack: Axum backend, Leptos WASM frontend, SurrealDB embedded, OIDC auth (openidconnect),
-        SSE real-time updates, tower-sessions, shared types crate.
+        SSE real-time updates, tower-sessions, tracing+tracing-loki structured logging, shared types crate.
 
         Each PR corresponds to one iteration and must satisfy its Gherkin acceptance scenarios
         before merging. The patch version is injected by CI — the only manual version change
@@ -551,7 +552,92 @@ Feature: Docker build and deployment
 
 ---
 
-### Iteration 2 — Boards & Columns (no auth)
+### Iteration 2 — Structured Logging → Grafana Loki
+
+HTTP access logs and application logic logs sent to Grafana Loki via `tracing-loki`. Console output for local dev; JSON format in production. Logging is optional at runtime — if `LOKI_URL` is unset the backend starts normally with console-only output.
+
+**Crate additions (`backend/Cargo.toml`):**
+```toml
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing-loki = { version = "0.2", features = ["compat-0-2-1"] }
+url = "2"
+```
+
+**New file `backend/src/observability.rs`:**
+- `pub fn init() -> ObservabilityGuard` — called as the first line in `main()`
+- Reads `LOG_LEVEL` (default `"info"`), `APP_ENV` (default `"development"`), `LOKI_URL` (optional)
+- Console layer: pretty in dev, `json().flatten_event(true)` in production
+- Optional Loki layer with labels `app="bored"`, `env=<APP_ENV>`, `version=<CARGO_PKG_VERSION>` (level label added automatically by `tracing-loki`)
+- `ObservabilityGuard` holds the Loki background task `JoinHandle` — must stay alive for process lifetime
+- `_loki_task` field (underscore-prefix, not plain `_`) keeps handle alive
+
+**Changes to `backend/src/main.rs`:**
+- `mod observability;` + `use tower_http::trace::TraceLayer;`
+- `let _obs = observability::init();` as first line in `main()`
+- `TraceLayer::new_for_http()` added to `app()` router (responses logged at INFO, request-open at DEBUG)
+- Replace any `println!` startup message with `tracing::info!(addr = %addr, "bored backend listening")`
+
+**New env vars (add to `deploy/docker-compose.yml`):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LOKI_URL` | absent = disabled | Base URL of Loki instance (e.g. `http://loki:3100`) — crate appends `/loki/api/v1/push` |
+| `LOG_LEVEL` | `info` | `EnvFilter` directive (e.g. `info,tower_http=debug`) |
+| `APP_ENV` | `development` | Loki `env` label; switches fmt layer (pretty vs JSON) |
+
+**Loki labels per log line:** `app="bored"`, `env=<APP_ENV>`, `version=<CARGO_PKG_VERSION>`, `level=<INFO|DEBUG|WARN|ERROR>`
+
+`CARGO_PKG_VERSION` is set by Cargo at compile time via `env!("CARGO_PKG_VERSION")`, so it reflects the `Cargo.toml` version (MAJOR.MINOR) baked into each build.
+
+**Example LogQL queries:**
+```logql
+{app="bored", env="production"}
+{app="bored", env="production", version="0.2"}
+{app="bored", level="ERROR"}
+{app="bored"} | json | status >= 500
+```
+
+**Tests:** existing `cargo test -p backend` still passes — `TraceLayer` is a no-op when no global subscriber is set. No test calls `observability::init()` to avoid `SetGlobalDefaultError` from multiple-init conflicts.
+
+**Gherkin scenarios:**
+```gherkin
+Feature: HTTP access logging
+  Scenario: Every request produces a log line
+    Given the backend is running with LOG_LEVEL=info
+    When GET /health is called
+    Then a log line is emitted at INFO with method, URI, status, and latency
+
+  Scenario: Log level filters debug events
+    Given the backend is running with LOG_LEVEL=info
+    When GET /health is called
+    Then no DEBUG-level request-open span event is emitted to the console
+
+Feature: Loki shipping
+  Scenario: Logs reach Loki when LOKI_URL is set
+    Given LOKI_URL points to a running Loki instance
+    And APP_ENV=production
+    When GET /health is called several times
+    Then querying Loki with {app="bored", env="production"} returns those log lines
+
+  Scenario: Backend starts normally without LOKI_URL
+    Given LOKI_URL is not set
+    When the backend starts
+    Then it logs to stdout only with no errors
+
+Feature: Log format
+  Scenario: Production logs are JSON
+    Given APP_ENV=production
+    When the backend emits a log line
+    Then the output is valid JSON with top-level fields (timestamp, level, message, etc.)
+```
+
+**Deliverable:** Every HTTP request visible in Grafana Explore under `{app="bored"}`. Application code can emit structured events via `tracing::info!()` / `warn!()` / `error!()` and they appear in Loki automatically.
+
+---
+
+### Iteration 3 — Boards & Columns (no auth)
 
 - SurrealDB embedded setup + schema (boards, columns tables only)
 - `shared/` request/response types for boards + columns
@@ -626,7 +712,7 @@ Feature: Frontend board view
 
 ---
 
-### Iteration 3 — Cards
+### Iteration 4 — Cards
 
 - SurrealDB cards table + schema
 - `shared/` types for cards
@@ -687,7 +773,7 @@ Feature: Frontend board view
 
 ---
 
-### Iteration 4 — Auth (OIDC + PKCE)
+### Iteration 5 — Auth (OIDC + PKCE)
 
 - OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
 - `tower-sessions` backed by SurrealDB
@@ -734,7 +820,7 @@ Feature: Authentication
 
 ---
 
-### Iteration 5 — Real-time (SSE) + Drag-and-Drop
+### Iteration 6 — Real-time (SSE) + Drag-and-Drop
 
 - `broadcast::Sender<BoardEvent>` in `AppState`; all mutation routes fire events
 - `GET /api/events` SSE endpoint with keepalive
@@ -791,7 +877,7 @@ Feature: Columns
 
 ---
 
-### Iteration 6 — Git Links
+### Iteration 7 — Git Links
 
 - `git_links` table + schema
 - `shared/` types for git links
