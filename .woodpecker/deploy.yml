@@ -1,0 +1,20 @@
+when:
+  - event: deploy
+
+steps:
+  deploy:
+    image: alpine
+    environment:
+      MINI_SSH_KEY:
+        from_secret: mini_ssh_key
+    # StrictHostKeyChecking is fine here, it is not practical to add the server's host key to the image and this is a private network
+    commands:
+      - |
+        apk add -q openssh-client
+        mkdir -p ~/.ssh
+        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /srv/dev/mini-config/bored-stack"
+        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/srv/dev/mini-config/bored-stack/docker-compose.yml
+        ssh $$SSH_OPTS vincent@10.0.0.29 "cd /srv/dev/mini-config && BORED_VERSION=$$CI_COMMIT_SHA ./run-stack.sh bored-stack up -d --pull always"
