@@ -10,6 +10,7 @@ services:
       - proxy-backend
     labels:
       - traefik.enable=true
+      - traefik.http.routers.bored.entrypoints=websecure
       - traefik.http.routers.bored.rule=Host(`bored.desync.link`)
       - traefik.http.routers.bored.tls=true
       - traefik.http.routers.bored.tls.certresolver=myresolver
