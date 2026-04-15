@@ -6,7 +6,7 @@ when:
 
 steps:
   review:
-    image: registry.desync.link/claude-pr-agent:31e0d33
+    image: registry.desync.link/claude-pr-agent:acb5df8
     pull: true
     environment:
       CLAUDE_CODE_OAUTH_TOKEN:
