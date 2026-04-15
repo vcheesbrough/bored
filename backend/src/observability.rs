@@ -15,9 +15,15 @@ pub fn init() -> ObservabilityGuard {
     let loki_url = std::env::var("LOKI_URL").ok();
     let version = env!("CARGO_PKG_VERSION");
 
-    let filter = EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info"));
-
+    // All layers go into a single Vec<Box<dyn Layer<Registry>>> so the
+    // subscriber type stays as `Layered<Vec<...>, Registry>` throughout.
+    // EnvFilter must be in the same Vec — if it were added via a separate
+    // .with() call the subscriber type becomes Layered<EnvFilter, Registry>
+    // and the Vec (typed against bare Registry) no longer satisfies the bound.
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
+
+    let filter = EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    layers.push(Box::new(filter));
 
     // Console layer: JSON in production, pretty otherwise
     let fmt: Box<dyn Layer<Registry> + Send + Sync> = if app_env == "production" {
@@ -45,10 +51,7 @@ pub fn init() -> ObservabilityGuard {
         None
     };
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layers)
-        .init();
+    tracing_subscriber::registry().with(layers).init();
 
     ObservabilityGuard {
         _loki_task: loki_task,
