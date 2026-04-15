@@ -41,12 +41,13 @@ steps:
         git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
 
   deploy:
-    image: alpine/ssh
+    image: alpine
     environment:
       MINI_SSH_KEY:
         from_secret: mini_ssh_key
     commands:
       - |
+        apk add -q openssh-client
         mkdir -p ~/.ssh
         echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
