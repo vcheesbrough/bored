@@ -1,8 +1,8 @@
 when:
-  event: [push, manual]
+  - event: [push, manual]
 
 steps:
-  - name: check
+  check:
     image: rust:1.85
     commands:
       - rustup component add rustfmt clippy
@@ -10,7 +10,7 @@ steps:
       - cargo clippy -p backend -p shared -- -D warnings
       - cargo test -p backend -p shared
 
-  - name: build-and-push
+  build-and-push:
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -28,7 +28,7 @@ steps:
           -t registry.desync.link/bored:${CI_COMMIT_SHA} \
           -t registry.desync.link/bored:${VERSION} .
 
-  - name: tag-release
+  tag-release:
     image: alpine/git
     environment:
       GITHUB_TOKEN:
@@ -40,7 +40,7 @@ steps:
         git tag v${VERSION}
         git push https://x-token:${GITHUB_TOKEN}@github.com/${CI_REPO}.git v${VERSION}
 
-  - name: deploy
+  deploy:
     image: alpine/ssh
     environment:
       MINI_SSH_KEY:
