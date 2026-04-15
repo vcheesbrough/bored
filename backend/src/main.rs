@@ -1,13 +1,20 @@
+mod observability;
+
 use axum::{routing::get, Router};
 use axum_server::tls_rustls::RustlsConfig;
 use std::net::SocketAddr;
+use tower_http::trace::TraceLayer;
 
 pub fn app() -> Router {
-    Router::new().route("/health", get(health))
+    Router::new()
+        .route("/health", get(health))
+        .layer(TraceLayer::new_for_http())
 }
 
 #[tokio::main]
 async fn main() {
+    let _obs = observability::init();
+
     let cert = std::env::var("TLS_CERT").unwrap_or_else(|_| "/app/cert.pem".to_string());
     let key = std::env::var("TLS_KEY").unwrap_or_else(|_| "/app/key.pem".to_string());
 
@@ -16,7 +23,7 @@ async fn main() {
         .expect("failed to load TLS config");
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 443));
-    println!("bored backend listening on :443");
+    tracing::info!(%addr, "bored backend listening");
     axum_server::bind_rustls(addr, config)
         .serve(app().into_make_service())
         .await
