@@ -1,0 +1,13 @@
+services:
+  bored:
+    image: registry.desync.link/bored:${BORED_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - '8443:443'
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.bored.rule=Host(`bored.desync.link`)
+      - traefik.http.routers.bored.tls=true
+      - traefik.http.routers.bored.tls.certresolver=le
+      - traefik.http.services.bored.loadbalancer.server.port=443
+      - traefik.http.services.bored.loadbalancer.server.scheme=https
