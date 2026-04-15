@@ -1,4 +1,12 @@
+mod api;
+mod pages;
+
 use leptos::prelude::*;
+use leptos_router::{
+    components::{Route, Router, Routes},
+    path,
+};
+use pages::{board_view::BoardView, boards_list::BoardsList};
 
 fn main() {
     mount_to_body(App);
@@ -7,6 +15,11 @@ fn main() {
 #[component]
 fn App() -> impl IntoView {
     view! {
-        <h1>"bored"</h1>
+        <Router>
+            <Routes fallback=|| view! { <p>"Not found"</p> }>
+                <Route path=path!("/") view=BoardsList />
+                <Route path=path!("/boards/:id") view=BoardView />
+            </Routes>
+        </Router>
     }
 }
