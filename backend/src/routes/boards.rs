@@ -93,23 +93,12 @@ pub async fn delete_board(
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     // Delete all columns belonging to this board
-    let cols: Vec<crate::models::DbColumn> = state
+    state
         .db
-        .query("SELECT * FROM columns WHERE board = type::thing('boards', $id)")
+        .query("DELETE columns WHERE board = type::thing('boards', $id)")
         .bind(("id", id.clone()))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for col in cols {
-        let col_id = col.id.id.to_raw();
-        let _: Option<crate::models::DbColumn> = state
-            .db
-            .delete(("columns", &col_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
 
     // Delete the board itself
     let _: Option<DbBoard> = state

@@ -1,49 +1,41 @@
 use gloo_net::http::Request;
 
-pub async fn fetch_boards() -> Vec<shared::Board> {
+pub async fn fetch_boards() -> Result<Vec<shared::Board>, gloo_net::Error> {
     Request::get("/api/boards")
         .send()
-        .await
-        .expect("failed to fetch boards")
+        .await?
         .json::<Vec<shared::Board>>()
         .await
-        .expect("failed to parse boards")
 }
 
-pub async fn create_board(name: String) -> shared::Board {
+pub async fn create_board(name: String) -> Result<shared::Board, gloo_net::Error> {
     Request::post("/api/boards")
         .json(&shared::CreateBoardRequest { name })
         .expect("failed to serialize create board request")
         .send()
-        .await
-        .expect("failed to create board")
+        .await?
         .json::<shared::Board>()
         .await
-        .expect("failed to parse board")
 }
 
-pub async fn fetch_columns(board_id: &str) -> Vec<shared::Column> {
+pub async fn fetch_columns(board_id: &str) -> Result<Vec<shared::Column>, gloo_net::Error> {
     Request::get(&format!("/api/boards/{board_id}/columns"))
         .send()
-        .await
-        .expect("failed to fetch columns")
+        .await?
         .json::<Vec<shared::Column>>()
         .await
-        .expect("failed to parse columns")
 }
 
 pub async fn create_column(
     board_id: &str,
     name: String,
     position: i32,
-) -> shared::Column {
+) -> Result<shared::Column, gloo_net::Error> {
     Request::post(&format!("/api/boards/{board_id}/columns"))
         .json(&shared::CreateColumnRequest { name, position })
         .expect("failed to serialize create column request")
         .send()
-        .await
-        .expect("failed to create column")
+        .await?
         .json::<shared::Column>()
         .await
-        .expect("failed to parse column")
 }
