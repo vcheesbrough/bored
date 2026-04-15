@@ -1,5 +1,5 @@
 # Iteration 1: backend only. Frontend stage added in iteration 2.
-FROM rust:1.86@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS builder
+FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS builder
 WORKDIR /app
 COPY . .
 RUN cargo test -p backend -p shared --lib
