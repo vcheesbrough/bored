@@ -28,7 +28,6 @@ steps:
         VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
         docker buildx build --push \
           -t registry.desync.link/bored:$$CI_COMMIT_SHA \
-          -t registry.desync.link/bored:$$VERSION \
           -t registry.desync.link/bored:$$VERSION .
 
   tag-release:
