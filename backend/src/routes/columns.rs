@@ -24,7 +24,9 @@ pub async fn list_columns(
 
     let columns: Vec<DbColumn> = state
         .db
-        .query("SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC")
+        .query(
+            "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
+        )
         .bind(("id", board_id.clone()))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
