@@ -1,5 +1,7 @@
+#[cfg(test)]
+use surrealdb::engine::local::Mem;
 use surrealdb::{
-    engine::local::{Db, Mem, SurrealKv},
+    engine::local::{Db, SurrealKv},
     Surreal,
 };
 
@@ -9,6 +11,7 @@ pub async fn connect_persistent(path: &str) -> surrealdb::Result<Surreal<Db>> {
     Ok(db)
 }
 
+#[cfg(test)]
 pub async fn connect_mem() -> surrealdb::Result<Surreal<Db>> {
     let db = Surreal::new::<Mem>(()).await?;
     init(&db).await?;
