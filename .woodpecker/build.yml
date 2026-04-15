@@ -52,4 +52,6 @@ steps:
         mkdir -p ~/.ssh
         echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no vincent@10.0.0.29 "cd /srv/dev/mini-config && ./run-stack.sh bored-stack up -d --pull always"
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no vincent@10.0.0.29 "cd /srv/dev/mini-config && BORED_VERSION=$$VERSION ./run-stack.sh bored-stack up -d --pull always"
