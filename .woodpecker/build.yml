@@ -22,8 +22,8 @@ steps:
     commands:
       - |
         echo "${REGISTRY_PASSWORD}" | docker login registry.desync.link -u "${REGISTRY_USER}" --password-stdin
-        CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | sed 's/\.[0-9]*$//')
-        VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=${CARGO_VERSION}.${CI_PIPELINE_NUMBER}
         docker buildx build --push \
           -t registry.desync.link/bored:${CI_COMMIT_SHA} \
           -t registry.desync.link/bored:${VERSION} .
@@ -35,8 +35,8 @@ steps:
         from_secret: github_token
     commands:
       - |
-        CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | sed 's/\.[0-9]*$//')
-        VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=${CARGO_VERSION}.${CI_PIPELINE_NUMBER}
         git tag v${VERSION}
         git push https://x-token:${GITHUB_TOKEN}@github.com/${CI_REPO}.git v${VERSION}
 
