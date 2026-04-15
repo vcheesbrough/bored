@@ -1,4 +1,6 @@
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry};
+use tracing_subscriber::{
+    layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry,
+};
 
 pub struct ObservabilityGuard {
     _loki_task: Option<tokio::task::JoinHandle<()>>,
@@ -48,5 +50,7 @@ pub fn init() -> ObservabilityGuard {
         .with(layers)
         .init();
 
-    ObservabilityGuard { _loki_task: loki_task }
+    ObservabilityGuard {
+        _loki_task: loki_task,
+    }
 }
