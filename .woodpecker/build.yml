@@ -3,11 +3,12 @@ when:
 
 steps:
   check:
-    image: docker:27-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+    image: rust:1.86
     commands:
-      - docker build --target check .
+      - rustup component add rustfmt clippy
+      - cargo fmt -p backend -p shared --check
+      - cargo clippy -p backend -p shared -- -D warnings
+      - cargo test -p backend -p shared
 
   build-and-push:
     when:
