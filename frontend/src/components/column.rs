@@ -6,7 +6,7 @@ use crate::components::card_modal::CardModal;
 
 #[component]
 pub fn ColumnView(column: shared::Column) -> impl IntoView {
-    let cards = RwSignal::new(Vec::<shared::Card>::new());
+    let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
     let selected_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
     let show_add = RwSignal::new(false);
     let col_id = column.id.clone();
@@ -15,7 +15,7 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
         let id = col_id.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::fetch_cards(&id).await {
-                Ok(fetched) => cards.set(fetched),
+                Ok(fetched) => cards.set(fetched.into_iter().map(RwSignal::new).collect()),
                 Err(e) => leptos::logging::error!("failed to fetch cards: {e}"),
             }
         });
@@ -26,20 +26,20 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
     });
 
     let on_card_updated = Callback::new(move |updated: shared::Card| {
-        cards.update(|cs| {
-            if let Some(c) = cs.iter_mut().find(|c| c.id == updated.id) {
-                *c = updated;
+        cards.with_untracked(|cs| {
+            if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == updated.id) {
+                sig.set(updated);
             }
         });
     });
 
     let on_card_delete = Callback::new(move |card_id: String| {
-        cards.update(|cs| cs.retain(|c| c.id != card_id));
+        cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
         selected_card.set(None);
     });
 
     let on_card_created = Callback::new(move |card: shared::Card| {
-        cards.update(|cs| cs.push(card));
+        cards.update(|cs| cs.push(RwSignal::new(card)));
     });
 
     view! {
@@ -56,10 +56,10 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
             <div class="card-list">
                 <For
                     each=move || cards.get()
-                    key=|c| c.id.clone()
+                    key=|sig| sig.get_untracked().id.clone()
                     children={
                         let on_card_click = on_card_click.clone();
-                        move |card| view! { <CardItem card=card on_click=on_card_click.clone() /> }
+                        move |sig| view! { <CardItem card=sig on_click=on_card_click.clone() /> }
                     }
                 />
             </div>
