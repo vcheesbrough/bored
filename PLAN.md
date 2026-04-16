@@ -985,7 +985,8 @@ Feature: Authentication
 - `GET /api/events` SSE endpoint with keepalive
 - Frontend: `EventSource` subscriber reconciles remote updates into Leptos signals
 - HTML5 drag-and-drop for card reorder within column and across columns
-- Column reorder via drag-and-drop + `POST /api/columns/:id/reorder`
+- Column reorder via drag-and-drop on column headers; a drag handle (⠿ grip icon) appears on column header hover; dropping a column between two others recomputes all `position` values and bulk-updates via `PUT /api/boards/:id/columns/reorder`
+- `PUT /api/boards/:id/columns/reorder` accepts `{ order: [col_id, …] }` — an ordered list of all column IDs for the board; server assigns `position = index` for each
 
 **Tests:**
 - Integration: test client subscribes to `/api/events`, mutation performed, correct `BoardEvent` variant received within timeout; keepalive comment sent after idle period
@@ -1025,11 +1026,21 @@ Feature: Drag and drop
     When user A drags a card to a new column
     Then user B sees the card move without reloading
 
-Feature: Columns
-  Scenario: Reorder columns
+Feature: Column reorder
+  Scenario: Reorder columns via drag and drop
     Given a board has columns [A, B, C]
-    When POST /api/columns/:id/reorder is called with new positions
+    When the user drags column C to the first position
+    Then the board displays [C, A, B] and persists after reload
+
+  Scenario: Reorder columns via API
+    Given a board has columns [A, B, C] with known IDs
+    When PUT /api/boards/:id/columns/reorder is called with order [C, A, B]
     Then GET /api/boards/:id/columns returns columns in the new order
+
+  Scenario: Other users see column reorder in real time
+    Given two users are viewing the same board
+    When user A reorders the columns
+    Then user B sees the new column order without reloading
 ```
 
 **Deliverable:** Live multi-user board; changes from any client appear instantly for all others.
