@@ -108,6 +108,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_board_seeds_default_columns() {
+        let server = test_app().await;
+
+        let create_resp = server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "Seeded".to_string(),
+            })
+            .await;
+        create_resp.assert_status(StatusCode::CREATED);
+        let board: shared::Board = create_resp.json();
+
+        let list_resp = server
+            .get(&format!("/api/boards/{}/columns", board.id))
+            .await;
+        list_resp.assert_status_ok();
+        let columns: Vec<shared::Column> = list_resp.json();
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Todo", "Done"]);
+        assert_eq!(columns[0].position, 0);
+        assert_eq!(columns[1].position, 1);
+    }
+
+    #[tokio::test]
     async fn create_board_and_list() {
         let server = test_app().await;
 

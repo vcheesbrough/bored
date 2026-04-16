@@ -22,9 +22,10 @@ Semantic versioning (`MAJOR.MINOR.PATCH`) with `0.x` signalling pre-stability. `
 | 3 — Boards & Columns | `0.3` | `0.3.7` |
 | 4 — Cards | `0.4` | `0.4.15` |
 | 5 — UI Overhaul | `0.5` | `0.5.1` |
-| 6 — Auth | `0.6` | `0.6.3` |
-| 7 — SSE + Drag-drop | `0.7` | `0.7.11` |
-| 8 — Git Links | `0.8` | `0.8.2` |
+| 6 — Markdown Cards | `0.6` | `0.6.4` |
+| 7 — Auth | `0.7` | `0.7.3` |
+| 8 — SSE + Drag-drop | `0.8` | `0.8.11` |
+| 9 — Git Links | `0.9` | `0.9.2` |
 | Public release | `1.0` | `1.0.1` |
 
 **On merge to main**, Woodpecker constructs `VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}`, tags the git commit (`v0.x.N`), and tags the Docker image with `:<sha>` and `:0.x.N`. No `:latest` tag is applied — deployments must reference an explicit version.
@@ -819,7 +820,119 @@ Feature: Visual design
 
 ---
 
-### Iteration 6 — Auth (OIDC + PKCE)
+### Iteration 6 — Markdown Cards
+
+- Replace `title` + `description` on cards with a single `body` field storing markdown
+- Board card items render the first few lines of the body as HTML, visually clamped with CSS
+- Card modal opens showing rendered markdown; clicking into the body swaps to a raw monospace textarea for editing; blurring swaps back to the rendered view
+- No explicit save — edits are debounced and auto-persisted as the user types
+- Markdown rendered with `pulldown-cmark` (pure-Rust, WASM-compatible)
+- No HTML sanitisation — single-user trusted content; documented assumption to revisit at the multi-user iteration
+
+**Schema changes:**
+- `cards` table: drop `title`, rename `description` → `body`, change type `option<string>` → `string` (default empty)
+- Pre-1.0 migration: a one-off `UPDATE cards SET body = string::concat(title, "\n\n", description ?? "")` run before the schema change on the running instance, then `REMOVE FIELD title ON cards` and `REMOVE FIELD description ON cards`. Acceptable to reset in dev.
+
+**API changes:**
+- `POST /api/columns/:id/cards` → body `{ body: string }`
+- `PUT /api/cards/:id` → body `{ body?, position?, column_id? }`
+- `Card` response: `{ id, column_id, body, position, created_at, updated_at }`
+- `shared::CreateCardRequest` / `UpdateCardRequest` / `Card` updated accordingly
+
+**Frontend changes:**
+- Add `pulldown-cmark` to `frontend/Cargo.toml`
+- New `frontend/src/components/markdown.rs` — `MarkdownPreview` component: renders markdown to HTML via `pulldown-cmark` and injects via `inner_html`
+- `CardItem` renders `<MarkdownPreview body=… />`, wrapped in a container that uses `-webkit-line-clamp: 3` (or `max-height` + fade-out mask) so only a few lines show
+- `CardModal`: single body region that toggles between two visual modes driven by a `editing: RwSignal<bool>`:
+  - **Rendered mode (default on open):** `<MarkdownPreview>` in the modal body, clickable; receives focus on click and flips `editing = true`. Empty body shows a muted placeholder (e.g. "*Click to edit*").
+  - **Edit mode:** `<textarea>` with `font-family: ui-monospace, SFMono-Regular, Menlo, monospace` and preserved whitespace, showing raw markdown. Autofocuses on entry and places the caret at the click position when practical. `on:blur` flips `editing = false` and restores the rendered view. `Escape` also exits to rendered mode without discarding the typed body.
+  - Either mode occupies the same box so the modal doesn't jump when toggling.
+  - No Save button — a debounced effect (500 ms after the last keystroke) fires `PUT /api/cards/:id` with the current body. A small status indicator in the modal footer shows `Saving…` / `Saved` / `Save failed`. A final flush on modal close ensures pending edits are persisted before the card signal is dropped.
+- `AddCardModal`: single textarea (title input removed); submit disabled while body is empty. Unchanged from explicit-submit because the card doesn't exist yet — we need a single `POST` to create it.
+- Styling for rendered markdown inside cards and the modal preview — headings slightly smaller than the modal title, code blocks on `--surface-2`, lists/links themed to the zinc palette
+
+**Tests:**
+- Integration (backend, `axum_test`): cards CRUD round-trips `body`; response JSON no longer contains `title` or `description`
+- Markdown-specific: creating a card with `body = ""` returns 400; long bodies preserved verbatim
+- `cargo build -p frontend --target wasm32-unknown-unknown` passes
+
+**CI steps:** unchanged
+
+```gherkin
+Feature: Markdown cards
+  Scenario: Create a card with a markdown body
+    Given a column exists
+    When POST /api/columns/:id/cards is called with {"body": "# Fix login\n- investigate SSO"}
+    Then the card is created with that body
+    And GET /api/cards/:id returns the same body verbatim
+
+  Scenario: Board preview renders the first lines
+    Given a card with body "# Deploy\nSteps:\n1. Tag\n2. Push\n3. Smoke test"
+    When the user views the card on the board
+    Then "Deploy" is rendered as a heading and the first steps are visible, clamped to roughly 3 lines
+
+  Scenario: Modal opens in rendered mode
+    Given a card with body "# Deploy\n- tag release"
+    When the user clicks the card to open the modal
+    Then the body region shows rendered markdown (heading + bulleted list)
+    And no textarea is visible
+
+  Scenario: Clicking the rendered body enters edit mode
+    Given the card modal is open in rendered mode
+    When the user clicks the body region
+    Then the rendered view is replaced by a focused textarea showing the raw markdown
+    And the textarea is rendered in a monospace font
+
+  Scenario: Blurring the textarea returns to rendered mode
+    Given the card modal is in edit mode
+    When the user clicks outside the textarea (or presses Escape)
+    Then the textarea is replaced by the rendered markdown view
+    And any edits remain in the body
+
+  Scenario: Typing in edit mode updates the rendered view on blur
+    Given the card modal is in edit mode with body "hello"
+    When the user appends " **world**" and blurs
+    Then the rendered view shows "hello world" with "world" in bold weight
+
+  Scenario: Card body auto-saves after the user stops typing
+    Given the card modal is open on an existing card
+    When the user edits the body and stops typing for 500 ms
+    Then a PUT /api/cards/:id is sent exactly once with the latest body
+    And the status indicator shows "Saved"
+
+  Scenario: Rapid typing is debounced into a single save
+    Given the card modal is open on an existing card
+    When the user types continuously for 2 seconds without pausing longer than 500 ms
+    Then only one PUT /api/cards/:id is sent, after typing stops
+    And the body on the server matches the final textarea content
+
+  Scenario: Closing the modal flushes pending edits
+    Given the user has just typed into the body textarea
+    When they close the modal before the debounce elapses
+    Then the pending body is persisted via PUT /api/cards/:id before the modal unmounts
+
+  Scenario: Card modal has no Save button
+    Given the card modal is open
+    Then no button labelled "Save" is visible
+    And the only modal actions are "Delete" and close (×)
+
+  Scenario: Empty body is rejected on create
+    Given the user opens the Add Card modal
+    When they submit with an empty body
+    Then the submit button is disabled and the request is not sent
+
+  Scenario: No title field remains on the Card API
+    Given a card exists
+    When GET /api/cards/:id is called
+    Then the response JSON keys are exactly [id, column_id, body, position, created_at, updated_at]
+    And do not contain "title" or "description"
+```
+
+**Deliverable:** Cards on the board show a short rendered-markdown preview. The modal edits markdown with a live preview. No card titles anywhere in the app.
+
+---
+
+### Iteration 7 — Auth (OIDC + PKCE)
 
 - OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
 - `tower-sessions` backed by SurrealDB
@@ -866,13 +979,14 @@ Feature: Authentication
 
 ---
 
-### Iteration 7 — Real-time (SSE) + Drag-and-Drop
+### Iteration 8 — Real-time (SSE) + Drag-and-Drop
 
 - `broadcast::Sender<BoardEvent>` in `AppState`; all mutation routes fire events
 - `GET /api/events` SSE endpoint with keepalive
 - Frontend: `EventSource` subscriber reconciles remote updates into Leptos signals
 - HTML5 drag-and-drop for card reorder within column and across columns
-- Column reorder via drag-and-drop + `POST /api/columns/:id/reorder`
+- Column reorder via drag-and-drop on column headers; a drag handle (⠿ grip icon) appears on column header hover; dropping a column between two others recomputes all `position` values and bulk-updates via `PUT /api/boards/:id/columns/reorder`
+- `PUT /api/boards/:id/columns/reorder` accepts `{ order: [col_id, …] }` — an ordered list of all column IDs for the board; server assigns `position = index` for each
 
 **Tests:**
 - Integration: test client subscribes to `/api/events`, mutation performed, correct `BoardEvent` variant received within timeout; keepalive comment sent after idle period
@@ -912,18 +1026,28 @@ Feature: Drag and drop
     When user A drags a card to a new column
     Then user B sees the card move without reloading
 
-Feature: Columns
-  Scenario: Reorder columns
+Feature: Column reorder
+  Scenario: Reorder columns via drag and drop
     Given a board has columns [A, B, C]
-    When POST /api/columns/:id/reorder is called with new positions
+    When the user drags column C to the first position
+    Then the board displays [C, A, B] and persists after reload
+
+  Scenario: Reorder columns via API
+    Given a board has columns [A, B, C] with known IDs
+    When PUT /api/boards/:id/columns/reorder is called with order [C, A, B]
     Then GET /api/boards/:id/columns returns columns in the new order
+
+  Scenario: Other users see column reorder in real time
+    Given two users are viewing the same board
+    When user A reorders the columns
+    Then user B sees the new column order without reloading
 ```
 
 **Deliverable:** Live multi-user board; changes from any client appear instantly for all others.
 
 ---
 
-### Iteration 8 — Git Links
+### Iteration 9 — Git Links
 
 - `git_links` table + schema
 - `shared/` types for git links

@@ -18,6 +18,28 @@ pub async fn create_board(name: String) -> Result<shared::Board, gloo_net::Error
         .await
 }
 
+pub async fn delete_board(board_id: &str) -> Result<(), gloo_net::Error> {
+    let resp = Request::delete(&format!("/api/boards/{board_id}"))
+        .send()
+        .await?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(gloo_net::Error::GlooError(format!(
+            "delete_board: server returned {}",
+            resp.status()
+        )))
+    }
+}
+
+pub async fn fetch_board(board_id: &str) -> Result<shared::Board, gloo_net::Error> {
+    Request::get(&format!("/api/boards/{board_id}"))
+        .send()
+        .await?
+        .json::<shared::Board>()
+        .await
+}
+
 pub async fn fetch_columns(board_id: &str) -> Result<Vec<shared::Column>, gloo_net::Error> {
     Request::get(&format!("/api/boards/{board_id}/columns"))
         .send()
@@ -38,6 +60,32 @@ pub async fn create_column(
         .await?
         .json::<shared::Column>()
         .await
+}
+
+pub async fn update_column(
+    column_id: &str,
+    payload: shared::UpdateColumnRequest,
+) -> Result<shared::Column, gloo_net::Error> {
+    Request::put(&format!("/api/columns/{column_id}"))
+        .json(&payload)?
+        .send()
+        .await?
+        .json::<shared::Column>()
+        .await
+}
+
+pub async fn delete_column(column_id: &str) -> Result<(), gloo_net::Error> {
+    let resp = Request::delete(&format!("/api/columns/{column_id}"))
+        .send()
+        .await?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(gloo_net::Error::GlooError(format!(
+            "delete_column: server returned {}",
+            resp.status()
+        )))
+    }
 }
 
 pub async fn fetch_cards(column_id: &str) -> Result<Vec<shared::Card>, gloo_net::Error> {

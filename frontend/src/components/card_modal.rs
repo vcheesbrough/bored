@@ -3,6 +3,7 @@ use leptos::prelude::*;
 #[component]
 pub fn CardModal(
     card: RwSignal<Option<shared::Card>>,
+    on_updated: Callback<shared::Card>,
     on_delete: Callback<String>,
 ) -> impl IntoView {
     let title_input = RwSignal::new(String::new());
@@ -21,11 +22,7 @@ pub fn CardModal(
             let card_id = c.id.clone();
             let title = title_input.get_untracked();
             let desc = desc_input.get_untracked();
-            let desc_val = if desc.trim().is_empty() {
-                None
-            } else {
-                Some(desc)
-            };
+            let desc_val = if desc.trim().is_empty() { None } else { Some(desc) };
             wasm_bindgen_futures::spawn_local(async move {
                 let req = shared::UpdateCardRequest {
                     title: Some(title),
@@ -34,7 +31,10 @@ pub fn CardModal(
                     column_id: None,
                 };
                 match crate::api::update_card(&card_id, req).await {
-                    Ok(updated) => card.set(Some(updated)),
+                    Ok(updated) => {
+                        on_updated.run(updated);
+                        card.set(None);
+                    }
                     Err(e) => leptos::logging::error!("failed to update card: {e}"),
                 }
             });
@@ -54,28 +54,31 @@ pub fn CardModal(
         }
     };
 
-    let on_close = move |_| card.set(None);
-
     view! {
         <Show when=move || card.get().is_some() fallback=|| ()>
-            <div class="modal-backdrop" on:click=on_close>
+            <div class="modal-backdrop" on:click=move |_| card.set(None)>
                 <div class="modal" on:click=|ev| ev.stop_propagation()>
                     <button class="modal-close" on:click=move |_| card.set(None)>"×"</button>
                     <form on:submit=on_save>
                         <input
                             type="text"
-                            class="card-title-input"
+                            class="modal-title-input"
                             prop:value=move || title_input.get()
                             on:input=move |ev| title_input.set(event_target_value(&ev))
                         />
                         <textarea
                             class="card-desc-input"
+                            placeholder="Description…"
                             prop:value=move || desc_input.get()
                             on:input=move |ev| desc_input.set(event_target_value(&ev))
                         />
-                        <button type="submit">"Save"</button>
+                        <div class="modal-actions">
+                            <button type="button" class="btn-danger" on:click=on_delete_click>
+                                "Delete"
+                            </button>
+                            <button type="submit">"Save"</button>
+                        </div>
                     </form>
-                    <button class="card-delete-btn" on:click=on_delete_click>"Delete Card"</button>
                 </div>
             </div>
         </Show>

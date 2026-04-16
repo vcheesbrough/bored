@@ -37,10 +37,22 @@ pub async fn create_board(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match board {
-        Some(b) => Ok((StatusCode::CREATED, Json(b.into_api()))),
-        None => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    let board = board.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for (name, position) in [("Todo", 0i32), ("Done", 1i32)] {
+        let col_id = ulid::Ulid::new().to_string().to_lowercase();
+        state
+            .db
+            .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position")
+            .bind(("id", col_id))
+            .bind(("board_id", id.clone()))
+            .bind(("name", name.to_string()))
+            .bind(("position", position))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
+
+    Ok((StatusCode::CREATED, Json(board.into_api())))
 }
 
 pub async fn get_board(
