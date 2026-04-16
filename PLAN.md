@@ -21,9 +21,10 @@ Semantic versioning (`MAJOR.MINOR.PATCH`) with `0.x` signalling pre-stability. `
 | 2 — Structured Logging | `0.2` | `0.2.3` |
 | 3 — Boards & Columns | `0.3` | `0.3.7` |
 | 4 — Cards | `0.4` | `0.4.15` |
-| 5 — Auth | `0.5` | `0.5.3` |
-| 6 — SSE + Drag-drop | `0.6` | `0.6.11` |
-| 7 — Git Links | `0.7` | `0.7.2` |
+| 5 — UI Overhaul | `0.5` | `0.5.1` |
+| 6 — Auth | `0.6` | `0.6.3` |
+| 7 — SSE + Drag-drop | `0.7` | `0.7.11` |
+| 8 — Git Links | `0.8` | `0.8.2` |
 | Public release | `1.0` | `1.0.1` |
 
 **On merge to main**, Woodpecker constructs `VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}`, tags the git commit (`v0.x.N`), and tags the Docker image with `:<sha>` and `:0.x.N`. No `:latest` tag is applied — deployments must reference an explicit version.
@@ -773,7 +774,52 @@ Feature: Frontend board view
 
 ---
 
-### Iteration 5 — Auth (OIDC + PKCE)
+### Iteration 5 — UI Overhaul
+
+- Hand-rolled CSS (`frontend/style.css`) linked via Trunk — no extra build tools
+- Dark & moody design system (zinc palette + indigo accent, CSS custom properties)
+- Boards list: responsive grid of clickable board cards, inline create form
+- Board view: horizontal-scrolling kanban columns, each fixed-width with scrollable card list
+- Card items: hover highlight, click opens modal
+- Card modal: dark overlay, editable title/description, delete button
+- Global: persistent dark navbar with app name and back-navigation
+
+**Tests:** `cargo build -p frontend --target wasm32-unknown-unknown` must pass; existing backend tests unchanged.
+
+**CI steps:** unchanged — Trunk copies CSS during Docker build.
+
+```gherkin
+Feature: Visual design
+  Scenario: Dark theme applied
+    Given the app is loaded in a browser
+    Then the page background is dark (zinc-950) and text is light (zinc-100)
+
+  Scenario: Boards list shows a card grid
+    Given boards exist
+    When the user navigates to /
+    Then boards are displayed in a responsive grid of card tiles
+
+  Scenario: Board view shows horizontal kanban columns
+    Given a board with columns exists
+    When the user navigates to /boards/:id
+    Then columns are displayed side-by-side with a fixed width and horizontal scroll
+
+  Scenario: Card hover highlights border
+    Given a card is visible in a column
+    When the user hovers over it
+    Then the card border changes to the accent colour (indigo-500)
+
+  Scenario: Card modal has dark overlay
+    Given a card is visible
+    When the user clicks on it
+    Then a modal appears centred on a semi-transparent dark backdrop
+```
+
+**Deliverable:** App looks polished and usable. Zero unstyled HTML.
+
+---
+
+### Iteration 6 — Auth (OIDC + PKCE)
 
 - OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
 - `tower-sessions` backed by SurrealDB
@@ -820,7 +866,7 @@ Feature: Authentication
 
 ---
 
-### Iteration 6 — Real-time (SSE) + Drag-and-Drop
+### Iteration 7 — Real-time (SSE) + Drag-and-Drop
 
 - `broadcast::Sender<BoardEvent>` in `AppState`; all mutation routes fire events
 - `GET /api/events` SSE endpoint with keepalive
@@ -877,7 +923,7 @@ Feature: Columns
 
 ---
 
-### Iteration 7 — Git Links
+### Iteration 8 — Git Links
 
 - `git_links` table + schema
 - `shared/` types for git links
