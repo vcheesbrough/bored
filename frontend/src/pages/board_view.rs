@@ -63,13 +63,13 @@ pub fn BoardView() -> impl IntoView {
     view! {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
+            <span class="navbar-sep">"/"</span>
+            <span class="navbar-board-title">{move || board_name.get()}</span>
             <a href="/" class="navbar-back">"‹ Boards"</a>
         </nav>
 
         <div class="page board-view">
             <div class="page-header">
-                <h1 class="page-title">{move || board_name.get()}</h1>
-
                 <form class="add-col-form" on:submit=on_add_column>
                     <input
                         type="text"
