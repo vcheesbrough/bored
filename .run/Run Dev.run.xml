@@ -1,6 +1,0 @@
-<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Run Dev" type="CompoundRunConfigurationType">
-    <toRun name="Run Backend" type="CargoCommandRunConfiguration" />
-    <toRun name="Run Frontend" type="ShRunConfigurationType" />
-  </configuration>
-</component>

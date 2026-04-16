@@ -16,21 +16,29 @@ pub fn init() -> ObservabilityGuard {
     let loki_url = std::env::var("LOKI_URL").ok();
     let version = env!("CARGO_PKG_VERSION");
 
-    // All layers go into a single Vec<Box<dyn Layer<Registry>>> so the
-    // subscriber type stays as `Layered<Vec<...>, Registry>` throughout.
-    // EnvFilter must be in the same Vec — if it were added via a separate
-    // .with() call the subscriber type becomes Layered<EnvFilter, Registry>
-    // and the Vec (typed against bare Registry) no longer satisfies the bound.
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
+    // Each layer gets its own EnvFilter via .with_filter() so that
+    // register_callsite interest is correctly computed per-layer. A shared
+    // EnvFilter pushed into the Vec doesn't work: Vec<Layer> takes the most
+    // permissive register_callsite interest across all sub-layers, so the fmt
+    // layer's Interest::always() would bypass the filter entirely.
+    let make_filter = || EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let filter = EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info"));
-    layers.push(Box::new(filter));
+    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
     // Console layer: JSON in production, pretty otherwise
     let fmt: Box<dyn Layer<Registry> + Send + Sync> = if app_env == "production" {
-        Box::new(tracing_subscriber::fmt::layer().json().flatten_event(true))
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_filter(make_filter()),
+        )
     } else {
-        Box::new(tracing_subscriber::fmt::layer().pretty())
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .pretty()
+                .with_filter(make_filter()),
+        )
     };
     layers.push(fmt);
 
@@ -47,7 +55,7 @@ pub fn init() -> ObservabilityGuard {
             .unwrap()
             .build_url(url)
             .expect("failed to build Loki layer");
-        layers.push(Box::new(loki_layer));
+        layers.push(Box::new(loki_layer.with_filter(make_filter())));
         Some(tokio::spawn(controller))
     } else {
         None
