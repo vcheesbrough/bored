@@ -88,10 +88,15 @@ body {
 
 .navbar-board-btn:hover { background: var(--surface-2); }
 
-.chooser-caret {
-  font-size: 11px;
+.chooser-gear {
+  font-size: 14px;
   color: var(--text-muted);
   flex-shrink: 0;
+  line-height: 1;
+}
+
+.navbar-board-btn:hover .chooser-gear {
+  color: var(--text);
 }
 
 .chooser-backdrop {
@@ -129,28 +134,142 @@ body {
 .chooser-item:hover { background: var(--surface-2); }
 .chooser-item-active { color: var(--accent); }
 
+.chooser-board-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.chooser-board-row .chooser-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.chooser-board-delete {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: color 0.15s, opacity 0.15s;
+  flex-shrink: 0;
+}
+
+.chooser-board-row:hover .chooser-board-delete,
+.chooser-board-delete:focus-visible {
+  opacity: 1;
+}
+
+.chooser-board-delete:hover {
+  color: var(--danger);
+  background: transparent;
+}
+
 .chooser-divider {
   height: 1px;
   background: var(--border);
   margin: 4px 0;
 }
 
-.chooser-new-form {
+.chooser-section-label {
+  padding: 8px 14px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.chooser-col-row {
   display: flex;
-  gap: 6px;
-  padding: 8px 10px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 14px;
+  min-height: 32px;
 }
 
-.chooser-new-form input[type="text"] {
+.chooser-col-row:hover {
+  background: var(--surface-2);
+}
+
+.chooser-col-name {
   flex: 1;
-  font-size: 13px;
-  padding: 6px 10px;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text);
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 0;
 }
 
-.chooser-new-form button {
-  padding: 6px 12px;
-  font-size: 12px;
+.chooser-col-edit {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  padding: 4px 8px;
+}
+
+.chooser-col-delete {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: color 0.15s, opacity 0.15s;
   flex-shrink: 0;
+}
+
+.chooser-col-row:hover .chooser-col-delete,
+.chooser-col-delete:focus-visible {
+  opacity: 1;
+}
+
+.chooser-col-delete:hover {
+  color: var(--danger);
+  background: transparent;
+}
+
+.chooser-item-phantom,
+.chooser-col-row-phantom {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.chooser-item-phantom:hover,
+.chooser-col-row-phantom:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.chooser-phantom-plus {
+  display: inline-block;
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-right: 2px;
+}
+
+.chooser-item-phantom:hover .chooser-phantom-plus,
+.chooser-col-row-phantom:hover .chooser-phantom-plus {
+  color: var(--accent);
+}
+
+.chooser-item-input {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 2px 10px;
+  font-size: 13px;
+  padding: 7px 10px;
+}
+
+.chooser-col-name-phantom {
+  color: var(--text-muted);
 }
 
 /* ── Empty state ─────────────────────────────────── */
@@ -169,12 +288,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 24px;
-}
-
-.page-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
 }
 
 .page-title {
@@ -457,20 +570,23 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   align-items: center;
 }
 
+/* ── App watermark ───────────────────────────────── */
+.app-watermark {
+  position: fixed;
+  bottom: 8px;
+  left: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.2;
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+}
+
 /* ── Loading / empty ─────────────────────────────── */
 .loading-text {
   color: var(--text-muted);
   font-size: 13px;
 }
 
-.add-col-form {
-  flex-shrink: 0;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding: 4px 0;
-}
-
-.add-col-form input[type="text"] {
-  width: 180px;
-}
