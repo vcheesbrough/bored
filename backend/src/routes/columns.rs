@@ -115,13 +115,28 @@ pub async fn delete_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    match state
+    let existing: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if existing.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    state
+        .db
+        .query("DELETE cards WHERE column = type::thing('columns', $id)")
+        .bind(("id", col_id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
         .db
         .delete::<Option<DbColumn>>(("columns", &col_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        Some(_) => Ok(StatusCode::NO_CONTENT),
-        None => Err(StatusCode::NOT_FOUND),
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
