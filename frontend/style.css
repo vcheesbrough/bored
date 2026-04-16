@@ -89,10 +89,11 @@ body {
 .navbar-board-btn:hover { background: var(--surface-2); }
 
 .chooser-gear {
-  font-size: 14px;
+  width: 14px;
+  height: 14px;
   color: var(--text-muted);
   flex-shrink: 0;
-  line-height: 1;
+  transition: color 0.15s;
 }
 
 .navbar-board-btn:hover .chooser-gear {
