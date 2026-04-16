@@ -25,6 +25,14 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
         selected_card.set(Some(card));
     });
 
+    let on_card_updated = Callback::new(move |updated: shared::Card| {
+        cards.update(|cs| {
+            if let Some(c) = cs.iter_mut().find(|c| c.id == updated.id) {
+                *c = updated;
+            }
+        });
+    });
+
     let on_card_delete = Callback::new(move |card_id: String| {
         cards.update(|cs| cs.retain(|c| c.id != card_id));
         selected_card.set(None);
@@ -56,7 +64,7 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
                 />
             </div>
 
-            <CardModal card=selected_card on_delete=on_card_delete />
+            <CardModal card=selected_card on_updated=on_card_updated on_delete=on_card_delete />
             <AddCardModal
                 column_id=column.id.clone()
                 column_name=column.name.clone()

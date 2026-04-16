@@ -3,6 +3,7 @@ use leptos::prelude::*;
 #[component]
 pub fn CardModal(
     card: RwSignal<Option<shared::Card>>,
+    on_updated: Callback<shared::Card>,
     on_delete: Callback<String>,
 ) -> impl IntoView {
     let title_input = RwSignal::new(String::new());
@@ -30,7 +31,10 @@ pub fn CardModal(
                     column_id: None,
                 };
                 match crate::api::update_card(&card_id, req).await {
-                    Ok(updated) => card.set(Some(updated)),
+                    Ok(updated) => {
+                        on_updated.run(updated);
+                        card.set(None);
+                    }
                     Err(e) => leptos::logging::error!("failed to update card: {e}"),
                 }
             });
@@ -50,11 +54,9 @@ pub fn CardModal(
         }
     };
 
-    let on_close = move |_| card.set(None);
-
     view! {
         <Show when=move || card.get().is_some() fallback=|| ()>
-            <div class="modal-backdrop" on:click=on_close>
+            <div class="modal-backdrop" on:click=move |_| card.set(None)>
                 <div class="modal" on:click=|ev| ev.stop_propagation()>
                     <button class="modal-close" on:click=move |_| card.set(None)>"×"</button>
                     <form on:submit=on_save>
