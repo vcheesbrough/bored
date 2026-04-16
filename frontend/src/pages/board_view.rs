@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
+use crate::components::column::ColumnView;
+
 #[component]
 pub fn BoardView() -> impl IntoView {
     let params = use_params_map();
@@ -56,14 +58,7 @@ pub fn BoardView() -> impl IntoView {
                 <For
                     each=move || columns.get()
                     key=|c| c.id.clone()
-                    children=|col| {
-                        view! {
-                            <div class="column-card">
-                                <h3>{col.name.clone()}</h3>
-                                <p>"Position: " {col.position}</p>
-                            </div>
-                        }
-                    }
+                    children=|col| view! { <ColumnView column=col /> }
                 />
             </div>
 

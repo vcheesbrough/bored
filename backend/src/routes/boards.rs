@@ -92,6 +92,14 @@ pub async fn delete_board(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
+    // Delete all cards in columns of this board (graph traversal)
+    state
+        .db
+        .query("DELETE cards WHERE column.board = type::thing('boards', $id)")
+        .bind(("id", id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     // Delete all columns belonging to this board
     state
         .db
