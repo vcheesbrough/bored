@@ -65,7 +65,7 @@ pub fn BoardView() -> impl IntoView {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
-            <BoardChooser board_id=board_id() board_name=board_name />
+            <BoardChooser board_name=board_name />
         </nav>
 
         <div class="page board-view">

@@ -1,8 +1,11 @@
 use leptos::prelude::*;
-use leptos_router::hooks::use_navigate;
+use leptos_router::hooks::{use_navigate, use_params_map};
 
 #[component]
-pub fn BoardChooser(board_id: String, board_name: RwSignal<String>) -> impl IntoView {
+pub fn BoardChooser(board_name: RwSignal<String>) -> impl IntoView {
+    let params = use_params_map();
+    let current_id = move || params.with(|p| p.get("id").unwrap_or_default());
+
     let show = RwSignal::new(false);
     let boards: RwSignal<Vec<shared::Board>> = RwSignal::new(Vec::new());
     let new_name = RwSignal::new(String::new());
@@ -60,21 +63,18 @@ pub fn BoardChooser(board_id: String, board_name: RwSignal<String>) -> impl Into
                 <For
                     each=move || boards.get()
                     key=|b| b.id.clone()
-                    children={
-                        let current_id = board_id.clone();
-                        move |board| {
-                            let href = format!("/boards/{}", board.id);
-                            let is_current = board.id == current_id;
-                            view! {
-                                <a
-                                    href=href
-                                    class="chooser-item"
-                                    class:chooser-item-active=is_current
-                                    on:click=move |_| show.set(false)
-                                >
-                                    {board.name.clone()}
-                                </a>
-                            }
+                    children=move |board| {
+                        let href = format!("/boards/{}", board.id);
+                        let board_id = board.id.clone();
+                        view! {
+                            <a
+                                href=href
+                                class="chooser-item"
+                                class:chooser-item-active=move || board_id == current_id()
+                                on:click=move |_| show.set(false)
+                            >
+                                {board.name.clone()}
+                            </a>
                         }
                     }
                 />
