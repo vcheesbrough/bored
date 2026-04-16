@@ -3,4 +3,5 @@ target = "index.html"
 public_url = "/"
 
 [[proxy]]
-backend = "http://127.0.0.1:3000"
+backend = "http://127.0.0.1:3000/api"
+rewrite = "/api"
