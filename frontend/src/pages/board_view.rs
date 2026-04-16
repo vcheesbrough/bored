@@ -14,6 +14,17 @@ pub fn BoardView() -> impl IntoView {
     let loading = RwSignal::new(true);
 
     Effect::new(move |_| {
+        let name = board_name.get();
+        if !name.is_empty() {
+            document().set_title(&format!("{name} — bored"));
+        }
+    });
+
+    on_cleanup(|| {
+        document().set_title("bored");
+    });
+
+    Effect::new(move |_| {
         let id = board_id();
         if id.is_empty() {
             return;
