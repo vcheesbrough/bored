@@ -11,7 +11,7 @@
   --accent-hover: #818cf8; /* indigo-400 */
   --danger:    #ef4444; /* red-500 */
   --radius:    8px;
-  --col-width: clamp(280px, 40vw, 420px);
+  --col-width: clamp(340px, 40vw, 420px);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
