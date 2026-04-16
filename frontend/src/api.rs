@@ -54,8 +54,7 @@ pub async fn create_card(
     description: Option<String>,
 ) -> Result<shared::Card, gloo_net::Error> {
     Request::post(&format!("/api/columns/{column_id}/cards"))
-        .json(&shared::CreateCardRequest { title, description })
-        .expect("failed to serialize create card request")
+        .json(&shared::CreateCardRequest { title, description })?
         .send()
         .await?
         .json::<shared::Card>()
@@ -67,8 +66,7 @@ pub async fn update_card(
     payload: shared::UpdateCardRequest,
 ) -> Result<shared::Card, gloo_net::Error> {
     Request::put(&format!("/api/cards/{card_id}"))
-        .json(&payload)
-        .expect("failed to serialize update card request")
+        .json(&payload)?
         .send()
         .await?
         .json::<shared::Card>()
@@ -76,10 +74,17 @@ pub async fn update_card(
 }
 
 pub async fn delete_card(card_id: &str) -> Result<(), gloo_net::Error> {
-    Request::delete(&format!("/api/cards/{card_id}"))
+    let resp = Request::delete(&format!("/api/cards/{card_id}"))
         .send()
         .await?;
-    Ok(())
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(gloo_net::Error::GlooError(format!(
+            "delete_card: server returned {}",
+            resp.status()
+        )))
+    }
 }
 
 pub async fn move_card(
@@ -91,8 +96,7 @@ pub async fn move_card(
         .json(&shared::MoveCardRequest {
             column_id,
             position,
-        })
-        .expect("failed to serialize move card request")
+        })?
         .send()
         .await?
         .json::<shared::Card>()
