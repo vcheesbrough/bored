@@ -52,24 +52,20 @@ pub async fn create_card(
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
 
-    let positions: Vec<i32> = state
-        .db
-        .query("SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id)")
-        .bind(("col_id", col_id.clone()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let next_position: i32 = positions.into_iter().max().map(|m| m + 1).unwrap_or(0);
-
+    // Derive next_position atomically inside the CREATE to avoid TOCTOU races.
     let card: Option<DbCard> = state
         .db
-        .query("CREATE type::thing('cards', $id) SET column = type::thing('columns', $col_id), title = $title, description = $description, position = $position")
+        .query(
+            "CREATE type::thing('cards', $id) SET \
+             column = type::thing('columns', $col_id), \
+             title = $title, \
+             description = $description, \
+             position = (array::max((SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id))) ?? -1) + 1",
+        )
         .bind(("id", id))
         .bind(("col_id", col_id))
         .bind(("title", payload.title))
         .bind(("description", payload.description))
-        .bind(("position", next_position))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -92,80 +88,84 @@ pub async fn update_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if existing.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let existing = match existing {
+        Some(e) => e,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
 
-    let mut patch = serde_json::Map::new();
-
-    if let Some(title) = payload.title {
-        patch.insert("title".to_string(), serde_json::Value::String(title));
-    }
-    if let Some(desc) = payload.description {
-        match desc {
-            Some(d) => {
-                patch.insert("description".to_string(), serde_json::Value::String(d));
-            }
-            None => {
-                patch.insert("description".to_string(), serde_json::Value::Null);
-            }
-        }
-    }
-    if let Some(position) = payload.position {
-        patch.insert(
-            "position".to_string(),
-            serde_json::Value::Number(position.into()),
-        );
-    }
-
-    if let Some(col_id) = payload.column_id {
+    // Validate target column if provided, and guard against cross-board moves.
+    if let Some(ref col_id) = payload.column_id {
         let target_col: Option<DbColumn> = state
             .db
-            .select(("columns", &col_id))
+            .select(("columns", col_id.as_str()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if target_col.is_none() {
-            return Err(StatusCode::NOT_FOUND);
-        }
-
-        // column is a record-link — must use raw SurrealQL
-        let mut result = state
-            .db
-            .query("UPDATE type::thing('cards', $card_id) SET column = type::thing('columns', $col_id)")
-            .bind(("card_id", card_id.clone()))
-            .bind(("col_id", col_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        // Apply any remaining scalar patches
-        if !patch.is_empty() {
-            let card: Option<DbCard> = state
-                .db
-                .update(("cards", &card_id))
-                .merge(serde_json::Value::Object(patch))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            return match card {
-                Some(c) => Ok(Json(c.into_api())),
-                None => Err(StatusCode::NOT_FOUND),
-            };
-        }
-
-        let card: Option<DbCard> = result
-            .take(0)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return match card {
-            Some(c) => Ok(Json(c.into_api())),
-            None => Err(StatusCode::NOT_FOUND),
+        let target_col = match target_col {
+            Some(c) => c,
+            None => return Err(StatusCode::NOT_FOUND),
         };
+
+        let current_col: Option<DbColumn> = state
+            .db
+            .select(("columns", existing.column.id.to_raw()))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(current_col) = current_col {
+            if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
     }
 
-    let card: Option<DbCard> = state
-        .db
-        .update(("cards", &card_id))
-        .merge(serde_json::Value::Object(patch))
+    // Build a single atomic UPDATE covering all changed fields.
+    let mut set_parts: Vec<String> = Vec::new();
+
+    if payload.column_id.is_some() {
+        set_parts.push("column = type::thing('columns', $col_id)".to_string());
+    }
+    if payload.title.is_some() {
+        set_parts.push("title = $title".to_string());
+    }
+    if let Some(ref desc) = payload.description {
+        if desc.is_some() {
+            set_parts.push("description = $description".to_string());
+        } else {
+            set_parts.push("description = NONE".to_string());
+        }
+    }
+    if payload.position.is_some() {
+        set_parts.push("position = $position".to_string());
+    }
+
+    if set_parts.is_empty() {
+        return Ok(Json(existing.into_api()));
+    }
+
+    let query_str = format!(
+        "UPDATE type::thing('cards', $card_id) SET {}",
+        set_parts.join(", ")
+    );
+
+    let mut q = state.db.query(query_str).bind(("card_id", card_id));
+    if let Some(col_id) = payload.column_id {
+        q = q.bind(("col_id", col_id));
+    }
+    if let Some(title) = payload.title {
+        q = q.bind(("title", title));
+    }
+    if let Some(Some(desc)) = payload.description {
+        q = q.bind(("description", desc));
+    }
+    if let Some(position) = payload.position {
+        q = q.bind(("position", position));
+    }
+
+    let card: Option<DbCard> = q
         .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match card {
@@ -200,9 +200,10 @@ pub async fn move_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if existing.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let existing = match existing {
+        Some(e) => e,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
 
     let target_col: Option<DbColumn> = state
         .db
@@ -210,8 +211,22 @@ pub async fn move_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if target_col.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+    let target_col = match target_col {
+        Some(c) => c,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // Guard: target column must belong to the same board as the card's current column.
+    let current_col: Option<DbColumn> = state
+        .db
+        .select(("columns", existing.column.id.to_raw()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(current_col) = current_col {
+        if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
     }
 
     let card: Option<DbCard> = state
