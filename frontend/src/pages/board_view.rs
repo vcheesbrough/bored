@@ -8,17 +8,20 @@ pub fn BoardView() -> impl IntoView {
     let params = use_params_map();
     let board_id = move || params.with(|p| p.get("id").unwrap_or_default());
 
+    let board_name = RwSignal::new(String::new());
     let columns = RwSignal::new(Vec::<shared::Column>::new());
     let new_col_name = RwSignal::new(String::new());
     let loading = RwSignal::new(true);
 
-    // Fetch columns when board_id changes
     Effect::new(move |_| {
         let id = board_id();
         if id.is_empty() {
             return;
         }
         wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(board) = crate::api::fetch_board(&id).await {
+                board_name.set(board.name);
+            }
             match crate::api::fetch_columns(&id).await {
                 Ok(fetched) => columns.set(fetched),
                 Err(e) => leptos::logging::error!("failed to fetch columns: {e}"),
@@ -47,11 +50,28 @@ pub fn BoardView() -> impl IntoView {
     };
 
     view! {
-        <div class="board-view">
-            <h1>"Board: " {move || board_id()}</h1>
+        <nav class="navbar">
+            <a href="/" class="navbar-brand">"bored"</a>
+            <a href="/" class="navbar-back">"‹ Boards"</a>
+        </nav>
+
+        <div class="page board-view">
+            <div class="page-header">
+                <h1 class="page-title">{move || board_name.get()}</h1>
+
+                <form class="add-col-form" on:submit=on_add_column>
+                    <input
+                        type="text"
+                        placeholder="Add column…"
+                        prop:value=move || new_col_name.get()
+                        on:input=move |ev| new_col_name.set(event_target_value(&ev))
+                    />
+                    <button type="submit">"Add"</button>
+                </form>
+            </div>
 
             <Show when=move || loading.get() fallback=|| ()>
-                <p>"Loading..."</p>
+                <p class="loading-text">"Loading..."</p>
             </Show>
 
             <div class="columns-row">
@@ -61,20 +81,6 @@ pub fn BoardView() -> impl IntoView {
                     children=|col| view! { <ColumnView column=col /> }
                 />
             </div>
-
-            <form on:submit=on_add_column>
-                <input
-                    type="text"
-                    placeholder="New column name"
-                    prop:value=move || new_col_name.get()
-                    on:input=move |ev| {
-                        new_col_name.set(event_target_value(&ev));
-                    }
-                />
-                <button type="submit">"Add Column"</button>
-            </form>
-
-            <a href="/">"Back to Boards"</a>
         </div>
     }
 }
