@@ -520,7 +520,8 @@ mod tests {
                 position: Some(2),
                 column_id: None,
             })
-            .await;
+            .await
+            .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c2.id))
             .json(&shared::UpdateCardRequest {
@@ -529,7 +530,8 @@ mod tests {
                 position: Some(0),
                 column_id: None,
             })
-            .await;
+            .await
+            .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c3.id))
             .json(&shared::UpdateCardRequest {
@@ -538,7 +540,8 @@ mod tests {
                 position: Some(1),
                 column_id: None,
             })
-            .await;
+            .await
+            .assert_status_ok();
 
         let cards: Vec<shared::Card> = server
             .get(&format!("/api/columns/{}/cards", column.id))

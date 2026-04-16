@@ -52,13 +52,24 @@ pub async fn create_card(
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
 
+    let positions: Vec<i32> = state
+        .db
+        .query("SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id)")
+        .bind(("col_id", col_id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let next_position: i32 = positions.into_iter().max().map(|m| m + 1).unwrap_or(0);
+
     let card: Option<DbCard> = state
         .db
-        .query("CREATE type::thing('cards', $id) SET column = type::thing('columns', $col_id), title = $title, description = $description, position = 0")
+        .query("CREATE type::thing('cards', $id) SET column = type::thing('columns', $col_id), title = $title, description = $description, position = $position")
         .bind(("id", id))
         .bind(("col_id", col_id))
         .bind(("title", payload.title))
         .bind(("description", payload.description))
+        .bind(("position", next_position))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -108,6 +119,16 @@ pub async fn update_card(
     }
 
     if let Some(col_id) = payload.column_id {
+        let target_col: Option<DbColumn> = state
+            .db
+            .select(("columns", &col_id))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if target_col.is_none() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+
         // column is a record-link — must use raw SurrealQL
         let mut result = state
             .db
