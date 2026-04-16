@@ -553,4 +553,65 @@ mod tests {
         assert_eq!(cards[1].title, "Card 3"); // position 1
         assert_eq!(cards[2].title, "Card 1"); // position 2
     }
+
+    #[tokio::test]
+    async fn create_card_in_nonexistent_column_returns_404() {
+        let server = test_app().await;
+        server
+            .post("/api/columns/doesnotexist/cards")
+            .json(&shared::CreateCardRequest {
+                title: "Ghost".to_string(),
+                description: None,
+            })
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn move_card_to_nonexistent_column_returns_404() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                title: "Movable".to_string(),
+                description: None,
+            })
+            .await
+            .json();
+
+        server
+            .post(&format!("/api/cards/{}/move", card.id))
+            .json(&shared::MoveCardRequest {
+                column_id: "doesnotexist".to_string(),
+                position: 0,
+            })
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_nonexistent_card_returns_404() {
+        let server = test_app().await;
+        server
+            .put("/api/cards/doesnotexist")
+            .json(&shared::UpdateCardRequest {
+                title: Some("x".to_string()),
+                description: None,
+                position: None,
+                column_id: None,
+            })
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_card_returns_404() {
+        let server = test_app().await;
+        server
+            .delete("/api/cards/doesnotexist")
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
 }

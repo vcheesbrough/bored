@@ -3,9 +3,7 @@
     <option name="buildProfileId" value="test" />
     <option name="command" value="test -p backend -p shared" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-    <envs>
-      <env name="RUST_BACKTRACE" value="full" />
-    </envs>
+    <envs />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />
     <option name="requiredFeatures" value="true" />
