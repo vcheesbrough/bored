@@ -1,50 +1,75 @@
+// Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
+// These are private by default; the route handlers are reached via `routes::boards::...`.
 mod db;
 mod models;
 mod observability;
 mod routes;
 
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{delete, get, post, put}, // HTTP method helpers for the router
     Router,
 };
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rust TLS)
 use routes::boards::AppState;
 use std::net::SocketAddr;
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::{services::ServeDir, trace::TraceLayer}; // Middleware: static files + request tracing
 
+// `app` is extracted from `main` so integration tests can call it directly
+// without spinning up a real TCP listener. Tests construct `AppState` with an
+// in-memory DB, call `app(state).await`, and pass the router to `TestServer`.
 pub async fn app(state: AppState) -> Router {
+    // Build the `/api/*` sub-router. All routes share `state` via `.with_state()`.
+    // Axum resolves routes in registration order for the same path+method pair,
+    // but here each path+method combination is unique.
     let api = Router::new()
-        .route("/boards", get(routes::boards::list_boards))
-        .route("/boards", post(routes::boards::create_board))
-        .route("/boards/:id", get(routes::boards::get_board))
-        .route("/boards/:id", put(routes::boards::update_board))
-        .route("/boards/:id", delete(routes::boards::delete_board))
-        .route("/boards/:id/columns", get(routes::columns::list_columns))
-        .route("/boards/:id/columns", post(routes::columns::create_column))
-        .route("/columns/:id", put(routes::columns::update_column))
-        .route("/columns/:id", delete(routes::columns::delete_column))
-        .route("/columns/:id/cards", get(routes::cards::list_cards))
-        .route("/columns/:id/cards", post(routes::cards::create_card))
-        .route("/cards/:id", put(routes::cards::update_card))
-        .route("/cards/:id", delete(routes::cards::delete_card))
-        .route("/cards/:id/move", post(routes::cards::move_card))
+        .route("/boards",              get(routes::boards::list_boards))
+        .route("/boards",              post(routes::boards::create_board))
+        .route("/boards/:id",          get(routes::boards::get_board))
+        .route("/boards/:id",          put(routes::boards::update_board))
+        .route("/boards/:id",          delete(routes::boards::delete_board))
+        .route("/boards/:id/columns",  get(routes::columns::list_columns))
+        .route("/boards/:id/columns",  post(routes::columns::create_column))
+        .route("/columns/:id",         put(routes::columns::update_column))
+        .route("/columns/:id",         delete(routes::columns::delete_column))
+        .route("/columns/:id/cards",   get(routes::cards::list_cards))
+        .route("/columns/:id/cards",   post(routes::cards::create_card))
+        .route("/cards/:id",           put(routes::cards::update_card))
+        .route("/cards/:id",           delete(routes::cards::delete_card))
+        .route("/cards/:id/move",      post(routes::cards::move_card))
         .with_state(state);
 
+    // `STATIC_DIR` lets the Docker image override where the compiled WASM frontend
+    // lives without rebuilding. Falls back to `./dist` for local development.
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "./dist".to_string());
 
     Router::new()
         .route("/health", get(health))
+        // `.nest("/api", api)` mounts the api sub-router under `/api`, so
+        // `/api/boards` maps to the `list_boards` handler above.
         .nest("/api", api)
+        // `ServeDir` serves static files (the Leptos WASM bundle). Any request
+        // that doesn't match `/health` or `/api/*` falls through to here.
+        // This makes the SPA's `index.html` serve for all unknown paths, enabling
+        // client-side routing.
         .fallback_service(ServeDir::new(static_dir))
+        // `TraceLayer` logs every request (method, path, status, latency) using
+        // the `tracing` crate — visible as structured JSON in production.
         .layer(TraceLayer::new_for_http())
 }
 
+// `#[tokio::main]` is a macro that sets up the Tokio async runtime and runs
+// this function as the entry point. Without it, `async fn main` wouldn't work
+// because Rust's standard runtime is synchronous.
 #[tokio::main]
 async fn main() {
+    // rustls needs a crypto provider installed before any TLS handshakes.
+    // `ring` is the default provider — this call must happen before any
+    // TLS config is created.
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // Initialise structured logging / tracing (returns a guard that flushes on drop).
     let _obs = observability::init();
 
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "/data/bored.db".to_string());
@@ -54,6 +79,9 @@ async fn main() {
 
     let state = AppState { db };
 
+    // Check for TLS certificate/key paths in environment variables.
+    // If both are present, serve HTTPS on port 443.
+    // If either is missing, fall back to plain HTTP on port 3000 (dev mode).
     let cert = std::env::var("TLS_CERT");
     let key = std::env::var("TLS_KEY");
 
@@ -62,6 +90,7 @@ async fn main() {
             let config = RustlsConfig::from_pem_file(&cert, &key)
                 .await
                 .expect("failed to load TLS config");
+            // `[0, 0, 0, 0]` means bind to all network interfaces (0.0.0.0).
             let addr = SocketAddr::from(([0, 0, 0, 0], 443));
             tracing::info!(%addr, "bored backend listening (TLS)");
             axum_server::bind_rustls(addr, config)
@@ -72,22 +101,35 @@ async fn main() {
         _ => {
             let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
             tracing::info!(%addr, "bored backend listening (plain HTTP)");
+            // `tokio::net::TcpListener` is the async equivalent of the standard
+            // library's `TcpListener` — it doesn't block the thread while waiting.
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
             axum::serve(listener, app(state).await).await.unwrap();
         }
     }
 }
 
+// A simple liveness probe. Returns a plain-text "ok" with a 200 status.
+// Load balancers and container orchestrators hit this to know the process is alive.
 async fn health() -> &'static str {
     "ok"
 }
 
+// ── Integration tests ─────────────────────────────────────────────────────────
+// `#[cfg(test)]` means this entire module is only compiled when running tests.
+// Each test spins up a real Axum router with an in-memory SurrealDB — no mocking,
+// no fixtures, every test starts clean.
 #[cfg(test)]
 mod tests {
+    // `super::*` imports everything from the parent module (this file).
     use super::*;
     use axum::http::StatusCode;
+    // `axum_test::TestServer` wraps the router and lets us make HTTP requests
+    // in tests without opening a real TCP socket.
     use axum_test::TestServer;
 
+    // Helper: create a TestServer backed by an in-memory database.
+    // Called at the start of each test that needs a server.
     async fn test_app() -> TestServer {
         let db = db::connect_mem().await.expect("failed to connect mem db");
         let state = AppState { db };
@@ -125,6 +167,8 @@ mod tests {
             .await;
         list_resp.assert_status_ok();
         let columns: Vec<shared::Column> = list_resp.json();
+        // `.iter().map(|c| c.name.as_str()).collect()` builds a Vec<&str> from the
+        // column names so we can compare against a string slice literal.
         let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["Todo", "Done"]);
         assert_eq!(columns[0].position, 0);
@@ -148,6 +192,7 @@ mod tests {
         let list_resp = server.get("/api/boards").await;
         list_resp.assert_status_ok();
         let boards: Vec<shared::Board> = list_resp.json();
+        // `.any(...)` returns true if at least one element satisfies the predicate.
         assert!(boards.iter().any(|b| b.id == board.id));
     }
 
@@ -269,14 +314,12 @@ mod tests {
             .await;
         let column: shared::Column = create_col_resp.json();
 
-        // Delete the board
         server
             .delete(&format!("/api/boards/{}", board.id))
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        // Column should be gone (404 or no longer in list)
-        // We verify via direct column update returning 404
+        // Verify the column no longer exists by trying to update it.
         let update_resp = server
             .put(&format!("/api/columns/{}", column.id))
             .json(&shared::UpdateColumnRequest {
@@ -287,6 +330,8 @@ mod tests {
         update_resp.assert_status(StatusCode::NOT_FOUND);
     }
 
+    // Shared helper used by several card tests. Creates a board (with its default
+    // Todo/Done columns) and then adds a fresh column named "Col".
     async fn setup_board_and_column(server: &TestServer) -> (shared::Board, shared::Column) {
         let board: shared::Board = server
             .post("/api/boards")
@@ -309,6 +354,7 @@ mod tests {
     #[tokio::test]
     async fn create_card_and_list() {
         let server = test_app().await;
+        // `_` discards the board; we only need the column.
         let (_, column) = setup_board_and_column(&server).await;
 
         let create_resp = server
@@ -350,6 +396,7 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 title: Some("New Title".to_string()),
+                // `Some(Some(...))` means "set description to this string value".
                 description: Some(Some("Added description".to_string())),
                 position: None,
                 column_id: None,
@@ -395,12 +442,14 @@ mod tests {
         let moved: shared::Card = move_resp.json();
         assert_eq!(moved.column_id, col_b.id);
 
+        // Verify the card is no longer in col_a.
         let cards_a: Vec<shared::Card> = server
             .get(&format!("/api/columns/{}/cards", col_a.id))
             .await
             .json();
         assert!(!cards_a.iter().any(|c| c.id == card.id));
 
+        // Verify the card is now in col_b.
         let cards_b: Vec<shared::Card> = server
             .get(&format!("/api/columns/{}/cards", col_b.id))
             .await
@@ -453,6 +502,7 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
+        // The card should be gone — trying to update it should 404.
         let resp = server
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
@@ -484,6 +534,7 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
+        // Both the column and its card should be gone after board deletion.
         let col_resp = server
             .put(&format!("/api/columns/{}", column.id))
             .json(&shared::UpdateColumnRequest {
@@ -535,34 +586,25 @@ mod tests {
             .await
             .json();
 
-        // Set positions out of natural insertion order
+        // Deliberately set positions out of insertion order to verify sorting.
         server
             .put(&format!("/api/cards/{}", c1.id))
             .json(&shared::UpdateCardRequest {
-                title: None,
-                description: None,
-                position: Some(2),
-                column_id: None,
+                title: None, description: None, position: Some(2), column_id: None,
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c2.id))
             .json(&shared::UpdateCardRequest {
-                title: None,
-                description: None,
-                position: Some(0),
-                column_id: None,
+                title: None, description: None, position: Some(0), column_id: None,
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c3.id))
             .json(&shared::UpdateCardRequest {
-                title: None,
-                description: None,
-                position: Some(1),
-                column_id: None,
+                title: None, description: None, position: Some(1), column_id: None,
             })
             .await
             .assert_status_ok();
