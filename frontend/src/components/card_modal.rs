@@ -21,11 +21,7 @@ pub fn CardModal(
             let card_id = c.id.clone();
             let title = title_input.get_untracked();
             let desc = desc_input.get_untracked();
-            let desc_val = if desc.trim().is_empty() {
-                None
-            } else {
-                Some(desc)
-            };
+            let desc_val = if desc.trim().is_empty() { None } else { Some(desc) };
             wasm_bindgen_futures::spawn_local(async move {
                 let req = shared::UpdateCardRequest {
                     title: Some(title),
@@ -64,18 +60,23 @@ pub fn CardModal(
                     <form on:submit=on_save>
                         <input
                             type="text"
-                            class="card-title-input"
+                            class="modal-title-input"
                             prop:value=move || title_input.get()
                             on:input=move |ev| title_input.set(event_target_value(&ev))
                         />
                         <textarea
                             class="card-desc-input"
+                            placeholder="Description…"
                             prop:value=move || desc_input.get()
                             on:input=move |ev| desc_input.set(event_target_value(&ev))
                         />
-                        <button type="submit">"Save"</button>
+                        <div class="modal-actions">
+                            <button type="button" class="btn-danger" on:click=on_delete_click>
+                                "Delete"
+                            </button>
+                            <button type="submit">"Save"</button>
+                        </div>
                     </form>
-                    <button class="card-delete-btn" on:click=on_delete_click>"Delete Card"</button>
                 </div>
             </div>
         </Show>

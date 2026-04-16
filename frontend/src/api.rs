@@ -18,6 +18,14 @@ pub async fn create_board(name: String) -> Result<shared::Board, gloo_net::Error
         .await
 }
 
+pub async fn fetch_board(board_id: &str) -> Result<shared::Board, gloo_net::Error> {
+    Request::get(&format!("/api/boards/{board_id}"))
+        .send()
+        .await?
+        .json::<shared::Board>()
+        .await
+}
+
 pub async fn fetch_columns(board_id: &str) -> Result<Vec<shared::Column>, gloo_net::Error> {
     Request::get(&format!("/api/boards/{board_id}/columns"))
         .send()

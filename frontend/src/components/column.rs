@@ -50,7 +50,7 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
 
     view! {
         <div class="column-view">
-            <h3>{column.name.clone()}</h3>
+            <div class="column-header">{column.name.clone()}</div>
 
             <div class="card-list">
                 <For
@@ -67,15 +67,17 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
                 />
             </div>
 
-            <form on:submit=on_add_card>
-                <input
-                    type="text"
-                    placeholder="Card title"
-                    prop:value=move || new_card_title.get()
-                    on:input=move |ev| new_card_title.set(event_target_value(&ev))
-                />
-                <button type="submit">"Add Card"</button>
-            </form>
+            <div class="column-footer">
+                <form class="create-form" on:submit=on_add_card>
+                    <input
+                        type="text"
+                        placeholder="Add card…"
+                        prop:value=move || new_card_title.get()
+                        on:input=move |ev| new_card_title.set(event_target_value(&ev))
+                    />
+                    <button type="submit">"Add"</button>
+                </form>
+            </div>
 
             <CardModal card=selected_card on_delete=on_card_delete />
         </div>

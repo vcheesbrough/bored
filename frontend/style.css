@@ -1,0 +1,362 @@
+/* Design system — zinc palette + indigo accent */
+:root {
+  --bg:        #09090b; /* zinc-950 */
+  --surface:   #18181b; /* zinc-900 */
+  --surface-2: #27272a; /* zinc-800 */
+  --surface-3: #3f3f46; /* zinc-700 */
+  --border:    #3f3f46; /* zinc-700 */
+  --text:      #f4f4f5; /* zinc-100 */
+  --text-muted:#a1a1aa; /* zinc-400 */
+  --accent:    #6366f1; /* indigo-500 */
+  --accent-hover: #818cf8; /* indigo-400 */
+  --danger:    #ef4444; /* red-500 */
+  --radius:    8px;
+  --col-width: 280px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Navbar ─────────────────────────────────────── */
+.navbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.navbar-brand {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text);
+  letter-spacing: 0.02em;
+  text-decoration: none;
+}
+
+.navbar-back {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.15s;
+}
+
+.navbar-back:hover { color: var(--text); }
+
+/* ── Page layout ─────────────────────────────────── */
+.page {
+  flex: 1;
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ── Boards list ─────────────────────────────────── */
+.boards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.board-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.board-card:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.board-card a {
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 15px;
+  display: block;
+}
+
+/* ── Inline create form ──────────────────────────── */
+.create-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  max-width: 400px;
+}
+
+input[type="text"],
+textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  font-family: inherit;
+}
+
+input[type="text"]:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+
+input[type="text"]::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+}
+
+textarea {
+  resize: vertical;
+  width: 100%;
+  min-height: 80px;
+}
+
+/* ── Buttons ─────────────────────────────────────── */
+button, .btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  font-family: inherit;
+}
+
+button:hover, .btn:hover { background: var(--accent-hover); }
+
+button.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+button.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+button.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+button.btn-danger:hover { background: var(--danger); color: #fff; }
+
+/* ── Board view ──────────────────────────────────── */
+.board-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.columns-row {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 4px 0 16px;
+  flex: 1;
+  align-items: flex-start;
+}
+
+.columns-row::-webkit-scrollbar { height: 6px; }
+.columns-row::-webkit-scrollbar-track { background: transparent; }
+.columns-row::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 3px; }
+
+/* ── Column ──────────────────────────────────────── */
+.column-view {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: var(--col-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: calc(100vh - 200px);
+}
+
+.column-header {
+  padding: 12px 14px 10px;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.card-list::-webkit-scrollbar { width: 4px; }
+.card-list::-webkit-scrollbar-track { background: transparent; }
+.card-list::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
+
+.column-footer {
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.column-footer .create-form {
+  max-width: 100%;
+}
+
+.column-footer input[type="text"] {
+  flex: 1;
+  font-size: 13px;
+  padding: 6px 10px;
+}
+
+.column-footer button {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* ── Card item ───────────────────────────────────── */
+.card-item {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.card-item:hover {
+  border-color: var(--accent);
+  background: var(--surface-3);
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+/* ── Modal ───────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+}
+
+.modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.modal-close:hover { color: var(--text); background: transparent; }
+
+.modal-title-input {
+  font-size: 18px;
+  font-weight: 700;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  padding: 4px 0 8px;
+  width: 100%;
+}
+
+.modal-title-input:focus { border-bottom-color: var(--accent); }
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+/* ── Loading / empty ─────────────────────────────── */
+.loading-text {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.add-col-form {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.add-col-form input[type="text"] {
+  width: 180px;
+}

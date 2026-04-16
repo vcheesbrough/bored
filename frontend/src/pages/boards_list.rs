@@ -7,7 +7,6 @@ pub fn BoardsList() -> impl IntoView {
     let new_board_name = RwSignal::new(String::new());
     let loading = RwSignal::new(true);
 
-    // Fetch boards on mount
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::fetch_boards().await {
@@ -36,11 +35,17 @@ pub fn BoardsList() -> impl IntoView {
     };
 
     view! {
-        <div class="boards-list">
-            <h1>"Boards"</h1>
+        <nav class="navbar">
+            <a href="/" class="navbar-brand">"bored"</a>
+        </nav>
+
+        <div class="page">
+            <div class="page-header">
+                <h1 class="page-title">"Boards"</h1>
+            </div>
 
             <Show when=move || loading.get() fallback=|| ()>
-                <p>"Loading..."</p>
+                <p class="loading-text">"Loading..."</p>
             </Show>
 
             <div class="boards-grid">
@@ -59,16 +64,14 @@ pub fn BoardsList() -> impl IntoView {
                 />
             </div>
 
-            <form on:submit=on_create>
+            <form class="create-form" on:submit=on_create>
                 <input
                     type="text"
                     placeholder="New board name"
                     prop:value=move || new_board_name.get()
-                    on:input=move |ev| {
-                        new_board_name.set(event_target_value(&ev));
-                    }
+                    on:input=move |ev| new_board_name.set(event_target_value(&ev))
                 />
-                <button type="submit">"Create Board"</button>
+                <button type="submit">"Create"</button>
             </form>
         </div>
     }
