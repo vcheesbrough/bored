@@ -59,9 +59,26 @@ body {
   align-items: center;
   gap: 4px;
   transition: color 0.15s;
+  margin-left: auto;
 }
 
 .navbar-back:hover { color: var(--text); }
+
+.navbar-sep {
+  color: var(--surface-3);
+  font-size: 16px;
+  user-select: none;
+}
+
+.navbar-board-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ── Page layout ─────────────────────────────────── */
 .page {
