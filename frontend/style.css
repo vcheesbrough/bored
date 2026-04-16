@@ -51,33 +51,114 @@ body {
   text-decoration: none;
 }
 
-.navbar-back {
-  color: var(--text-muted);
-  text-decoration: none;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  transition: color 0.15s;
-  margin-left: auto;
-}
-
-.navbar-back:hover { color: var(--text); }
-
 .navbar-sep {
   color: var(--surface-3);
   font-size: 16px;
   user-select: none;
+  flex-shrink: 0;
 }
 
-.navbar-board-title {
+/* ── Board chooser ───────────────────────────────── */
+.board-chooser-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
+.navbar-board-btn {
+  background: transparent;
+  border: none;
+  color: var(--text);
   font-weight: 600;
   font-size: 15px;
-  color: var(--text);
-  flex: 1;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.navbar-board-btn:hover { background: var(--surface-2); }
+
+.chooser-caret {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.chooser-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 49;
+}
+
+.board-chooser {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  z-index: 50;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chooser-item {
+  display: block;
+  padding: 9px 14px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 14px;
+  transition: background 0.12s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chooser-item:hover { background: var(--surface-2); }
+.chooser-item-active { color: var(--accent); }
+
+.chooser-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.chooser-new-form {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.chooser-new-form input[type="text"] {
+  flex: 1;
+  font-size: 13px;
+  padding: 6px 10px;
+}
+
+.chooser-new-form button {
+  padding: 6px 12px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ── Empty state ─────────────────────────────────── */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 16px;
 }
 
 /* ── Page layout ─────────────────────────────────── */

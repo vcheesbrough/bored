@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
+use crate::components::board_chooser::BoardChooser;
 use crate::components::column::ColumnView;
 
 #[component]
@@ -64,8 +65,7 @@ pub fn BoardView() -> impl IntoView {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
-            <span class="navbar-board-title">{move || board_name.get()}</span>
-            <a href="/" class="navbar-back">"‹ Boards"</a>
+            <BoardChooser board_id=board_id() board_name=board_name />
         </nav>
 
         <div class="page board-view">
