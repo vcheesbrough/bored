@@ -11,7 +11,7 @@
   --accent-hover: #818cf8; /* indigo-400 */
   --danger:    #ef4444; /* red-500 */
   --radius:    8px;
-  --col-width: clamp(340px, 40vw, 420px);
+  --col-min-width: 200px;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -23,6 +23,7 @@ body {
   font-size: 14px;
   line-height: 1.5;
   min-height: 100vh;
+  min-width: 850px;
   display: flex;
   flex-direction: column;
 }
@@ -187,29 +188,23 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   display: flex;
   flex-direction: column;
   flex: 1;
-  overflow: hidden;
 }
 
 .columns-row {
   display: flex;
   gap: 16px;
-  overflow-x: auto;
   padding: 4px 0 16px;
   flex: 1;
   align-items: flex-start;
 }
-
-.columns-row::-webkit-scrollbar { height: 6px; }
-.columns-row::-webkit-scrollbar-track { background: transparent; }
-.columns-row::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 3px; }
 
 /* ── Column ──────────────────────────────────────── */
 .column-view {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  width: var(--col-width);
-  flex-shrink: 0;
+  flex: 1;
+  min-width: var(--col-min-width);
   display: flex;
   flex-direction: column;
   gap: 0;
