@@ -9,7 +9,7 @@ Build a web-based project board app ("bored") as a new standalone repository, de
 
 ## Versioning
 
-Semantic versioning (`MAJOR.MINOR.PATCH`) with `0.x` signalling pre-stability. `1.0` is cut when all iterations are shipped and the API is considered stable.
+Semantic versioning (`MAJOR.MINOR.PATCH`). `0.x` is pre-MVP; `1.0` is cut at the MVP milestone (deployed, auth-gated, MCP live). Post-MVP iterations increment `MINOR` from `1.1` onwards.
 
 - `Cargo.toml` stores `MAJOR.MINOR` only (e.g. `0.1`) — bumped manually when merging an iteration PR
 - `PATCH` is the Woodpecker build number, injected automatically by CI
@@ -23,10 +23,16 @@ Semantic versioning (`MAJOR.MINOR.PATCH`) with `0.x` signalling pre-stability. `
 | 4 — Cards | `0.4` | `0.4.15` |
 | 5 — UI Overhaul | `0.5` | `0.5.1` |
 | 6 — Markdown Cards | `0.6` | `0.6.4` |
-| 7 — Auth | `0.7` | `0.7.3` |
-| 8 — SSE + Drag-drop | `0.8` | `0.8.11` |
-| 9 — Git Links | `0.9` | `0.9.2` |
-| Public release | `1.0` | `1.0.1` |
+| 7 — CI / Deployments | `0.7` | `0.7.1` |
+| 8 — Auth | `0.8` | `0.8.3` |
+| 9 — Bored MCP | `0.9` | `0.9.2` |
+| **🏁 MVP = 1.0** | `1.0` | `1.0.1` |
+| 10 — SSE + Drag-drop | `1.1` | `1.1.11` |
+| 11 — Board Ownership | `1.2` | `1.2.1` |
+| 12 — Soft Delete | `1.3` | `1.3.3` |
+| 13 — Change History | `1.4` | `1.4.2` |
+| 14 — Git Links | `1.5` | `1.5.2` |
+| 15 — CI/CD Integration | `1.6` | `1.6.3` |
 
 **On merge to main**, Woodpecker constructs `VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}`, tags the git commit (`v0.x.N`), and tags the Docker image with `:<sha>` and `:0.x.N`. No `:latest` tag is applied — deployments must reference an explicit version.
 
@@ -932,12 +938,88 @@ Feature: Markdown cards
 
 ---
 
-### Iteration 7 — Auth (OIDC + PKCE)
+### Iteration 7 — CI / Deployments
+
+- Two deployment targets: **dev** and **production**
+- **Dev** deploys automatically on every successful build of `main`
+- **Production** is triggered manually via a Woodpecker UI pipeline dispatch (no auto-deploy)
+- Both targets run as Docker containers on the homelab, managed by `bored-stack/` in `mini-config`
+
+**Woodpecker pipeline changes (`.woodpecker/build.yml`):**
+- Existing `build` step: compile, test, build Docker image, push to registry — unchanged
+- New `deploy-dev` step:
+  - `when: { branch: main, event: push }` — runs automatically after every successful build
+  - SSHes into the homelab and runs `docker compose pull && docker compose up -d` for the dev stack
+  - Dev stack uses an ephemeral named volume `bored-dev-db` (persistent across restarts but not treated as precious data)
+  - Connects to a dev subdomain (e.g. `bored-dev.desync.link`)
+- New `deploy-prod` step:
+  - `when: { event: manual }` — only runs when triggered explicitly from the Woodpecker UI
+  - Same deploy mechanism but targets the production stack
+  - Production stack mounts a Docker volume `bored-prod-db` declared `external: true` in `docker-compose.yml` — the volume must be created manually before the first deploy and is never removed by compose
+  - Connects to the production subdomain (`bored.desync.link`)
+
+**mini-config changes (`bored-stack/`):**
+- `docker-compose.dev.yml` — dev service definition; image tag pinned to `:latest-dev` (or a channel tag updated by the pipeline)
+- `docker-compose.prod.yml` — production service definition; image tag pinned to the explicit version being promoted (e.g. `:0.7.1`); `bored-prod-db` declared as external volume
+- Both compose files set `DATABASE_PATH=/data/bored.db` inside the container, backed by their respective volumes mounted at `/data`
+- Traefik labels in each compose file route the appropriate subdomain
+
+**Environment / secrets:**
+- `WOODPECKER_SSH_KEY` secret: private key for homelab deploy SSH
+- `WOODPECKER_KNOWN_HOSTS`: pre-populated to avoid interactive host verification
+- Image registry credentials already present from the build step
+
+**Tests:** none — deployment config is validated by a successful manual smoke test after first deploy
+
+**CI steps summary:**
+```
+push to main
+  → build + test
+  → docker build + push :sha and :0.7.x
+  → deploy-dev (automatic)
+
+manual trigger in Woodpecker UI
+  → deploy-prod (with explicit image tag parameter)
+```
+
+```gherkin
+Feature: Dev deployment
+  Scenario: Merge to main triggers dev deploy
+    Given a PR is merged to main
+    When the Woodpecker build passes
+    Then the dev environment at bored-dev.desync.link is updated automatically
+    And the new version is reachable within 60 seconds
+
+Feature: Production deployment
+  Scenario: Production deploy is manual only
+    Given a successful build exists for version 0.7.1
+    When a developer triggers the deploy-prod pipeline in the Woodpecker UI
+    Then bored.desync.link is updated to that version
+
+  Scenario: Production database persists across deploys
+    Given the production stack has boards and cards in bored-prod-db
+    When a new production deploy runs
+    Then all boards and cards are still present after the deploy
+```
+
+**Deliverable:** Dev and production environments running in the homelab. Devs can validate on dev before promoting to production via a manual trigger.
+
+---
+
+### Iteration 8 — Auth (OIDC + PKCE)
 
 - OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
 - `tower-sessions` backed by SurrealDB
 - Session middleware guarding all `/api/*` routes
 - Frontend: unauthenticated requests redirect through login flow
+- Every mutation route (`POST`, `PUT`, `DELETE`) stamps `last_edited_by = current_user` on the affected record — boards, columns, and cards all gain this field
+- `last_edited_by` is a `record<users>` link, exposed in API responses as `{ id, name }` — this is the foundation for change history in iteration 13; when history begins recording, pre-history edits are attributable via this field
+
+**Schema changes:**
+- Add `last_edited_by ON boards TYPE record<users>`
+- Add `last_edited_by ON columns TYPE record<users>`
+- Add `last_edited_by ON cards TYPE record<users>`
+- All three are set on create and updated on every subsequent mutation by the session middleware before the handler runs
 
 **Tests:**
 - Integration: mock OIDC provider walks full login → callback flow, session cookie asserted, protected routes return 401 without session, logout destroys session
@@ -979,7 +1061,77 @@ Feature: Authentication
 
 ---
 
-### Iteration 8 — Real-time (SSE) + Drag-and-Drop
+### Iteration 9 — Bored MCP
+
+- A standalone MCP server (`mcp/` crate in the workspace) that exposes the full bored API as generic MCP tools
+- Claude can use it for any purpose — including managing its own project plan by treating cards as iteration specs, but the tools themselves are not planning-specific
+- Auth-aware from day one — holds a long-lived API token configured via environment variable, attached to every request
+- Claude creates whatever boards and columns it needs; no pre-created structure is required
+
+**MCP tools exposed:**
+- `list_boards` — returns all boards the token's user can access
+- `create_board` — creates a new board with a given name
+- `delete_board` — deletes a board and all its contents
+- `list_columns` — lists columns for a board, ordered by position
+- `create_column` — creates a column on a board with a given name
+- `delete_column` — deletes a column and all its cards
+- `list_cards` — lists cards in a column, ordered by position
+- `get_card` — fetches a single card's full body
+- `create_card` — creates a card in a column with a markdown body
+- `update_card` — updates a card's body
+- `move_card` — moves a card to a different column and/or position
+- `delete_card` — deletes a card
+
+**MCP server implementation:**
+- Rust crate `mcp/` using the `rmcp` crate (Rust MCP SDK)
+- Configured via environment variables: `BORED_API_URL`, `BORED_API_TOKEN`
+- Communicates with Claude Code via stdio transport
+- Registered in `.claude/mcp.json` (or `~/.claude/mcp.json`) pointing at the built binary
+
+**Tests:**
+- Integration: spin up a test bored server, point MCP at it, call each tool, assert correct API calls and responses
+
+```gherkin
+Feature: Bored MCP
+  Scenario: Create a board and populate it
+    When Claude calls create_board with name "Planning"
+    And calls create_column with name "Backlog" on that board
+    And calls create_card with a markdown body in that column
+    Then list_cards returns the card with its full body
+
+  Scenario: Move a card between columns
+    Given a card exists in column "Backlog"
+    When Claude calls create_column "In Progress" and then move_card
+    Then list_cards on "In Progress" includes the card
+
+  Scenario: Update a card body
+    Given a card exists with body "# v1"
+    When Claude calls update_card with body "# v2"
+    Then get_card returns the updated body
+
+  Scenario: Delete a board removes all contents
+    Given a board with columns and cards exists
+    When Claude calls delete_board
+    Then list_boards no longer includes it
+```
+
+**Deliverable:** Claude has full read/write access to bored via MCP tools and can organise information on the board however it sees fit — including managing its own project plan.
+
+---
+
+## 🏁 Milestone — MVP = 1.0
+
+`Cargo.toml` is bumped to `1.0` at this point. The app is deployed, login-gated, and Claude can manage the project plan directly on the board. From here, iterations 10–14 are planned and tracked as cards on the bored board itself rather than in `PLAN.md`.
+
+**Criteria:**
+- Iteration 9 shipped and MCP registered in Claude Code
+- A "bored" board created on the production instance with columns: `Backlog` | `In Progress` | `Done`
+- Cards created for iterations 10–14 with their specs as the card body
+- `PLAN.md` remains as a historical record but the board is the live source of truth going forward
+
+---
+
+### Iteration 10 — Real-time (SSE) + Drag-and-Drop
 
 - `broadcast::Sender<BoardEvent>` in `AppState`; all mutation routes fire events
 - `GET /api/events` SSE endpoint with keepalive
@@ -987,6 +1139,25 @@ Feature: Authentication
 - HTML5 drag-and-drop for card reorder within column and across columns
 - Column reorder via drag-and-drop on column headers; a drag handle (⠿ grip icon) appears on column header hover; dropping a column between two others recomputes all `position` values and bulk-updates via `PUT /api/boards/:id/columns/reorder`
 - `PUT /api/boards/:id/columns/reorder` accepts `{ order: [col_id, …] }` — an ordered list of all column IDs for the board; server assigns `position = index` for each
+
+**`BoardEvent` variants (initial set — extended in later iterations):**
+```rust
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BoardEvent {
+    CardCreated         { card: Card },
+    CardUpdated         { card: Card },
+    CardDeleted         { card_id: String },
+    CardMoved           { card_id: String, column_id: String, position: i32 },
+    ColumnCreated       { column: Column },
+    ColumnUpdated       { column: Column },
+    ColumnDeleted       { column_id: String },
+    ColumnsReordered    { columns: Vec<Column> },
+    BoardCreated        { board: Board },
+    BoardUpdated        { board: Board },
+    BoardDeleted        { board_id: String },
+}
+```
 
 **Tests:**
 - Integration: test client subscribes to `/api/events`, mutation performed, correct `BoardEvent` variant received within timeout; keepalive comment sent after idle period
@@ -1047,12 +1218,260 @@ Feature: Column reorder
 
 ---
 
-### Iteration 9 — Git Links
+### Iteration 11 — Board Ownership
+
+- Each board has an `owner` field — the user ID of the authenticated user who created it
+- Boards are private by default: only the owner can read or modify them
+- Owners can invite other users by email; an invitation creates a `board_members` record with a `role` of `member`
+- Members can read and write cards/columns on the board but cannot delete the board or manage invitations
+- Only the owner can delete the board, rename it, invite/remove members, or transfer ownership
+- All `/api/boards/*`, `/api/columns/*`, `/api/cards/*` routes enforce membership checks — returning 403 for non-members and 404 for non-members on GET (to avoid leaking existence)
+
+**Schema changes:**
+- `boards` table: add `owner` field — `TYPE record<users>`
+- New `board_members` table:
+  ```surql
+  DEFINE TABLE board_members SCHEMAFULL;
+  DEFINE FIELD board  ON board_members TYPE record<boards>;
+  DEFINE FIELD user   ON board_members TYPE record<users>;
+  DEFINE FIELD role   ON board_members TYPE string; -- 'owner' | 'member'
+  DEFINE INDEX board_members_board_user ON board_members FIELDS board, user UNIQUE;
+  ```
+- `users` table: add if not exists — populated from OIDC `sub` + `email` claims on first login
+
+**API changes:**
+- `POST /api/boards` — sets `owner = current_user`, creates a `board_members` row with `role = 'owner'`
+- `GET /api/boards` — returns only boards where the current user is a member
+- `GET/PUT/DELETE /api/boards/:id` — 404 if not a member, 403 if delete/rename attempted by non-owner
+- New endpoints:
+  - `GET  /api/boards/:id/members` — list members (owner + invited users)
+  - `POST /api/boards/:id/invites` — `{ email }` — owner only; looks up user by email, creates `board_members` row
+  - `DELETE /api/boards/:id/members/:user_id` — owner only; removes a member (cannot remove self if owner)
+  - `PUT /api/boards/:id/transfer` — `{ user_id }` — owner transfers ownership to a member
+
+**Frontend changes:**
+- Board chooser only shows boards the current user is a member of (already the case since the API filters)
+- Board settings panel (new section in the chooser dropdown or a separate modal):
+  - Member list showing name/email and role
+  - Invite by email input
+  - Remove member button (owner only)
+  - Transfer ownership button (owner only)
+- 403 responses show a "you don't have access" message rather than crashing
+
+**New SSE event types (added to `BoardEvent` in this iteration):**
+```rust
+MemberInvited       { board_id: String, user: User },
+MemberRemoved       { board_id: String, user_id: String },
+OwnershipTransferred { board_id: String, new_owner_id: String, prev_owner_id: String },
+```
+- SSE events for member changes are only broadcast to existing members of the board (not to the newly invited user until they connect after accepting)
+
+**Tests:**
+- Integration: owner can CRUD their board; non-member gets 404 on GET; member can create cards but not delete board; invite flow adds member; remove member revokes access; transfer ownership changes who can manage
+
+```gherkin
+Feature: Board ownership
+  Scenario: Created board is private to owner
+    Given user A and user B are authenticated
+    When user A creates a board
+    Then GET /api/boards for user B does not include that board
+
+  Scenario: Owner can invite a member
+    Given user A owns a board
+    When user A posts to /api/boards/:id/invites with user B's email
+    Then user B can read and write cards on that board
+
+  Scenario: Member cannot delete the board
+    Given user B is a member (not owner) of a board
+    When user B sends DELETE /api/boards/:id
+    Then the response is 403 Forbidden
+
+  Scenario: Owner can transfer ownership
+    Given user A owns a board and user B is a member
+    When user A puts to /api/boards/:id/transfer with user B's id
+    Then user B becomes the owner
+    And user A becomes a regular member
+
+  Scenario: Removing a member revokes access
+    Given user B is a member of a board
+    When user A (owner) deletes /api/boards/:id/members/:user_b_id
+    Then user B can no longer access the board
+```
+
+**Deliverable:** Boards are private and access-controlled. Users only see their own boards and boards they've been invited to.
+
+---
+
+### Iteration 12 — Soft Delete
+
+- All destructive operations (delete board, delete column, delete card) become soft deletes — the record is marked `deleted_at` rather than removed from the database
+- A trash UI allows users to browse and restore recently deleted items, or permanently delete them
+- Soft-deleted records are excluded from all normal API responses automatically
+- Permanent deletion is a separate explicit action, available from the trash UI only
+- Items in the trash are auto-purged after 30 days (a background task running on server startup and periodically thereafter)
+
+**Schema changes:**
+- Add `deleted_at` field (`TYPE option<datetime> DEFAULT NONE`) to `boards`, `columns`, and `cards`
+- All `SELECT` queries gain a `WHERE deleted_at = NONE` filter — enforced at the query layer, not the schema layer, so restores are a simple `UPDATE ... SET deleted_at = NONE`
+- Cascade soft-delete: deleting a board soft-deletes its columns and cards in the same operation; deleting a column soft-deletes its cards
+
+**API changes:**
+- `DELETE /api/boards/:id`, `DELETE /api/columns/:id`, `DELETE /api/cards/:id` — now set `deleted_at = time::now()` instead of removing the record; response remains 204
+- New trash endpoints:
+  - `GET  /api/trash` — returns all soft-deleted boards, columns, and cards owned/accessible by the current user, grouped by type, ordered by `deleted_at` descending
+  - `POST /api/trash/:type/:id/restore` — clears `deleted_at` on the record and (for boards/columns) restores its non-permanently-deleted children
+  - `DELETE /api/trash/:type/:id` — permanently deletes the record and any soft-deleted children
+  - `DELETE /api/trash` — permanently deletes all items in the trash for the current user
+
+**Frontend changes:**
+- Delete actions (board ×, column ×, card Delete button) remain unchanged in appearance but the item disappears immediately via optimistic UI — the soft-delete happens in the background
+- New "Trash" link or icon in the navbar opens a trash panel/page listing deleted items grouped as Boards, Columns, Cards
+- Each trash item shows name, what it belonged to, and time deleted
+- "Restore" button per item; "Delete permanently" button per item; "Empty trash" button at the top
+- Restoring a card whose column or board is also in the trash shows a warning: "This card's column was also deleted — restore the column first"
+
+**New SSE event types (added to `BoardEvent` in this iteration):**
+```rust
+BoardTrashed             { board_id: String },
+BoardRestored            { board: Board },
+BoardPermanentlyDeleted  { board_id: String },
+ColumnTrashed            { column_id: String },
+ColumnRestored           { column: Column },
+ColumnPermanentlyDeleted { column_id: String },
+CardTrashed              { card_id: String },
+CardRestored             { card: Card },
+CardPermanentlyDeleted   { card_id: String },
+```
+- `*Trashed` events replace the old `*Deleted` variants — clients hide the item optimistically on delete and the event confirms it; the old hard-delete variants are retired
+- `*Restored` events cause clients to re-insert the item into the appropriate list at its saved position
+
+**Tests:**
+- Integration: delete board → not in list → appears in trash → restore → back in list; permanent delete → gone from trash; cascade: delete board soft-deletes columns and cards; auto-purge removes items older than 30 days
+
+```gherkin
+Feature: Soft delete
+  Scenario: Deleted card appears in trash and can be restored
+    Given a card exists on a board
+    When the user deletes the card
+    Then the card no longer appears on the board
+    And GET /api/trash includes the card
+    When the user restores the card from trash
+    Then the card reappears on the board
+
+  Scenario: Deleting a board soft-deletes its columns and cards
+    Given a board has 2 columns each with 3 cards
+    When the board is deleted
+    Then GET /api/trash includes the board, both columns, and all 6 cards
+
+  Scenario: Restoring a board restores its columns and cards
+    Given a board and its columns and cards are all in the trash
+    When the board is restored
+    Then the board, columns, and cards all reappear
+
+  Scenario: Permanent delete cannot be undone
+    Given a card is in the trash
+    When the user permanently deletes it
+    Then it no longer appears in GET /api/trash
+    And a restore attempt returns 404
+
+  Scenario: Items auto-purge after 30 days
+    Given a card was soft-deleted 31 days ago
+    When the purge task runs
+    Then the card is permanently deleted
+```
+
+**Deliverable:** No accidental permanent data loss from misclicks. All deletes are reversible within 30 days.
+
+---
+
+### Iteration 13 — Change History
+
+- Every edit to a card's body is recorded as an immutable snapshot in a `card_history` table
+- The history panel in the card modal shows a timeline of versions with timestamp and author
+- Any previous version can be previewed (rendered markdown) and restored with one click
+- Restoring a version creates a new history entry (the restore itself is recorded) — history is append-only and never modified or deleted
+- History is scoped per card; other record types (board name, column name) are not versioned in this iteration
+- Pre-history edits are attributable via the `last_edited_by` field stamped on every card since iteration 8 — the history timeline can show "last edited by X before history began" for cards that existed prior to this iteration
+
+**Schema changes:**
+- New `card_history` table:
+  ```surql
+  DEFINE TABLE card_history SCHEMAFULL;
+  DEFINE FIELD card       ON card_history TYPE record<cards>;
+  DEFINE FIELD body       ON card_history TYPE string;
+  DEFINE FIELD edited_by  ON card_history TYPE record<users>;
+  DEFINE FIELD created_at ON card_history TYPE datetime VALUE time::now();
+  DEFINE INDEX card_history_card ON card_history FIELDS card;
+  ```
+- A history row is written on every `PUT /api/cards/:id` that changes `body`, and on every restore
+- The initial card creation also writes a history row (version 1)
+- Cards created before this iteration show a synthetic "history began" entry using `last_edited_by` and `updated_at` from the card record
+
+**API changes:**
+- `GET  /api/cards/:id/history` — returns all history entries for a card, ordered by `created_at` descending; each entry includes `{ id, body, edited_by: { id, name }, created_at }`
+- `POST /api/cards/:id/history/:history_id/restore` — sets `cards.body` to the snapshot body and writes a new history entry tagged as a restore; returns the updated card
+
+**Frontend changes:**
+- Card modal gains a "History" toggle button in the footer (next to the save status indicator)
+- History panel replaces the edit area when open: a scrollable list of version entries showing relative time (e.g. "2 hours ago"), author name, and a truncated preview of the body
+- Clicking a version entry expands it to show the full rendered markdown preview inline
+- "Restore this version" button on each entry — triggers the restore API call, closes the history panel, and updates the card body in the modal and on the board
+- The current version is marked "Current" and has no restore button
+
+**New SSE event types (added to `BoardEvent` in this iteration):**
+```rust
+CardHistoryRestored { card: Card, restored_from_history_id: String },
+```
+- Broadcasts when a card body is restored from a history snapshot so other clients immediately reflect the reverted content
+
+**Tests:**
+- Integration: create card → edit body twice → GET history returns 3 entries (create + 2 edits); restore version 1 → body reverts → GET history returns 4 entries; history entries are immutable (no DELETE endpoint)
+
+```gherkin
+Feature: Card change history
+  Scenario: Edits are recorded in history
+    Given a card exists with body "# v1"
+    When the body is updated to "# v2" and then "# v3"
+    Then GET /api/cards/:id/history returns 3 entries in descending order
+
+  Scenario: Restore reverts body and records the restore
+    Given a card has history entries for "# v1" and "# v2"
+    When the user restores "# v1"
+    Then the card body is "# v1"
+    And GET /api/cards/:id/history returns a new entry tagged as a restore
+
+  Scenario: History is append-only
+    Given a card has 3 history entries
+    When DELETE /api/cards/:id/history/:id is attempted
+    Then the response is 405 Method Not Allowed
+
+  Scenario: History panel shows versions with author and time
+    Given a card has been edited by two different users
+    When the user opens the history panel in the card modal
+    Then each entry shows the editor's name and a relative timestamp
+
+  Scenario: Initial creation appears as version 1
+    Given a card is created with body "# Hello"
+    Then GET /api/cards/:id/history returns exactly 1 entry with that body
+```
+
+**Deliverable:** Full audit trail for card content. Any version of any card can be previewed and restored.
+
+---
+
+### Iteration 14 — Git Links
 
 - `git_links` table + schema
 - `shared/` types for git links
 - REST API: git links CRUD + GitHub API proxy routes
 - Frontend: GitLinks section in card modal with status badges fetched from proxy
+
+**New SSE event types (added to `BoardEvent` in this iteration):**
+```rust
+GitLinkAdded   { card_id: String, git_link: GitLink },
+GitLinkDeleted { card_id: String, git_link_id: String },
+```
+- Allows other members viewing the same card modal to see git links appear/disappear in real time
 
 **Tests:**
 - Integration: git links CRUD, cascade delete when card deleted
@@ -1079,6 +1498,41 @@ Feature: Git links
 ```
 
 **Deliverable:** Cards can be linked to commits, branches, and PRs with live status from GitHub.
+
+---
+
+### Iteration 15 — CI/CD Integration
+
+- Woodpecker webhook integration: on pipeline status change, bored receives a webhook and updates the linked card's CI status
+- `ci_status` field on cards (`option<string>`: `pending | running | success | failure | cancelled`)
+- REST endpoint: `POST /api/webhooks/woodpecker` — verifies HMAC signature, maps pipeline to linked card via git ref, updates `ci_status`
+- Frontend: CI status badge on each card in the board view (colour-coded; shown alongside card title)
+
+**New SSE event types (added to `BoardEvent` in this iteration):**
+```rust
+CardCiStatusChanged { card_id: String, ci_status: String },
+```
+
+**Tests:**
+- Integration: webhook endpoint verifies HMAC, rejects bad signatures, updates card `ci_status`
+- SSE: `CardCiStatusChanged` emitted when webhook received
+- Frontend: CI badge renders correct colour per status
+
+```gherkin
+Feature: CI/CD Integration
+  Scenario: Woodpecker pipeline completes successfully
+    Given a card is linked to a git commit ref "abc1234"
+    When POST /api/webhooks/woodpecker is called with a success payload for "abc1234"
+    Then the card's ci_status is "success"
+    And a CardCiStatusChanged SSE event is broadcast to all board members
+
+  Scenario: Webhook with invalid HMAC signature is rejected
+    Given a Woodpecker webhook secret is configured
+    When POST /api/webhooks/woodpecker is called with a bad signature
+    Then the response is 401 Unauthorized
+```
+
+**Deliverable:** CI pipeline status is visible as a badge on cards, updated in real time via Woodpecker webhooks.
 
 ---
 
