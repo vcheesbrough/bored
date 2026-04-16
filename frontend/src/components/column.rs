@@ -5,14 +5,18 @@ use crate::components::card::CardItem;
 use crate::components::card_modal::CardModal;
 
 #[component]
-pub fn ColumnView(column: shared::Column) -> impl IntoView {
+pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
     let selected_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
     let show_add = RwSignal::new(false);
-    let col_id = column.id.clone();
+
+    let initial = column.get_untracked();
+    let col_id = initial.id.clone();
+    let col_id_for_fetch = col_id.clone();
+    let col_name_for_modal = initial.name.clone();
 
     Effect::new(move |_| {
-        let id = col_id.clone();
+        let id = col_id_for_fetch.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::fetch_cards(&id).await {
                 Ok(fetched) => cards.set(fetched.into_iter().map(RwSignal::new).collect()),
@@ -45,7 +49,7 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
     view! {
         <div class="column-view">
             <div class="column-header">
-                <span class="column-name">{column.name.clone()}</span>
+                <span class="column-name">{move || column.get().name.clone()}</span>
                 <button
                     class="add-card-btn"
                     title="Add card"
@@ -66,8 +70,8 @@ pub fn ColumnView(column: shared::Column) -> impl IntoView {
 
             <CardModal card=selected_card on_updated=on_card_updated on_delete=on_card_delete />
             <AddCardModal
-                column_id=column.id.clone()
-                column_name=column.name.clone()
+                column_id=col_id
+                column_name=col_name_for_modal
                 show=show_add
                 on_created=on_card_created
             />

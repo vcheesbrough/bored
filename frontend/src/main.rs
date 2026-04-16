@@ -22,5 +22,6 @@ fn App() -> impl IntoView {
                 <Route path=path!("/boards/:id") view=BoardView />
             </Routes>
         </Router>
+        <div class="app-watermark">"v" {env!("CARGO_PKG_VERSION")}</div>
     }
 }
