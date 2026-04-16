@@ -42,3 +42,28 @@ impl DbColumn {
         }
     }
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DbCard {
+    pub id: Thing,
+    pub column: Thing,
+    pub title: String,
+    pub description: Option<String>,
+    pub position: i32,
+    pub created_at: surrealdb::sql::Datetime,
+    pub updated_at: surrealdb::sql::Datetime,
+}
+
+impl DbCard {
+    pub fn into_api(self) -> shared::Card {
+        shared::Card {
+            id: self.id.id.to_raw(),
+            column_id: self.column.id.to_raw(),
+            title: self.title,
+            description: self.description,
+            position: self.position,
+            created_at: self.created_at.to_string(),
+            updated_at: self.updated_at.to_string(),
+        }
+    }
+}
