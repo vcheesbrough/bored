@@ -1,11 +1,13 @@
 use leptos::prelude::*;
 
 #[component]
-pub fn CardItem(card: shared::Card, on_click: Callback<shared::Card>) -> impl IntoView {
-    let card_clone = card.clone();
+pub fn CardItem(
+    card: RwSignal<shared::Card>,
+    on_click: Callback<shared::Card>,
+) -> impl IntoView {
     view! {
-        <div class="card-item" on:click=move |_| on_click.run(card_clone.clone())>
-            <span class="card-title">{card.title.clone()}</span>
+        <div class="card-item" on:click=move |_| on_click.run(card.get_untracked())>
+            <span class="card-title">{move || card.get().title.clone()}</span>
         </div>
     }
 }
