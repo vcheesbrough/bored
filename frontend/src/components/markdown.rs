@@ -2,11 +2,18 @@ use leptos::prelude::*;
 use pulldown_cmark::{html, Event, Parser};
 
 fn to_html(md: &str) -> String {
-    // Strip raw HTML events before rendering to prevent stored XSS: a card body
-    // containing `<script>` or inline event handlers would otherwise be injected
-    // verbatim into the DOM via `inner_html`.
-    let parser = Parser::new(md).filter(|event| {
-        !matches!(event, Event::Html(_) | Event::InlineHtml(_))
+    // Strip raw HTML events and block `javascript:`/`vbscript:` URIs in link
+    // and image destinations to prevent stored XSS via `inner_html`.
+    let parser = Parser::new(md).filter(|event| match event {
+        // Raw HTML blocks / inline HTML inject verbatim into the DOM.
+        Event::Html(_) | Event::InlineHtml(_) => false,
+        // `javascript:` and `vbscript:` href/src values execute on click/load.
+        Event::Start(pulldown_cmark::Tag::Link { dest_url, .. })
+        | Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
+            let lower = dest_url.to_lowercase();
+            !lower.starts_with("javascript:") && !lower.starts_with("vbscript:")
+        }
+        _ => true,
     });
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);

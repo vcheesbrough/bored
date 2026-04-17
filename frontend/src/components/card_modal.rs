@@ -77,6 +77,11 @@ pub fn CardModal(
             let card_id = c.id.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 TimeoutFuture::new(500).await;
+                // Bail if the modal was already closed — flush_and_close has
+                // already saved (or is saving) the final body.
+                if card.get_untracked().is_none() {
+                    return;
+                }
                 // Check that no further edits happened during the sleep.
                 let current = body.get_untracked();
                 if current == body_at_schedule {
@@ -86,13 +91,36 @@ pub fn CardModal(
         }
     };
 
-    // Flushes any unsaved body immediately — called when the modal is about to close.
+    // Flushes any unsaved body, waits for the save to complete, then closes the
+    // modal. Keeping the modal open during the flush ensures the user sees a
+    // failure if the request errors, rather than silently losing the edit.
     let flush_and_close = move || {
         let current = body.get_untracked();
         let last_saved = saved_body.get_untracked();
         if current != last_saved {
             if let Some(c) = card.get_untracked() {
-                do_save(c.id.clone(), current);
+                let card_id = c.id.clone();
+                save_status.set(SaveStatus::Saving);
+                wasm_bindgen_futures::spawn_local(async move {
+                    let req = shared::UpdateCardRequest {
+                        body: Some(current.clone()),
+                        position: None,
+                        column_id: None,
+                    };
+                    match crate::api::update_card(&card_id, req).await {
+                        Ok(updated) => {
+                            on_updated.run(updated);
+                            card.set(None);
+                            editing.set(false);
+                        }
+                        Err(e) => {
+                            // Leave modal open so the user can see the failure.
+                            save_status.set(SaveStatus::Failed);
+                            leptos::logging::error!("flush save failed: {e}");
+                        }
+                    }
+                });
+                return;
             }
         }
         card.set(None);
