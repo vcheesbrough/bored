@@ -18,6 +18,9 @@ DEFINE FIELD IF NOT EXISTS position   ON TABLE cards TYPE int;
 DEFINE FIELD IF NOT EXISTS created_at ON TABLE cards TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON TABLE cards TYPE datetime VALUE time::now();
 DEFINE INDEX IF NOT EXISTS cards_column ON TABLE cards FIELDS column;
+-- Migrate iteration-5 records that have title/description but no body yet.
+-- Concatenates the old fields so deserialisation of `body: String` doesn't fail.
+UPDATE cards SET body = string::concat(title, '\n\n', description ?? '') WHERE body IS NONE;
 -- Remove legacy fields from the iteration-5 schema; no-op if they don't exist.
 REMOVE FIELD IF EXISTS title       ON TABLE cards;
 REMOVE FIELD IF EXISTS description ON TABLE cards;
