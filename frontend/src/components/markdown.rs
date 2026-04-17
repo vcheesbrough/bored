@@ -1,8 +1,13 @@
 use leptos::prelude::*;
-use pulldown_cmark::{html, Parser};
+use pulldown_cmark::{html, Event, Parser};
 
 fn to_html(md: &str) -> String {
-    let parser = Parser::new(md);
+    // Strip raw HTML events before rendering to prevent stored XSS: a card body
+    // containing `<script>` or inline event handlers would otherwise be injected
+    // verbatim into the DOM via `inner_html`.
+    let parser = Parser::new(md).filter(|event| {
+        !matches!(event, Event::Html(_) | Event::InlineHtml(_))
+    });
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
     html_output
