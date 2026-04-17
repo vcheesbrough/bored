@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "axum-server",
@@ -1480,11 +1480,13 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gloo-net",
+ "gloo-timers",
  "leptos",
  "leptos_router",
+ "pulldown-cmark",
  "serde_json",
  "shared",
  "wasm-bindgen-futures",
@@ -1768,6 +1770,18 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3528,6 +3542,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
 name = "quick_cache"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4618,7 +4650,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]

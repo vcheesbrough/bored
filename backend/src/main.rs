@@ -360,14 +360,12 @@ mod tests {
         let create_resp = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Fix bug".to_string(),
-                description: Some("Details here".to_string()),
+                body: "# Fix bug\n\nDetails here".to_string(),
             })
             .await;
         create_resp.assert_status(StatusCode::CREATED);
         let card: shared::Card = create_resp.json();
-        assert_eq!(card.title, "Fix bug");
-        assert_eq!(card.description, Some("Details here".to_string()));
+        assert_eq!(card.body, "# Fix bug\n\nDetails here");
         assert_eq!(card.column_id, column.id);
 
         let list_resp = server
@@ -379,15 +377,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_card_title_and_description() {
+    async fn update_card_body() {
         let server = test_app().await;
         let (_, column) = setup_board_and_column(&server).await;
 
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Old Title".to_string(),
-                description: None,
+                body: "# Old body".to_string(),
             })
             .await
             .json();
@@ -395,17 +392,14 @@ mod tests {
         let update_resp = server
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
-                title: Some("New Title".to_string()),
-                // `Some(Some(...))` means "set description to this string value".
-                description: Some(Some("Added description".to_string())),
+                body: Some("# New body\n\nWith details".to_string()),
                 position: None,
                 column_id: None,
             })
             .await;
         update_resp.assert_status_ok();
         let updated: shared::Card = update_resp.json();
-        assert_eq!(updated.title, "New Title");
-        assert_eq!(updated.description, Some("Added description".to_string()));
+        assert_eq!(updated.body, "# New body\n\nWith details");
     }
 
     #[tokio::test]
@@ -425,8 +419,7 @@ mod tests {
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", col_a.id))
             .json(&shared::CreateCardRequest {
-                title: "Movable".to_string(),
-                description: None,
+                body: "Movable card".to_string(),
             })
             .await
             .json();
@@ -465,8 +458,7 @@ mod tests {
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "To Delete".to_string(),
-                description: None,
+                body: "To Delete".to_string(),
             })
             .await
             .json();
@@ -491,8 +483,7 @@ mod tests {
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Orphan".to_string(),
-                description: None,
+                body: "Orphan card".to_string(),
             })
             .await
             .json();
@@ -506,8 +497,7 @@ mod tests {
         let resp = server
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
-                title: Some("x".to_string()),
-                description: None,
+                body: Some("x".to_string()),
                 position: None,
                 column_id: None,
             })
@@ -523,8 +513,7 @@ mod tests {
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Deep Orphan".to_string(),
-                description: None,
+                body: "Deep Orphan card".to_string(),
             })
             .await
             .json();
@@ -547,8 +536,7 @@ mod tests {
         let card_resp = server
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
-                title: Some("x".to_string()),
-                description: None,
+                body: Some("x".to_string()),
                 position: None,
                 column_id: None,
             })
@@ -564,24 +552,21 @@ mod tests {
         let c1: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Card 1".to_string(),
-                description: None,
+                body: "Card 1".to_string(),
             })
             .await
             .json();
         let c2: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Card 2".to_string(),
-                description: None,
+                body: "Card 2".to_string(),
             })
             .await
             .json();
         let c3: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Card 3".to_string(),
-                description: None,
+                body: "Card 3".to_string(),
             })
             .await
             .json();
@@ -590,8 +575,7 @@ mod tests {
         server
             .put(&format!("/api/cards/{}", c1.id))
             .json(&shared::UpdateCardRequest {
-                title: None,
-                description: None,
+                body: None,
                 position: Some(2),
                 column_id: None,
             })
@@ -600,8 +584,7 @@ mod tests {
         server
             .put(&format!("/api/cards/{}", c2.id))
             .json(&shared::UpdateCardRequest {
-                title: None,
-                description: None,
+                body: None,
                 position: Some(0),
                 column_id: None,
             })
@@ -610,8 +593,7 @@ mod tests {
         server
             .put(&format!("/api/cards/{}", c3.id))
             .json(&shared::UpdateCardRequest {
-                title: None,
-                description: None,
+                body: None,
                 position: Some(1),
                 column_id: None,
             })
@@ -624,9 +606,9 @@ mod tests {
             .json();
 
         assert_eq!(cards.len(), 3);
-        assert_eq!(cards[0].title, "Card 2"); // position 0
-        assert_eq!(cards[1].title, "Card 3"); // position 1
-        assert_eq!(cards[2].title, "Card 1"); // position 2
+        assert_eq!(cards[0].body, "Card 2"); // position 0
+        assert_eq!(cards[1].body, "Card 3"); // position 1
+        assert_eq!(cards[2].body, "Card 1"); // position 2
     }
 
     #[tokio::test]
@@ -635,8 +617,7 @@ mod tests {
         server
             .post("/api/columns/doesnotexist/cards")
             .json(&shared::CreateCardRequest {
-                title: "Ghost".to_string(),
-                description: None,
+                body: "Ghost card".to_string(),
             })
             .await
             .assert_status(StatusCode::NOT_FOUND);
@@ -650,8 +631,7 @@ mod tests {
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))
             .json(&shared::CreateCardRequest {
-                title: "Movable".to_string(),
-                description: None,
+                body: "Movable card".to_string(),
             })
             .await
             .json();
@@ -672,8 +652,7 @@ mod tests {
         server
             .put("/api/cards/doesnotexist")
             .json(&shared::UpdateCardRequest {
-                title: Some("x".to_string()),
-                description: None,
+                body: Some("x".to_string()),
                 position: None,
                 column_id: None,
             })
@@ -688,5 +667,35 @@ mod tests {
             .delete("/api/cards/doesnotexist")
             .await
             .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_card_with_empty_body_returns_400() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+        server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "   ".to_string(),
+            })
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn card_response_has_body_not_title_or_description() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "# My Card\n\nSome content".to_string(),
+            })
+            .await
+            .json();
+
+        // Verify the full body is preserved verbatim.
+        assert_eq!(card.body, "# My Card\n\nSome content");
     }
 }
