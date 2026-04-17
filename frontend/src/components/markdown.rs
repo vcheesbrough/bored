@@ -1,18 +1,23 @@
 use leptos::prelude::*;
-use pulldown_cmark::{html, Event, Parser};
+use pulldown_cmark::{html, Event, Parser, TagEnd};
 
 fn to_html(md: &str) -> String {
-    // Strip raw HTML events and block `javascript:`/`vbscript:` URIs in link
-    // and image destinations to prevent stored XSS via `inner_html`.
+    // Strip raw HTML and dangerous URI schemes to prevent stored XSS via `inner_html`.
     let parser = Parser::new(md).filter(|event| match event {
-        // Raw HTML blocks / inline HTML inject verbatim into the DOM.
+        // Raw HTML blocks and inline HTML inject verbatim into the DOM.
         Event::Html(_) | Event::InlineHtml(_) => false,
-        // `javascript:` and `vbscript:` href/src values execute on click/load.
+        // Block dangerous URI schemes in link/image destinations.
+        // Also drop the matching End events so push_html doesn't emit stray
+        // </a> or </img> closing tags for every filtered Start — safe because
+        // Markdown doesn't allow nested links or images.
         Event::Start(pulldown_cmark::Tag::Link { dest_url, .. })
         | Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
             let lower = dest_url.to_lowercase();
-            !lower.starts_with("javascript:") && !lower.starts_with("vbscript:")
+            !lower.starts_with("javascript:")
+                && !lower.starts_with("vbscript:")
+                && !lower.starts_with("data:")
         }
+        Event::End(TagEnd::Link | TagEnd::Image) => false,
         _ => true,
     });
     let mut html_output = String::new();
