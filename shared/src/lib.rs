@@ -44,8 +44,7 @@ pub struct UpdateColumnRequest {
 pub struct Card {
     pub id: String,
     pub column_id: String,
-    pub title: String,
-    pub description: Option<String>,
+    pub body: String,
     pub position: i32,
     pub created_at: String,
     pub updated_at: String,
@@ -53,14 +52,12 @@ pub struct Card {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateCardRequest {
-    pub title: String,
-    pub description: Option<String>,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCardRequest {
-    pub title: Option<String>,
-    pub description: Option<Option<String>>,
+    pub body: Option<String>,
     pub position: Option<i32>,
     pub column_id: Option<String>,
 }
