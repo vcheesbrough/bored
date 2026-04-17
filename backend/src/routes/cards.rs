@@ -11,6 +11,7 @@ pub async fn list_cards(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
 ) -> Result<Json<Vec<shared::Card>>, StatusCode> {
+    // Verify the column exists before returning its cards.
     let column: Option<DbColumn> = state
         .db
         .select(("columns", &col_id))
@@ -40,6 +41,11 @@ pub async fn create_card(
     Path(col_id): Path<String>,
     Json(payload): Json<shared::CreateCardRequest>,
 ) -> Result<(StatusCode, Json<shared::Card>), StatusCode> {
+    // Reject empty bodies — a card with no content is not useful.
+    if payload.body.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let column: Option<DbColumn> = state
         .db
         .select(("columns", &col_id))
@@ -58,14 +64,12 @@ pub async fn create_card(
         .query(
             "CREATE type::thing('cards', $id) SET \
              column = type::thing('columns', $col_id), \
-             title = $title, \
-             description = $description, \
+             body = $body, \
              position = (array::max((SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id))) ?? -1) + 1",
         )
         .bind(("id", id))
         .bind(("col_id", col_id))
-        .bind(("title", payload.title))
-        .bind(("description", payload.description))
+        .bind(("body", payload.body))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -122,23 +126,17 @@ pub async fn update_card(
     // Build a single atomic UPDATE covering all changed fields.
     let mut set_parts: Vec<String> = Vec::new();
 
+    if payload.body.is_some() {
+        set_parts.push("body = $body".to_string());
+    }
     if payload.column_id.is_some() {
         set_parts.push("column = type::thing('columns', $col_id)".to_string());
-    }
-    if payload.title.is_some() {
-        set_parts.push("title = $title".to_string());
-    }
-    if let Some(ref desc) = payload.description {
-        if desc.is_some() {
-            set_parts.push("description = $description".to_string());
-        } else {
-            set_parts.push("description = NONE".to_string());
-        }
     }
     if payload.position.is_some() {
         set_parts.push("position = $position".to_string());
     }
 
+    // Nothing changed — return the existing card unchanged.
     if set_parts.is_empty() {
         return Ok(Json(existing.into_api()));
     }
@@ -149,14 +147,11 @@ pub async fn update_card(
     );
 
     let mut q = state.db.query(query_str).bind(("card_id", card_id));
+    if let Some(body) = payload.body {
+        q = q.bind(("body", body));
+    }
     if let Some(col_id) = payload.column_id {
         q = q.bind(("col_id", col_id));
-    }
-    if let Some(title) = payload.title {
-        q = q.bind(("title", title));
-    }
-    if let Some(Some(desc)) = payload.description {
-        q = q.bind(("description", desc));
     }
     if let Some(position) = payload.position {
         q = q.bind(("position", position));
