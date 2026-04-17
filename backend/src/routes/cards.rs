@@ -97,6 +97,14 @@ pub async fn update_card(
         None => return Err(StatusCode::NOT_FOUND),
     };
 
+    // Reject an explicitly-supplied body that is empty or whitespace-only,
+    // consistent with the same guard on create_card.
+    if let Some(ref body) = payload.body {
+        if body.trim().is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
     // Validate target column if provided, and guard against cross-board moves.
     if let Some(ref col_id) = payload.column_id {
         let target_col: Option<DbColumn> = state
