@@ -47,8 +47,7 @@ impl DbColumn {
 pub struct DbCard {
     pub id: Thing,
     pub column: Thing,
-    pub title: String,
-    pub description: Option<String>,
+    pub body: String,
     pub position: i32,
     pub created_at: surrealdb::sql::Datetime,
     pub updated_at: surrealdb::sql::Datetime,
@@ -59,8 +58,7 @@ impl DbCard {
         shared::Card {
             id: self.id.id.to_raw(),
             column_id: self.column.id.to_raw(),
-            title: self.title,
-            description: self.description,
+            body: self.body,
             position: self.position,
             created_at: self.created_at.to_string(),
             updated_at: self.updated_at.to_string(),
