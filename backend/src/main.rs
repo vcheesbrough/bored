@@ -22,20 +22,20 @@ pub async fn app(state: AppState) -> Router {
     // Axum resolves routes in registration order for the same path+method pair,
     // but here each path+method combination is unique.
     let api = Router::new()
-        .route("/boards",              get(routes::boards::list_boards))
-        .route("/boards",              post(routes::boards::create_board))
-        .route("/boards/:id",          get(routes::boards::get_board))
-        .route("/boards/:id",          put(routes::boards::update_board))
-        .route("/boards/:id",          delete(routes::boards::delete_board))
-        .route("/boards/:id/columns",  get(routes::columns::list_columns))
-        .route("/boards/:id/columns",  post(routes::columns::create_column))
-        .route("/columns/:id",         put(routes::columns::update_column))
-        .route("/columns/:id",         delete(routes::columns::delete_column))
-        .route("/columns/:id/cards",   get(routes::cards::list_cards))
-        .route("/columns/:id/cards",   post(routes::cards::create_card))
-        .route("/cards/:id",           put(routes::cards::update_card))
-        .route("/cards/:id",           delete(routes::cards::delete_card))
-        .route("/cards/:id/move",      post(routes::cards::move_card))
+        .route("/boards", get(routes::boards::list_boards))
+        .route("/boards", post(routes::boards::create_board))
+        .route("/boards/:id", get(routes::boards::get_board))
+        .route("/boards/:id", put(routes::boards::update_board))
+        .route("/boards/:id", delete(routes::boards::delete_board))
+        .route("/boards/:id/columns", get(routes::columns::list_columns))
+        .route("/boards/:id/columns", post(routes::columns::create_column))
+        .route("/columns/:id", put(routes::columns::update_column))
+        .route("/columns/:id", delete(routes::columns::delete_column))
+        .route("/columns/:id/cards", get(routes::cards::list_cards))
+        .route("/columns/:id/cards", post(routes::cards::create_card))
+        .route("/cards/:id", put(routes::cards::update_card))
+        .route("/cards/:id", delete(routes::cards::delete_card))
+        .route("/cards/:id/move", post(routes::cards::move_card))
         .with_state(state);
 
     // `STATIC_DIR` lets the Docker image override where the compiled WASM frontend
@@ -590,21 +590,30 @@ mod tests {
         server
             .put(&format!("/api/cards/{}", c1.id))
             .json(&shared::UpdateCardRequest {
-                title: None, description: None, position: Some(2), column_id: None,
+                title: None,
+                description: None,
+                position: Some(2),
+                column_id: None,
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c2.id))
             .json(&shared::UpdateCardRequest {
-                title: None, description: None, position: Some(0), column_id: None,
+                title: None,
+                description: None,
+                position: Some(0),
+                column_id: None,
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c3.id))
             .json(&shared::UpdateCardRequest {
-                title: None, description: None, position: Some(1), column_id: None,
+                title: None,
+                description: None,
+                position: Some(1),
+                column_id: None,
             })
             .await
             .assert_status_ok();
