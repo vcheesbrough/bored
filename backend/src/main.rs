@@ -36,10 +36,14 @@ impl SpaSvc {
 impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
     type Response = axum::http::Response<axum::body::Body>;
     type Error = std::convert::Infallible;
-    type Future =
-        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
 
-    fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -61,12 +65,18 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
                     // index.html itself is missing — pass through the 404
                     Err(_) => {
                         let (parts, body) = resp.into_parts();
-                        Ok(axum::http::Response::from_parts(parts, axum::body::Body::new(body)))
+                        Ok(axum::http::Response::from_parts(
+                            parts,
+                            axum::body::Body::new(body),
+                        ))
                     }
                 }
             } else {
                 let (parts, body) = resp.into_parts();
-                Ok(axum::http::Response::from_parts(parts, axum::body::Body::new(body)))
+                Ok(axum::http::Response::from_parts(
+                    parts,
+                    axum::body::Body::new(body),
+                ))
             }
         })
     }
