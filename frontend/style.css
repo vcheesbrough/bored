@@ -662,7 +662,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: var(--text-muted);
-  opacity: 0.15;
+  opacity: 0.1;
   pointer-events: none;
   user-select: none;
   z-index: 1;
