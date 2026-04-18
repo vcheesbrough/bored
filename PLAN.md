@@ -24,15 +24,16 @@ Semantic versioning (`MAJOR.MINOR.PATCH`). `0.x` is pre-MVP; `1.0` is cut at the
 | 5 — UI Overhaul | `0.5` | `0.5.1` |
 | 6 — Markdown Cards | `0.6` | `0.6.4` |
 | 7 — CI / Deployments | `0.7` | `0.7.1` |
-| 8 — Auth | `0.8` | `0.8.3` |
-| 9 — Bored MCP | `0.9` | `0.9.2` |
+| 8 — SPA Deep-Link Routing | `0.8` | `0.8.1` |
+| 9 — Auth | `0.9` | `0.9.3` |
+| 10 — Bored MCP | `0.10` | `0.10.2` |
 | **🏁 MVP = 1.0** | `1.0` | `1.0.1` |
-| 10 — SSE + Drag-drop | `1.1` | `1.1.11` |
-| 11 — Board Ownership | `1.2` | `1.2.1` |
-| 12 — Soft Delete | `1.3` | `1.3.3` |
-| 13 — Change History | `1.4` | `1.4.2` |
-| 14 — Git Links | `1.5` | `1.5.2` |
-| 15 — CI/CD Integration | `1.6` | `1.6.3` |
+| 11 — SSE + Drag-drop | `1.1` | `1.1.11` |
+| 12 — Board Ownership | `1.2` | `1.2.1` |
+| 13 — Soft Delete | `1.3` | `1.3.3` |
+| 14 — Change History | `1.4` | `1.4.2` |
+| 15 — Git Links | `1.5` | `1.5.2` |
+| 16 — CI/CD Integration | `1.6` | `1.6.3` |
 
 **On merge to main**, Woodpecker constructs `VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}`, tags the git commit (`v0.x.N`), and tags the Docker image with `:<sha>` and `:0.x.N`. No `:latest` tag is applied — deployments must reference an explicit version.
 
@@ -496,7 +497,7 @@ Create an OAuth2/OIDC provider in Authentik:
 3. Add bored checks to `smoke-test.sh`:
    - Container running + healthy
    - HTTP 200 on `https://bored.desync.link`
-4. Update `RECOVERY.md`: add bored-data volume to backup section
+4. Add `bored-prod-db` to Backrest backup config; update `RECOVERY.md` with restore procedure for the volume
 5. Update `README.md`: add bored-stack to stack list
 
 ---
@@ -941,60 +942,70 @@ Feature: Markdown cards
 ### Iteration 7 — CI / Deployments
 
 - Two deployment targets: **dev** and **production**
-- **Dev** deploys automatically on every successful build of `main`
-- **Production** is triggered manually via a Woodpecker UI pipeline dispatch (no auto-deploy)
-- Both targets run as Docker containers on the homelab, managed by `bored-stack/` in `mini-config`
+- **Dev** is triggered manually from any branch via a Woodpecker UI deployment dispatch — allows validating a feature branch on dev before merging
+- **Production** is triggered manually via a Woodpecker UI pipeline dispatch, from `main` only
+- Both targets run as Docker containers on the homelab; the bored repo owns its own compose file — no `bored-stack/` in `mini-config`
 
 **Woodpecker pipeline changes (`.woodpecker/build.yml`):**
-- Existing `build` step: compile, test, build Docker image, push to registry — unchanged
-- New `deploy-dev` step:
-  - `when: { branch: main, event: push }` — runs automatically after every successful build
-  - SSHes into the homelab and runs `docker compose pull && docker compose up -d` for the dev stack
-  - Dev stack uses an ephemeral named volume `bored-dev-db` (persistent across restarts but not treated as precious data)
-  - Connects to a dev subdomain (e.g. `bored-dev.desync.link`)
-- New `deploy-prod` step:
-  - `when: { event: manual }` — only runs when triggered explicitly from the Woodpecker UI
-  - Same deploy mechanism but targets the production stack
-  - Production stack mounts a Docker volume `bored-prod-db` declared `external: true` in `docker-compose.yml` — the volume must be created manually before the first deploy and is never removed by compose
-  - Connects to the production subdomain (`bored.desync.link`)
+- `build` step: runs on every `push` event; builds a local Docker image tagged with `$CI_COMMIT_SHA` to validate the Dockerfile (no registry push)
+- `validate-deployment` step: runs on every `deployment` event; fails fast if the target is not `dev` or `prod`, or if `prod` is attempted from a non-`main` branch
+- `compute-version` step: runs on every `deployment` event; counts existing git tags matching the current `CARGO_VERSION` via `git ls-remote --tags --refs`, derives the next patch number, writes `MAJOR.MINOR.PATCH` to `.version` in the workspace
+- `push` step: runs on every `deployment` event; builds and pushes the image tagged with the computed version to the registry
+- `tag-release` step: runs on `prod` deployments only; creates a `v0.x.y` git tag
+- `deploy-dev` step: runs when `CI_PIPELINE_DEPLOY_TARGET == "dev"`; creates the volume if absent, runs `docker compose up -d`; `APP_ENV` is set to the source branch name
+- `deploy-prod` step: runs when `CI_PIPELINE_DEPLOY_TARGET == "prod"`; same mechanism with prod-specific env vars
 
-**mini-config changes (`bored-stack/`):**
-- `docker-compose.dev.yml` — dev service definition; image tag pinned to `:latest-dev` (or a channel tag updated by the pipeline)
-- `docker-compose.prod.yml` — production service definition; image tag pinned to the explicit version being promoted (e.g. `:0.7.1`); `bored-prod-db` declared as external volume
-- Both compose files set `DATABASE_PATH=/data/bored.db` inside the container, backed by their respective volumes mounted at `/data`
-- Traefik labels in each compose file route the appropriate subdomain
+Lint (fmt, clippy, tests) runs inside the Docker `backend-builder` stage — Docker layer caching skips it when source is unchanged.
+
+**`deploy/docker-compose.yml` (in this repo):**
+- A single file serves both targets — all environment-specific values injected by the pipeline via env vars
+- Image tag: `${BORED_IMAGE_TAG}` — set to the computed semver (e.g. `0.7.0`) for both dev and prod
+- Volume: `${DB_VOLUME}:/data` — pipeline sets `bored-dev-db` or `bored-prod-db`; volume is always `external: true`; deploy step runs `docker volume create` (idempotent) before `compose up`
+- `APP_ENV`, `APP_VERSION`, `BORED_HOST`, `BORED_CONTAINER_NAME` all pipeline-injected; Docker Compose project name explicitly set (`-p bored-dev` / `-p bored`) to isolate the two stacks
+
+**mini-config changes (minimal):**
+- Add `bored-prod-db` to Backrest backup config
+- Add bored health check to `smoke-test.sh`
+- Add an Uptime Kuma HTTP monitor for `https://bored.desync.link/health` (prod only) — configured manually in the Kuma UI after first prod deploy
 
 **Environment / secrets:**
 - `WOODPECKER_SSH_KEY` secret: private key for homelab deploy SSH
 - `WOODPECKER_KNOWN_HOSTS`: pre-populated to avoid interactive host verification
 - Image registry credentials already present from the build step
+- Runtime secrets (`GITHUB_TOKEN`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ISSUER_URL`, `OIDC_REDIRECT_URI`, `SESSION_SECRET`) stored as Woodpecker secrets and injected as env vars by the deploy step — the pipeline SSHes into the homelab and passes them to `docker compose up -d` so the container receives them as normal environment variables; no secrets file on disk
 
 **Tests:** none — deployment config is validated by a successful manual smoke test after first deploy
 
 **CI steps summary:**
 ```
-push to main
-  → build + test
-  → docker build + push :sha and :0.7.x
-  → deploy-dev (automatic)
+push to any branch
+  → build step: docker build (local only, validates Dockerfile)
 
-manual trigger in Woodpecker UI
-  → deploy-prod (with explicit image tag parameter)
+manual deployment trigger in Woodpecker UI (target: dev)
+  → validate → compute-version → push image → deploy-dev
+
+manual deployment trigger in Woodpecker UI (target: prod, from main only)
+  → validate → compute-version → push image → tag-release → deploy-prod
 ```
 
 ```gherkin
 Feature: Dev deployment
-  Scenario: Merge to main triggers dev deploy
-    Given a PR is merged to main
-    When the Woodpecker build passes
-    Then the dev environment at bored-dev.desync.link is updated automatically
-    And the new version is reachable within 60 seconds
+  Scenario: Developer manually deploys to dev from any branch
+    Given a successful build exists for a feature branch
+    When a developer triggers a deployment with target "dev" in the Woodpecker UI
+    Then the dev environment at bored-dev.desync.link is updated
+    And the watermark shows the semver and branch name
 
 Feature: Production deployment
-  Scenario: Production deploy is manual only
-    Given a successful build exists for version 0.7.1
-    When a developer triggers the deploy-prod pipeline in the Woodpecker UI
+  Scenario: Production deploy is manual and restricted to main
+    Given a successful build exists on the main branch
+    When a developer triggers a deployment with target "prod" in the Woodpecker UI
     Then bored.desync.link is updated to that version
+    And a git tag v0.7.x is created
+
+  Scenario: Production deploy is blocked from non-main branches
+    Given a developer triggers a prod deployment from a feature branch
+    Then the pipeline fails at the validate step with a clear error message
 
   Scenario: Production database persists across deploys
     Given the production stack has boards and cards in bored-prod-db
@@ -1006,7 +1017,41 @@ Feature: Production deployment
 
 ---
 
-### Iteration 8 — Auth (OIDC + PKCE)
+### Iteration 8 — SPA Deep-Link Routing
+
+When the browser is reloaded on any route other than `/` (e.g. `/boards/:id`), the request reaches the Axum backend which returns 404 — `ServeDir` serves files that exist under `dist/` but returns 404 for unknown paths rather than falling back to `index.html`. The fix is to configure `ServeDir` with a `not_found_service` pointing at `dist/index.html` so the SPA can handle all non-API, non-static paths client-side.
+
+**Backend change (`backend/src/main.rs`):**
+- Replace `.fallback_service(ServeDir::new(static_dir))` with `.fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(format!("{static_dir}/index.html"))))`
+- Add `tower_http::services::ServeFile` to imports
+
+**Tests:**
+- Integration: `GET /boards/any-id` returns 200 with HTML (not 404); `GET /api/boards` still returns JSON; `GET /health` still returns 200
+
+```gherkin
+Feature: SPA deep-link routing
+  Scenario: Reloading a board URL serves the app
+    Given the backend is running
+    When GET /boards/some-board-id is requested directly
+    Then the response is 200 OK
+    And the response body is the SPA index.html
+
+  Scenario: API routes are unaffected
+    Given the backend is running
+    When GET /api/boards is requested
+    Then the response is JSON, not HTML
+
+  Scenario: Unknown deep links serve the SPA
+    Given the backend is running
+    When GET /some/arbitrary/path is requested
+    Then the response is 200 OK with the SPA index.html
+```
+
+**Deliverable:** Reloading or bookmarking any URL in the app works correctly.
+
+---
+
+### Iteration 9 — Auth (OIDC + PKCE)
 
 - OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
 - `tower-sessions` backed by SurrealDB

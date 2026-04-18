@@ -44,6 +44,10 @@ pub async fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        // `/api/info` is intentionally public — the frontend fetches it
+        // unauthenticated on every page load to populate the version watermark.
+        // It must stay outside any auth-gated sub-router.
+        .route("/api/info", get(info))
         // `.nest("/api", api)` mounts the api sub-router under `/api`, so
         // `/api/boards` maps to the `list_boards` handler above.
         .nest("/api", api)
@@ -109,10 +113,18 @@ async fn main() {
     }
 }
 
-// A simple liveness probe. Returns a plain-text "ok" with a 200 status.
-// Load balancers and container orchestrators hit this to know the process is alive.
 async fn health() -> &'static str {
     "ok"
+}
+
+// Returns runtime version and environment — read from env vars injected by the deploy pipeline.
+// Falls back to the compile-time crate version and "dev" when running locally.
+async fn info() -> axum::Json<shared::AppInfo> {
+    axum::Json(shared::AppInfo {
+        version: std::env::var("APP_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+        env: std::env::var("APP_ENV").unwrap_or_else(|_| "dev".to_string()),
+    })
 }
 
 // ── Integration tests ─────────────────────────────────────────────────────────
@@ -124,6 +136,7 @@ mod tests {
     // `super::*` imports everything from the parent module (this file).
     use super::*;
     use axum::http::StatusCode;
+    use serial_test::serial;
     // `axum_test::TestServer` wraps the router and lets us make HTTP requests
     // in tests without opening a real TCP socket.
     use axum_test::TestServer;
@@ -697,5 +710,34 @@ mod tests {
 
         // Verify the full body is preserved verbatim.
         assert_eq!(card.body, "# My Card\n\nSome content");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn info_route_returns_version_and_env() {
+        let server = test_app().await;
+        let resp = server.get("/api/info").await;
+        resp.assert_status_ok();
+        let info: shared::AppInfo = resp.json();
+        // Falls back to compile-time CARGO_PKG_VERSION when APP_VERSION is unset.
+        assert!(!info.version.is_empty());
+        // Falls back to "dev" when APP_ENV is unset.
+        assert_eq!(info.env, "dev");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn info_route_uses_env_vars_when_set() {
+        std::env::set_var("APP_VERSION", "1.2.3");
+        std::env::set_var("APP_ENV", "production");
+        let server = test_app().await;
+        let resp = server.get("/api/info").await;
+        resp.assert_status_ok();
+        let body = resp.text();
+        std::env::remove_var("APP_VERSION");
+        std::env::remove_var("APP_ENV");
+        let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
+        assert_eq!(info.version, "1.2.3");
+        assert_eq!(info.env, "production");
     }
 }

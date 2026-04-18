@@ -1,67 +1,94 @@
 when:
-  - event: [push, manual]
+  - event: [push, deployment]
 
 steps:
-  check:
-    image: rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c
-    commands:
-      - rustup component add rustfmt clippy llvm-tools-preview
-      - cargo install cargo-llvm-cov --locked
-      - cargo fmt -p backend -p shared --check
-      - cargo clippy -p backend -p shared -- -D warnings
-      - cargo llvm-cov -p backend -p shared --text
-
-  build-and-push:
+  build:
     when:
-      - event: [push, manual]
-    image: docker:27-cli
-    volumes:
+      - event: push
+    image: &docker-image docker:27-cli@sha256:f56779b4e86550493153cc8642c9c8e40b5d934e43cb5b4ea463aea5245c5c01
+    volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - docker build -t registry.desync.link/bored:$$CI_COMMIT_SHA .
+
+  validate-deployment:
+    when:
+      - event: deployment
+    image: alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
+    commands:
+      - |
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
+          echo "ERROR: deploy target must be 'dev' or 'prod' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
+          exit 1
+        fi
+      - |
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" = "prod" ] && [ "$$CI_COMMIT_BRANCH" != "main" ]; then
+          echo "ERROR: prod can only be deployed from main (current branch: '$$CI_COMMIT_BRANCH')"
+          exit 1
+        fi
+
+  compute-version:
+    when:
+      - event: deployment
+    image: &alpine-git alpine/git:latest@sha256:970dba879f3c60fd3d1286788fdc8107dceb541d8569e3f2b1745e8e5199664d
     environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+      - PATCH=$(git ls-remote --tags --refs https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
+      - echo "$$CARGO_VERSION.$$PATCH" > .version
+      - echo "$$CARGO_VERSION.$$PATCH-$(echo $$CI_COMMIT_SHA | cut -c1-7)" > .version-dev
+      - echo "Version $(cat .version), dev $(cat .version-dev)"
+
+  push:
+    when:
+      - event: deployment
+    image: *docker-image
+    volumes: *docker-socket
+    environment: &registry-creds
       REGISTRY_USER:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
     commands:
-      - |
-        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        docker buildx build --push \
-          -t registry.desync.link/bored:$$CI_COMMIT_SHA \
-          -t registry.desync.link/bored:$$VERSION .
+      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - docker build -t registry.desync.link/bored:$(cat .version) -t registry.desync.link/bored:$(cat .version-dev) .
+      - docker push registry.desync.link/bored:$(cat .version)
+      - docker push registry.desync.link/bored:$(cat .version-dev)
 
   tag-release:
     when:
-      - event: [push, manual]
-    image: alpine/git
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    image: *alpine-git
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      - |
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        git tag v$$VERSION
-        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
+      - git tag v$(cat .version)
+      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$(cat .version)
 
-  deploy:
+  deploy-dev:
     when:
-      - event: [push, manual]
-    image: alpine
-    environment:
-      MINI_SSH_KEY:
-        from_secret: mini_ssh_key
-    # StrictHostKeyChecking is fine here, it is not practical to add the server's host key to the image and this is a private network
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    image: *docker-image
+    volumes: *docker-socket
+    environment: *registry-creds
     commands:
-      - |
-        apk add -q openssh-client
-        mkdir -p ~/.ssh
-        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
-        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /srv/dev/mini-config/bored-stack"
-        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/srv/dev/mini-config/bored-stack/docker-compose.yml
-        ssh $$SSH_OPTS vincent@10.0.0.29 "cd /srv/dev/mini-config && BORED_VERSION=$$VERSION ./run-stack.sh bored-stack up -d --pull always"
+      - *docker-login
+      - docker volume create bored-dev-db
+      - BORED_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+
+  deploy-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    image: *docker-image
+    volumes: *docker-socket
+    environment: *registry-creds
+    commands:
+      - *docker-login
+      - docker volume create bored-prod-db
+      - BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db docker compose -p bored -f deploy/docker-compose.yml up -d --pull always

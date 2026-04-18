@@ -17,27 +17,34 @@ fn main() {
     mount_to_body(App);
 }
 
-// `#[component]` is a Leptos macro that marks this function as a reactive component.
-// Components return `impl IntoView` — any value that can be turned into DOM nodes.
 #[component]
 fn App() -> impl IntoView {
+    // Fetch runtime version/env from the backend once on mount.
+    // Falls back to the compile-time version while the request is in flight or if it fails.
+    let watermark = RwSignal::new(format!("v{}", env!("CARGO_PKG_VERSION")));
+
+    Effect::new(move |_| {
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(info) = crate::api::fetch_app_info().await {
+                let label = if info.env == "production" {
+                    format!("v{}", info.version)
+                } else {
+                    // Strip the type prefix (feat/, fix/, etc.) for brevity.
+                    let branch = info.env.splitn(2, '/').last().unwrap_or(&info.env);
+                    format!("v{} {}", info.version, branch)
+                };
+                watermark.set(label);
+            }
+        });
+    });
+
     view! {
-        // `<Router>` provides the client-side routing context. All `<Route>` and
-        // navigation hooks (like `use_navigate`) must be descendants of `<Router>`.
         <Router>
-            // `<Routes>` is where route matching happens. `fallback` renders
-            // when no route matches — acts like a 404 page.
             <Routes fallback=|| view! { <p class="page loading-text">"Not found"</p> }>
-                // `path!(...)` creates a typed path matcher. `"/"` matches only the root.
                 <Route path=path!("/") view=Home />
-                // `:id` is a named URL parameter — readable via `use_params_map()` inside `BoardView`.
                 <Route path=path!("/boards/:id") view=BoardView />
             </Routes>
         </Router>
-
-        // `env!("CARGO_PKG_VERSION")` is expanded at compile time to the version
-        // string from `Cargo.toml` (e.g. "0.5"). It's rendered as a barely-visible
-        // watermark in the bottom-left corner via CSS.
-        <div class="app-watermark">"v" {env!("CARGO_PKG_VERSION")}</div>
+        <div class="app-watermark">{move || watermark.get()}</div>
     }
 }
