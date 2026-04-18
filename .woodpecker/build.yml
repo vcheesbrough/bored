@@ -59,51 +59,33 @@ steps:
     when:
       - event: deployment
         environment: dev
-    image: alpine
-    environment:
-      MINI_SSH_KEY:
-        from_secret: mini_ssh_key
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - |
         CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
         VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        apk add -q openssh-client
-        mkdir -p ~/.ssh
-        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
-        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
-        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
-        ssh $$SSH_OPTS vincent@10.0.0.29 " \
-          BORED_IMAGE_TAG=$$VERSION \
-          APP_ENV=$$CI_COMMIT_BRANCH \
-          BORED_HOST=bored-dev.desync.link \
-          DB_VOLUME=bored-dev-db \
-          docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
+        BORED_IMAGE_TAG=$$VERSION \
+        APP_ENV=$$CI_COMMIT_BRANCH \
+        BORED_HOST=bored-dev.desync.link \
+        DB_VOLUME=bored-dev-db \
+        docker compose -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
     when:
       - event: deployment
         environment: prod
-    image: alpine
-    environment:
-      MINI_SSH_KEY:
-        from_secret: mini_ssh_key
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - |
         CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
         VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        apk add -q openssh-client
-        mkdir -p ~/.ssh
-        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
-        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
-        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
-        ssh $$SSH_OPTS vincent@10.0.0.29 " \
-          BORED_IMAGE_TAG=$$VERSION \
-          APP_ENV=production \
-          BORED_HOST=bored.desync.link \
-          DB_VOLUME=bored-prod-db \
-          DB_VOLUME_EXTERNAL=true \
-          docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
+        BORED_IMAGE_TAG=$$VERSION \
+        APP_ENV=production \
+        BORED_HOST=bored.desync.link \
+        DB_VOLUME=bored-prod-db \
+        DB_VOLUME_EXTERNAL=true \
+        docker compose -f deploy/docker-compose.yml up -d --pull always
