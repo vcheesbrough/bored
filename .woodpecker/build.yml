@@ -16,8 +16,8 @@ steps:
   build:
     when:
       - event: push
-    image: docker:27-cli
-    volumes:
+    image: &docker-image docker:27-cli
+    volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - docker build -t registry.desync.link/bored:$$CI_COMMIT_SHA .
@@ -25,21 +25,18 @@ steps:
   push:
     when:
       - event: deployment
-    image: docker:27-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
+    image: *docker-image
+    volumes: *docker-socket
+    environment: &registry-creds
       REGISTRY_USER:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
     commands:
-      - |
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        docker build -t registry.desync.link/bored:$$VERSION .
-        docker push registry.desync.link/bored:$$VERSION
+      - &compute-version CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/') && VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
+      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - docker build -t registry.desync.link/bored:$$VERSION .
+      - docker push registry.desync.link/bored:$$VERSION
 
   tag-release:
     when:
@@ -49,55 +46,30 @@ steps:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      - |
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        git tag v$$VERSION
-        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
+      - *compute-version
+      - git tag v$$VERSION
+      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
 
   deploy-dev:
     when:
       - event: deployment
         evaluate: 'CI_DEPLOY_TO == "dev"'
-    image: docker:27-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
+    image: *docker-image
+    volumes: *docker-socket
+    environment: *registry-creds
     commands:
-      - |
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        BORED_IMAGE_TAG=$$VERSION \
-        APP_ENV=$$CI_COMMIT_BRANCH \
-        BORED_HOST=bored-dev.desync.link \
-        DB_VOLUME=bored-dev-db \
-        docker compose -f deploy/docker-compose.yml up -d --pull always
+      - *compute-version
+      - *docker-login
+      - BORED_IMAGE_TAG=$$VERSION APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link DB_VOLUME=bored-dev-db docker compose -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
     when:
       - event: deployment
         evaluate: 'CI_DEPLOY_TO == "prod"'
-    image: docker:27-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
+    image: *docker-image
+    volumes: *docker-socket
+    environment: *registry-creds
     commands:
-      - |
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        BORED_IMAGE_TAG=$$VERSION \
-        APP_ENV=production \
-        BORED_HOST=bored.desync.link \
-        DB_VOLUME=bored-prod-db \
-        DB_VOLUME_EXTERNAL=true \
-        docker compose -f deploy/docker-compose.yml up -d --pull always
+      - *compute-version
+      - *docker-login
+      - BORED_IMAGE_TAG=$$VERSION APP_ENV=production BORED_HOST=bored.desync.link DB_VOLUME=bored-prod-db DB_VOLUME_EXTERNAL=true docker compose -f deploy/docker-compose.yml up -d --pull always
