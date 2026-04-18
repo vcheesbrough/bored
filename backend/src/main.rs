@@ -103,6 +103,7 @@ pub async fn app(state: AppState) -> Router {
         .route("/columns/:id", delete(routes::columns::delete_column))
         .route("/columns/:id/cards", get(routes::cards::list_cards))
         .route("/columns/:id/cards", post(routes::cards::create_card))
+        .route("/cards/:id", get(routes::cards::get_card))
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
         .route("/cards/:id/move", post(routes::cards::move_card))
@@ -738,6 +739,35 @@ mod tests {
                 position: None,
                 column_id: None,
             })
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_card_by_id() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "# Get me".to_string(),
+            })
+            .await
+            .json();
+
+        let resp = server.get(&format!("/api/cards/{}", card.id)).await;
+        resp.assert_status_ok();
+        let fetched: shared::Card = resp.json();
+        assert_eq!(fetched.id, card.id);
+        assert_eq!(fetched.body, "# Get me");
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_card_returns_404() {
+        let server = test_app().await;
+        server
+            .get("/api/cards/doesnotexist")
             .await
             .assert_status(StatusCode::NOT_FOUND);
     }
