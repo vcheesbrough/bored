@@ -496,7 +496,7 @@ Create an OAuth2/OIDC provider in Authentik:
 3. Add bored checks to `smoke-test.sh`:
    - Container running + healthy
    - HTTP 200 on `https://bored.desync.link`
-4. Update `RECOVERY.md`: add bored-data volume to backup section
+4. Add `bored-prod-db` to Backrest backup config; update `RECOVERY.md` with restore procedure for the volume
 5. Update `README.md`: add bored-stack to stack list
 
 ---
@@ -959,10 +959,13 @@ Feature: Markdown cards
   - Connects to the production subdomain (`bored.desync.link`)
 
 **mini-config changes (`bored-stack/`):**
-- `docker-compose.dev.yml` — dev service definition; image tag pinned to `:latest-dev` (or a channel tag updated by the pipeline)
-- `docker-compose.prod.yml` — production service definition; image tag pinned to the explicit version being promoted (e.g. `:0.7.1`); `bored-prod-db` declared as external volume
-- Both compose files set `DATABASE_PATH=/data/bored.db` inside the container, backed by their respective volumes mounted at `/data`
-- Traefik labels in each compose file route the appropriate subdomain
+- A single `docker-compose.yml` serves both targets — all environment-specific values are injected by the pipeline via env vars; no separate dev/prod files
+- Image tag: `${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}` — pipeline sets this to `${CI_COMMIT_SHA}` for dev and the explicit semver (e.g. `0.7.1`) for prod
+- Volume: `${DB_VOLUME:?DB_VOLUME is required}:/data` — pipeline sets `DB_VOLUME=bored-dev-db` (dev) or `DB_VOLUME=bored-prod-db` (prod)
+- Volume declaration uses `external: ${DB_VOLUME_EXTERNAL:-false}` — pipeline sets `DB_VOLUME_EXTERNAL=true` for prod so compose never creates or removes the production volume
+- `APP_ENV` is passed by the pipeline (`development` for dev, `production` for prod)
+- Traefik host rule: `${BORED_HOST:?BORED_HOST is required}` — pipeline sets `bored-dev.desync.link` or `bored.desync.link`
+- Backrest backup config updated to include `bored-prod-db` volume — prod data is backed up alongside other homelab volumes
 
 **Environment / secrets:**
 - `WOODPECKER_SSH_KEY` secret: private key for homelab deploy SSH
