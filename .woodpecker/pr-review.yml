@@ -6,7 +6,7 @@ when:
 
 steps:
   review:
-    image: registry.desync.link/claude-pr-agent:c6864c2@sha256:83613924f907086a47eeb79c6d81eaf14c3dfae5d785a8fcc22ef373d2db645d
+    image: registry.desync.link/claude-pr-agent:85d140f@sha256:2c65e71034001d344312b879f5218e0f6cd7a6af0a466ba93bf3deaef1948049
     pull: true
     environment:
       CLAUDE_CODE_OAUTH_TOKEN:
