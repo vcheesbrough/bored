@@ -27,6 +27,19 @@ steps:
           exit 1
         fi
 
+  compute-version:
+    when:
+      - event: deployment
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+      - PATCH=$(git ls-remote --tags https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
+      - echo "$$CARGO_VERSION.$$PATCH" > .version
+      - echo "Version $(cat .version)"
+
   push:
     when:
       - event: deployment
@@ -38,10 +51,9 @@ steps:
       REGISTRY_PASSWORD:
         from_secret: zot_ci_password
     commands:
-      - &compute-version CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/') && VERSION=$$CARGO_VERSION.$$CI_PIPELINE_PARENT
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker build -t registry.desync.link/bored:$$VERSION .
-      - docker push registry.desync.link/bored:$$VERSION
+      - docker build -t registry.desync.link/bored:$(cat .version) .
+      - docker push registry.desync.link/bored:$(cat .version)
 
   tag-release:
     when:
@@ -51,9 +63,8 @@ steps:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      - *compute-version
-      - git tag v$$VERSION
-      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
+      - git tag v$(cat .version)
+      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$(cat .version)
 
   deploy-dev:
     when:
@@ -63,10 +74,9 @@ steps:
     volumes: *docker-socket
     environment: *registry-creds
     commands:
-      - *compute-version
       - *docker-login
       - docker volume create bored-dev-db
-      - BORED_IMAGE_TAG=$$VERSION APP_VERSION=$$VERSION APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+      - BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
     when:
@@ -76,7 +86,6 @@ steps:
     volumes: *docker-socket
     environment: *registry-creds
     commands:
-      - *compute-version
       - *docker-login
       - docker volume create bored-prod-db
-      - BORED_IMAGE_TAG=$$VERSION APP_VERSION=$$VERSION APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
+      - BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
