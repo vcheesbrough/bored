@@ -5,7 +5,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY frontend/ frontend/
 COPY shared/ shared/
 COPY backend/Cargo.toml backend/Cargo.toml
-RUN mkdir -p backend/src && touch backend/src/main.rs
+COPY mcp/Cargo.toml mcp/Cargo.toml
+RUN mkdir -p backend/src && touch backend/src/main.rs \
+ && mkdir -p mcp/src && touch mcp/src/main.rs
 RUN cd frontend && trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
@@ -15,7 +17,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY shared/ shared/
 COPY frontend/Cargo.toml frontend/Cargo.toml
-RUN mkdir -p frontend/src && touch frontend/src/lib.rs
+COPY mcp/Cargo.toml mcp/Cargo.toml
+RUN mkdir -p frontend/src && touch frontend/src/lib.rs \
+ && mkdir -p mcp/src && touch mcp/src/main.rs
 RUN cargo fmt -p backend -p shared --check
 RUN cargo clippy -p backend -p shared -- -D warnings
 RUN cargo test -p backend -p shared --lib
