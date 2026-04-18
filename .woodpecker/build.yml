@@ -35,9 +35,11 @@ steps:
         from_secret: zot_ci_password
     commands:
       - |
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
         echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        docker build -t registry.desync.link/bored:$$BORED_VERSION .
-        docker push registry.desync.link/bored:$$BORED_VERSION
+        docker build -t registry.desync.link/bored:$$VERSION .
+        docker push registry.desync.link/bored:$$VERSION
 
   tag-release:
     when:
@@ -48,8 +50,10 @@ steps:
         from_secret: github_token
     commands:
       - |
-        git tag v$$BORED_VERSION
-        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$BORED_VERSION
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
+        git tag v$$VERSION
+        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
 
   deploy-dev:
     when:
@@ -61,6 +65,8 @@ steps:
         from_secret: mini_ssh_key
     commands:
       - |
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
         apk add -q openssh-client
         mkdir -p ~/.ssh
         echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
@@ -69,7 +75,7 @@ steps:
         ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
         scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
         ssh $$SSH_OPTS vincent@10.0.0.29 " \
-          BORED_IMAGE_TAG=$$BORED_VERSION \
+          BORED_IMAGE_TAG=$$VERSION \
           APP_ENV=$$CI_COMMIT_BRANCH \
           BORED_HOST=bored-dev.desync.link \
           DB_VOLUME=bored-dev-db \
@@ -85,6 +91,8 @@ steps:
         from_secret: mini_ssh_key
     commands:
       - |
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
+        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
         apk add -q openssh-client
         mkdir -p ~/.ssh
         echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
@@ -93,7 +101,7 @@ steps:
         ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
         scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
         ssh $$SSH_OPTS vincent@10.0.0.29 " \
-          BORED_IMAGE_TAG=$$BORED_VERSION \
+          BORED_IMAGE_TAG=$$VERSION \
           APP_ENV=production \
           BORED_HOST=bored.desync.link \
           DB_VOLUME=bored-prod-db \
