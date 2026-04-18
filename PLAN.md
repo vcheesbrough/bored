@@ -967,6 +967,7 @@ Feature: Markdown cards
 **mini-config changes (minimal):**
 - Add `bored-prod-db` to Backrest backup config
 - Add bored health check to `smoke-test.sh`
+- Add an Uptime Kuma HTTP monitor for `https://bored.desync.link/health` (prod only) — configured manually in the Kuma UI after first prod deploy
 
 **Environment / secrets:**
 - `WOODPECKER_SSH_KEY` secret: private key for homelab deploy SSH
