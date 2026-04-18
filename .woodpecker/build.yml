@@ -14,7 +14,7 @@ steps:
   validate-deployment:
     when:
       - event: deployment
-    image: alpine
+    image: alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
     commands:
       - |
         if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
@@ -30,15 +30,19 @@ steps:
   compute-version:
     when:
       - event: deployment
-    image: alpine/git
+    image: &alpine-git alpine/git:latest@sha256:970dba879f3c60fd3d1286788fdc8107dceb541d8569e3f2b1745e8e5199664d
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
+      - echo "machine github.com login x-token password $$GITHUB_TOKEN" > ~/.netrc
+      - chmod 600 ~/.netrc
       - CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-      - PATCH=$(git ls-remote --tags --refs https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
+      - PATCH=$(git ls-remote --tags --refs https://github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
+      - rm ~/.netrc
       - echo "$$CARGO_VERSION.$$PATCH" > .version
-      - echo "Version $(cat .version)"
+      - echo "$$CARGO_VERSION.$$PATCH-$(echo $$CI_COMMIT_SHA | cut -c1-7)" > .version-dev
+      - echo "Version $(cat .version), dev $(cat .version-dev)"
 
   push:
     when:
@@ -52,20 +56,24 @@ steps:
         from_secret: zot_ci_password
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker build -t registry.desync.link/bored:$(cat .version) .
+      - docker build -t registry.desync.link/bored:$(cat .version) -t registry.desync.link/bored:$(cat .version-dev) .
       - docker push registry.desync.link/bored:$(cat .version)
+      - docker push registry.desync.link/bored:$(cat .version-dev)
 
   tag-release:
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    image: alpine/git
+    image: *alpine-git
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
+      - echo "machine github.com login x-token password $$GITHUB_TOKEN" > ~/.netrc
+      - chmod 600 ~/.netrc
       - git tag v$(cat .version)
-      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$(cat .version)
+      - git push https://github.com/$$CI_REPO.git v$(cat .version)
+      - rm ~/.netrc
 
   deploy-dev:
     when:
@@ -77,7 +85,7 @@ steps:
     commands:
       - *docker-login
       - docker volume create bored-dev-db
-      - BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+      - BORED_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
     when:

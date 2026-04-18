@@ -135,6 +135,7 @@ mod tests {
     // `super::*` imports everything from the parent module (this file).
     use super::*;
     use axum::http::StatusCode;
+    use serial_test::serial;
     // `axum_test::TestServer` wraps the router and lets us make HTTP requests
     // in tests without opening a real TCP socket.
     use axum_test::TestServer;
@@ -711,6 +712,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn info_route_returns_version_and_env() {
         let server = test_app().await;
         let resp = server.get("/api/info").await;
@@ -720,5 +722,19 @@ mod tests {
         assert!(!info.version.is_empty());
         // Falls back to "dev" when APP_ENV is unset.
         assert_eq!(info.env, "dev");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn info_route_uses_env_vars_when_set() {
+        std::env::set_var("APP_VERSION", "1.2.3");
+        std::env::set_var("APP_ENV", "production");
+        let server = test_app().await;
+        let resp = server.get("/api/info").await;
+        let info: shared::AppInfo = resp.json();
+        std::env::remove_var("APP_VERSION");
+        std::env::remove_var("APP_ENV");
+        assert_eq!(info.version, "1.2.3");
+        assert_eq!(info.env, "production");
     }
 }
