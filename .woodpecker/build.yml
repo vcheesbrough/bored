@@ -62,10 +62,16 @@ steps:
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
     commands:
       - |
         CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
         VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
+        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
         BORED_IMAGE_TAG=$$VERSION \
         APP_ENV=$$CI_COMMIT_BRANCH \
         BORED_HOST=bored-dev.desync.link \
@@ -79,10 +85,16 @@ steps:
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
     commands:
       - |
         CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
         VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
+        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
         BORED_IMAGE_TAG=$$VERSION \
         APP_ENV=production \
         BORED_HOST=bored.desync.link \
