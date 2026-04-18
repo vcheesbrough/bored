@@ -731,6 +731,7 @@ mod tests {
         std::env::set_var("APP_ENV", "production");
         let server = test_app().await;
         let resp = server.get("/api/info").await;
+        resp.assert_status_ok();
         let body = resp.text();
         std::env::remove_var("APP_VERSION");
         std::env::remove_var("APP_ENV");
