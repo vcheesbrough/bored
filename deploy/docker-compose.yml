@@ -1,7 +1,7 @@
 services:
   bored:
     image: registry.desync.link/bored:${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}
-    container_name: bored
+    container_name: ${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}
     restart: unless-stopped
     environment:
       - APP_ENV=${APP_ENV:?APP_ENV is required}
@@ -14,12 +14,12 @@ services:
       - proxy-backend
     labels:
       - traefik.enable=true
-      - traefik.http.routers.bored.entrypoints=websecure
-      - traefik.http.routers.bored.rule=Host(`${BORED_HOST:?BORED_HOST is required}`)
-      - traefik.http.routers.bored.tls=true
-      - traefik.http.routers.bored.tls.certresolver=myresolver
-      - traefik.http.services.bored.loadbalancer.server.port=443
-      - traefik.http.services.bored.loadbalancer.server.scheme=https
+      - traefik.http.routers.${BORED_CONTAINER_NAME}.entrypoints=websecure
+      - traefik.http.routers.${BORED_CONTAINER_NAME}.rule=Host(`${BORED_HOST:?BORED_HOST is required}`)
+      - traefik.http.routers.${BORED_CONTAINER_NAME}.tls=true
+      - traefik.http.routers.${BORED_CONTAINER_NAME}.tls.certresolver=myresolver
+      - traefik.http.services.${BORED_CONTAINER_NAME}.loadbalancer.server.port=443
+      - traefik.http.services.${BORED_CONTAINER_NAME}.loadbalancer.server.scheme=https
 
 volumes:
   bored-db:
