@@ -60,7 +60,7 @@ steps:
     commands:
       - *compute-version
       - *docker-login
-      - BORED_IMAGE_TAG=$$VERSION APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link DB_VOLUME=bored-dev-db docker compose -f deploy/docker-compose.yml up -d --pull always
+      - BORED_IMAGE_TAG=$$VERSION APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
     when:
@@ -72,4 +72,4 @@ steps:
     commands:
       - *compute-version
       - *docker-login
-      - BORED_IMAGE_TAG=$$VERSION APP_ENV=production BORED_HOST=bored.desync.link DB_VOLUME=bored-prod-db DB_VOLUME_EXTERNAL=true docker compose -f deploy/docker-compose.yml up -d --pull always
+      - BORED_IMAGE_TAG=$$VERSION APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db DB_VOLUME_EXTERNAL=true docker compose -f deploy/docker-compose.yml up -d --pull always
