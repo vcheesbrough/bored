@@ -660,9 +660,9 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   bottom: 8px;
   left: 10px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
-  opacity: 0.2;
+  opacity: 0.15;
   pointer-events: none;
   user-select: none;
   z-index: 1;
