@@ -25,8 +25,8 @@ Semantic versioning (`MAJOR.MINOR.PATCH`). `0.x` is pre-MVP; `1.0` is cut at the
 | 6 — Markdown Cards | `0.6` | `0.6.4` |
 | 7 — CI / Deployments | `0.7` | `0.7.1` |
 | 8 — SPA Deep-Link Routing | `0.8` | `0.8.1` |
-| 9 — Auth | `0.9` | `0.9.3` |
-| 10 — Bored MCP | `0.10` | `0.10.2` |
+| 9 — Bored MCP | `0.9` | `0.9.3` |
+| 10 — Auth | `0.10` | `0.10.2` |
 | **🏁 MVP = 1.0** | `1.0` | `1.0.1` |
 | 11 — SSE + Drag-drop | `1.1` | `1.1.11` |
 | 12 — Board Ownership | `1.2` | `1.2.1` |
@@ -1051,66 +1051,13 @@ Feature: SPA deep-link routing
 
 ---
 
-### Iteration 9 — Auth (OIDC + PKCE)
+### Iteration 9 — Bored MCP (ships before Auth)
 
-- OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
-- `tower-sessions` backed by SurrealDB
-- Session middleware guarding all `/api/*` routes
-- Frontend: unauthenticated requests redirect through login flow
-- Every mutation route (`POST`, `PUT`, `DELETE`) stamps `last_edited_by = current_user` on the affected record — boards, columns, and cards all gain this field
-- `last_edited_by` is a `record<users>` link, exposed in API responses as `{ id, name }` — this is the foundation for change history in iteration 13; when history begins recording, pre-history edits are attributable via this field
-
-**Schema changes:**
-- Add `last_edited_by ON boards TYPE record<users>`
-- Add `last_edited_by ON columns TYPE record<users>`
-- Add `last_edited_by ON cards TYPE record<users>`
-- All three are set on create and updated on every subsequent mutation by the session middleware before the handler runs
-
-**Tests:**
-- Integration: mock OIDC provider walks full login → callback flow, session cookie asserted, protected routes return 401 without session, logout destroys session
-
-**CI steps:** unchanged
-
-```gherkin
-Feature: Authentication
-  Scenario: Unauthenticated user is redirected to login
-    Given a user is not logged in
-    When they navigate to https://bored.desync.link
-    Then they are redirected to /auth/login
-    And then redirected to the Authentik authorization endpoint
-
-  Scenario: Successful OIDC callback creates a session
-    Given Authentik has authenticated the user
-    When the authorization code is exchanged at /auth/callback
-    Then a session cookie is set
-    And the user is redirected to /
-
-  Scenario: Authenticated user can access the app
-    Given a valid session cookie is present
-    When the user navigates to /
-    Then they see the board list (HTTP 200)
-
-  Scenario: Unauthenticated API requests are rejected
-    Given no session cookie is present
-    When GET /api/boards is requested
-    Then the response is 401 Unauthorized
-
-  Scenario: Logout destroys the session
-    Given a valid session cookie is present
-    When the user navigates to /auth/logout
-    Then the session is destroyed
-    And the user is redirected to the Authentik end-session endpoint
-```
-
-**Deliverable:** App is login-gated via Authentik. Safe to remove LAN-only restriction.
-
----
-
-### Iteration 9 — Bored MCP
+Ships against the unprotected API (LAN-only acceptable). When Auth lands in iteration 10, the backend gains an API-key auth path alongside OIDC so the MCP server can continue to authenticate via `BORED_API_TOKEN` rather than a session cookie.
 
 - A standalone MCP server (`mcp/` crate in the workspace) that exposes the full bored API as generic MCP tools
 - Claude can use it for any purpose — including managing its own project plan by treating cards as iteration specs, but the tools themselves are not planning-specific
-- Auth-aware from day one — holds a long-lived API token configured via environment variable, attached to every request
+- Configured via environment variables: `BORED_API_URL`, `BORED_API_TOKEN` (token auth added in iteration 10 when the API is guarded)
 - Claude creates whatever boards and columns it needs; no pre-created structure is required
 
 **MCP tools exposed:**
@@ -1129,7 +1076,6 @@ Feature: Authentication
 
 **MCP server implementation:**
 - Rust crate `mcp/` using the `rmcp` crate (Rust MCP SDK)
-- Configured via environment variables: `BORED_API_URL`, `BORED_API_TOKEN`
 - Communicates with Claude Code via stdio transport
 - Registered in `.claude/mcp.json` (or `~/.claude/mcp.json`) pointing at the built binary
 
@@ -1164,14 +1110,76 @@ Feature: Bored MCP
 
 ---
 
+### Iteration 10 — Auth (OIDC + PKCE)
+
+Also adds API-key auth (`Authorization: Bearer <token>`) alongside OIDC so the MCP server (and any other service-to-service callers) can authenticate without a browser session.
+
+- OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
+- `tower-sessions` backed by SurrealDB
+- Session middleware guarding all `/api/*` routes — accepts either a valid session cookie or a valid `Bearer` token
+- Frontend: unauthenticated requests redirect through login flow
+- Every mutation route (`POST`, `PUT`, `DELETE`) stamps `last_edited_by = current_user` on the affected record — boards, columns, and cards all gain this field
+- `last_edited_by` is a `record<users>` link, exposed in API responses as `{ id, name }` — this is the foundation for change history in iteration 14; when history begins recording, pre-history edits are attributable via this field
+
+**Schema changes:**
+- Add `last_edited_by ON boards TYPE record<users>`
+- Add `last_edited_by ON columns TYPE record<users>`
+- Add `last_edited_by ON cards TYPE record<users>`
+- All three are set on create and updated on every subsequent mutation by the session middleware before the handler runs
+
+**Tests:**
+- Integration: mock OIDC provider walks full login → callback flow, session cookie asserted, protected routes return 401 without session, logout destroys session; Bearer token accepted on all `/api/*` routes
+
+**CI steps:** unchanged
+
+```gherkin
+Feature: Authentication
+  Scenario: Unauthenticated user is redirected to login
+    Given a user is not logged in
+    When they navigate to https://bored.desync.link
+    Then they are redirected to /auth/login
+    And then redirected to the Authentik authorization endpoint
+
+  Scenario: Successful OIDC callback creates a session
+    Given Authentik has authenticated the user
+    When the authorization code is exchanged at /auth/callback
+    Then a session cookie is set
+    And the user is redirected to /
+
+  Scenario: Authenticated user can access the app
+    Given a valid session cookie is present
+    When the user navigates to /
+    Then they see the board list (HTTP 200)
+
+  Scenario: Unauthenticated API requests are rejected
+    Given no session cookie is present and no Bearer token
+    When GET /api/boards is requested
+    Then the response is 401 Unauthorized
+
+  Scenario: MCP token authenticates against the API
+    Given a valid BORED_API_TOKEN is configured
+    When GET /api/boards is requested with Authorization: Bearer <token>
+    Then the response is 200 OK
+
+  Scenario: Logout destroys the session
+    Given a valid session cookie is present
+    When the user navigates to /auth/logout
+    Then the session is destroyed
+    And the user is redirected to the Authentik end-session endpoint
+```
+
+**Deliverable:** App is login-gated via Authentik. MCP continues to work via Bearer token. Safe to remove LAN-only restriction.
+
+---
+
 ## 🏁 Milestone — MVP = 1.0
 
-`Cargo.toml` is bumped to `1.0` at this point. The app is deployed, login-gated, and Claude can manage the project plan directly on the board. From here, iterations 10–14 are planned and tracked as cards on the bored board itself rather than in `PLAN.md`.
+`Cargo.toml` is bumped to `1.0` at this point. The app is deployed, login-gated, and Claude can manage the project plan directly on the board. From here, iterations 11–16 are planned and tracked as cards on the bored board itself rather than in `PLAN.md`.
 
 **Criteria:**
-- Iteration 9 shipped and MCP registered in Claude Code
+- Iteration 10 shipped, MCP registered in Claude Code and authenticating via Bearer token
 - A "bored" board created on the production instance with columns: `Backlog` | `In Progress` | `Done`
-- Cards created for iterations 10–14 with their specs as the card body
+- Cards created for iterations 11–16 with their specs as the card body
 - `PLAN.md` remains as a historical record but the board is the live source of truth going forward
 
 ---
