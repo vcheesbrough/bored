@@ -25,7 +25,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 axum-test = "15"
 serial_test = "3"
 tempfile = "3"

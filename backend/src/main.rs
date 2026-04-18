@@ -42,9 +42,12 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
 
     fn poll_ready(
         &mut self,
-        _: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
+        <ServeDir as tower::Service<axum::http::Request<axum::body::Body>>>::poll_ready(
+            &mut self.inner,
+            cx,
+        )
     }
 
     fn call(&mut self, req: axum::http::Request<axum::body::Body>) -> Self::Future {
@@ -61,7 +64,7 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
                         .status(StatusCode::OK)
                         .header("content-type", "text/html; charset=utf-8")
                         .body(axum::body::Body::from(bytes))
-                        .unwrap()),
+                        .expect("static index.html response is always valid")),
                     // index.html itself is missing — pass through the 404
                     Err(_) => {
                         let (parts, body) = resp.into_parts();
@@ -825,6 +828,7 @@ mod tests {
     // Verifies that unknown /api/* paths return 404 from the nested router and are
     // not swallowed by the SPA fallback, which only applies outside /api/*.
     #[tokio::test]
+    #[serial]
     async fn api_unknown_route_returns_404_not_spa_fallback() {
         let server = test_app().await;
         let resp = server.get("/api/nonexistent").await;
