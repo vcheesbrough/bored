@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - APP_ENV=${APP_ENV:?APP_ENV is required}
+      - APP_VERSION=${APP_VERSION:?APP_VERSION is required}
       - LOG_LEVEL=info
       - LOKI_URL=http://monitor-loki:3100
       - DATABASE_PATH=/data/bored.db

@@ -67,3 +67,9 @@ pub struct MoveCardRequest {
     pub column_id: String,
     pub position: i32,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub version: String,
+    pub env: String,
+}
