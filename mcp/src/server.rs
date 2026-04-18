@@ -14,14 +14,17 @@
 use rmcp::{
     // `ErrorData` is the MCP error envelope; we alias it for brevity.
     ErrorData as McpError,
+    // `ServerHandler` is the trait we implement to wire the server into the
+    // MCP runtime; `tool_handler` is the macro that fills in the boilerplate.
+    ServerHandler,
     // `Parameters<T>` is a newtype wrapper used by the tool macro to
     // deserialise the incoming JSON params into a typed struct.
     handler::server::wrapper::Parameters,
-    // `CallToolResult` and `Content` live in the model module alongside
-    // all other MCP protocol types.
-    model::{CallToolResult, Content},
+    // `CallToolResult`, `Content`, `Implementation`, and `ServerInfo` are MCP
+    // protocol types; `ServerCapabilities` configures what the server exposes.
+    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     schemars,
-    tool, tool_router,
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 
@@ -145,17 +148,20 @@ async fn json_text(resp: reqwest::Response) -> Result<CallToolResult, McpError> 
 
 // ── Tool implementations ───────────────────────────────────────────────────────
 //
-// `#[tool_router(server_handler)]` on the impl block:
+// `#[tool_router]` on the impl block:
 //   1. Collects every method annotated with `#[tool(...)]`.
-//   2. Generates a `ToolRouter<BoredMcp>` that matches incoming tool names
-//      and dispatches to the right method.
-//   3. Generates a `ServerHandler` impl so `BoredMcp` can be passed
-//      directly to `.serve()`.
+//   2. Generates a `ToolRouter<BoredMcp>` field and dispatches incoming
+//      `tools/call` requests to the correct async fn.
+//
+// We then write `impl ServerHandler for BoredMcp` manually (annotated with
+// `#[tool_handler]` so rmcp wires the router in) so we can override
+// `get_info()` and return a meaningful server name instead of the default
+// "rmcp" that `from_build_env()` produces inside the library crate.
 //
 // Each `#[tool(description = "...")]` method must take `&self` plus
 // optional `Parameters<T>` and return `Result<CallToolResult, McpError>`.
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl BoredMcp {
     // ── Boards ────────────────────────────────────────────────────────────────
 
@@ -300,5 +306,20 @@ impl BoredMcp {
             .send().await.map_err(mcp_err)?;
         require_ok(resp).await?;
         Ok(CallToolResult::success(vec![Content::text("Card deleted.")]))
+    }
+}
+
+// ── ServerHandler impl ────────────────────────────────────────────────────────
+//
+// `#[tool_handler]` wires the ToolRouter generated above into the MCP runtime.
+// We override `get_info()` so the server reports its name as "bored" rather
+// than the library default "rmcp" (which comes from `CARGO_CRATE_NAME` inside
+// the rmcp crate, not ours).
+
+#[tool_handler]
+impl ServerHandler for BoredMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("bored", env!("CARGO_PKG_VERSION")))
     }
 }
