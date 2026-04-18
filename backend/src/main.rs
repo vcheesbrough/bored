@@ -12,10 +12,65 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rust TLS)
 use routes::boards::AppState;
 use std::net::SocketAddr;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-}; // Middleware: static files + request tracing
+use tower_http::{services::ServeDir, trace::TraceLayer}; // Middleware: static files + request tracing
+
+// Wraps ServeDir and replaces any 404 response with index.html so that SPA
+// deep-links (e.g. /boards/123) survive a browser reload.
+// tower-http 0.6's ServeDir::not_found_service does not fire for paths that
+// don't exist on disk, so we intercept the 404 response after the fact.
+#[derive(Clone)]
+struct SpaSvc {
+    inner: ServeDir,
+    index_path: std::path::PathBuf,
+}
+
+impl SpaSvc {
+    fn new(static_dir: &str) -> Self {
+        Self {
+            inner: ServeDir::new(static_dir),
+            index_path: std::path::Path::new(static_dir).join("index.html"),
+        }
+    }
+}
+
+impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
+    type Response = axum::http::Response<axum::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: axum::http::Request<axum::body::Body>) -> Self::Future {
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+        let inner = self.inner.clone();
+        let index_path = self.index_path.clone();
+        Box::pin(async move {
+            // ServeDir is infallible in tower-http 0.6
+            let resp = inner.oneshot(req).await.unwrap();
+            if resp.status() == StatusCode::NOT_FOUND {
+                match tokio::fs::read(&index_path).await {
+                    Ok(bytes) => Ok(axum::http::Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "text/html; charset=utf-8")
+                        .body(axum::body::Body::from(bytes))
+                        .unwrap()),
+                    // index.html itself is missing — pass through the 404
+                    Err(_) => {
+                        let (parts, body) = resp.into_parts();
+                        Ok(axum::http::Response::from_parts(parts, axum::body::Body::new(body)))
+                    }
+                }
+            } else {
+                let (parts, body) = resp.into_parts();
+                Ok(axum::http::Response::from_parts(parts, axum::body::Body::new(body)))
+            }
+        })
+    }
+}
 
 // `app` is extracted from `main` so integration tests can call it directly
 // without spinning up a real TCP listener. Tests construct `AppState` with an
@@ -54,14 +109,10 @@ pub async fn app(state: AppState) -> Router {
         // `.nest("/api", api)` mounts the api sub-router under `/api`, so
         // `/api/boards` maps to the `list_boards` handler above.
         .nest("/api", api)
-        // `ServeDir` serves the compiled Leptos WASM bundle for known static files.
-        // `.not_found_service` falls back to `index.html` for any path that isn't a
-        // real file on disk — this is what makes SPA deep-links (e.g. /boards/123)
-        // survive a browser reload instead of returning 404.
-        .fallback_service(
-            ServeDir::new(&static_dir)
-                .not_found_service(ServeFile::new(format!("{}/index.html", static_dir))),
-        )
+        // `SpaSvc` serves static files from the dist directory and falls back to
+        // index.html for any path that isn't a real file on disk, enabling
+        // Leptos client-side routing to handle deep-links (e.g. /boards/123).
+        .fallback_service(SpaSvc::new(&static_dir))
         // `TraceLayer` logs every request (method, path, status, latency) using
         // the `tracing` crate — visible as structured JSON in production.
         .layer(TraceLayer::new_for_http())
@@ -745,5 +796,28 @@ mod tests {
         let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
         assert_eq!(info.version, "1.2.3");
         assert_eq!(info.env, "production");
+    }
+
+    // Verifies that a deep-link path (e.g. /boards/abc) returns 200 with index.html
+    // rather than 404 when the SPA fallback is active.
+    #[tokio::test]
+    #[serial]
+    async fn spa_deep_link_returns_index_html() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
+        std::env::set_var("STATIC_DIR", dir.path().to_str().unwrap());
+        let server = test_app().await;
+        let resp = server.get("/boards/some-deep-link").await;
+        std::env::remove_var("STATIC_DIR");
+        resp.assert_status(StatusCode::OK);
+    }
+
+    // Verifies that unknown /api/* paths return 404 from the nested router and are
+    // not swallowed by the SPA fallback, which only applies outside /api/*.
+    #[tokio::test]
+    async fn api_unknown_route_returns_404_not_spa_fallback() {
+        let server = test_app().await;
+        let resp = server.get("/api/nonexistent").await;
+        resp.assert_status(StatusCode::NOT_FOUND);
     }
 }
