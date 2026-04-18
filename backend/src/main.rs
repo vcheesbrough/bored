@@ -731,9 +731,10 @@ mod tests {
         std::env::set_var("APP_ENV", "production");
         let server = test_app().await;
         let resp = server.get("/api/info").await;
-        let info: shared::AppInfo = resp.json();
+        let body = resp.text();
         std::env::remove_var("APP_VERSION");
         std::env::remove_var("APP_ENV");
+        let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
         assert_eq!(info.version, "1.2.3");
         assert_eq!(info.env, "production");
     }
