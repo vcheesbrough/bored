@@ -24,8 +24,9 @@ Semantic versioning (`MAJOR.MINOR.PATCH`). `0.x` is pre-MVP; `1.0` is cut at the
 | 5 — UI Overhaul | `0.5` | `0.5.1` |
 | 6 — Markdown Cards | `0.6` | `0.6.4` |
 | 7 — CI / Deployments | `0.7` | `0.7.1` |
-| 8 — Auth | `0.8` | `0.8.3` |
-| 9 — Bored MCP | `0.9` | `0.9.2` |
+| 8 — SPA Deep-Link Routing | `0.8` | `0.8.1` |
+| 9 — Auth | `0.9` | `0.9.3` |
+| 10 — Bored MCP | `0.10` | `0.10.2` |
 | **🏁 MVP = 1.0** | `1.0` | `1.0.1` |
 | 10 — SSE + Drag-drop | `1.1` | `1.1.11` |
 | 11 — Board Ownership | `1.2` | `1.2.1` |
@@ -1012,7 +1013,41 @@ Feature: Production deployment
 
 ---
 
-### Iteration 8 — Auth (OIDC + PKCE)
+### Iteration 8 — SPA Deep-Link Routing
+
+When the browser is reloaded on any route other than `/` (e.g. `/boards/:id`), the request reaches the Axum backend which returns 404 — `ServeDir` serves files that exist under `dist/` but returns 404 for unknown paths rather than falling back to `index.html`. The fix is to configure `ServeDir` with a `not_found_service` pointing at `dist/index.html` so the SPA can handle all non-API, non-static paths client-side.
+
+**Backend change (`backend/src/main.rs`):**
+- Replace `.fallback_service(ServeDir::new(static_dir))` with `.fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(format!("{static_dir}/index.html"))))`
+- Add `tower_http::services::ServeFile` to imports
+
+**Tests:**
+- Integration: `GET /boards/any-id` returns 200 with HTML (not 404); `GET /api/boards` still returns JSON; `GET /health` still returns 200
+
+```gherkin
+Feature: SPA deep-link routing
+  Scenario: Reloading a board URL serves the app
+    Given the backend is running
+    When GET /boards/some-board-id is requested directly
+    Then the response is 200 OK
+    And the response body is the SPA index.html
+
+  Scenario: API routes are unaffected
+    Given the backend is running
+    When GET /api/boards is requested
+    Then the response is JSON, not HTML
+
+  Scenario: Unknown deep links serve the SPA
+    Given the backend is running
+    When GET /some/arbitrary/path is requested
+    Then the response is 200 OK with the SPA index.html
+```
+
+**Deliverable:** Reloading or bookmarking any URL in the app works correctly.
+
+---
+
+### Iteration 9 — Auth (OIDC + PKCE)
 
 - OIDC auth code + PKCE flow (`/auth/login`, `/auth/callback`, `/auth/logout`)
 - `tower-sessions` backed by SurrealDB
