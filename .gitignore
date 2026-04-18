@@ -4,4 +4,5 @@
 .env
 *.bak
 lcov.info
-.claude/settings.local.json
+.claude/
+.playwright-mcp/
