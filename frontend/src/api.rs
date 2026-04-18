@@ -1,5 +1,13 @@
 use gloo_net::http::Request;
 
+pub async fn fetch_app_info() -> Result<shared::AppInfo, gloo_net::Error> {
+    Request::get("/api/info")
+        .send()
+        .await?
+        .json::<shared::AppInfo>()
+        .await
+}
+
 pub async fn fetch_boards() -> Result<Vec<shared::Board>, gloo_net::Error> {
     Request::get("/api/boards")
         .send()

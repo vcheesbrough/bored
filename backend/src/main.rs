@@ -44,6 +44,7 @@ pub async fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/api/info", get(info))
         // `.nest("/api", api)` mounts the api sub-router under `/api`, so
         // `/api/boards` maps to the `list_boards` handler above.
         .nest("/api", api)
@@ -109,10 +110,18 @@ async fn main() {
     }
 }
 
-// A simple liveness probe. Returns a plain-text "ok" with a 200 status.
-// Load balancers and container orchestrators hit this to know the process is alive.
 async fn health() -> &'static str {
     "ok"
+}
+
+// Returns runtime version and environment — read from env vars injected by the deploy pipeline.
+// Falls back to the compile-time crate version and "dev" when running locally.
+async fn info() -> axum::Json<shared::AppInfo> {
+    axum::Json(shared::AppInfo {
+        version: std::env::var("APP_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+        env: std::env::var("APP_ENV").unwrap_or_else(|_| "dev".to_string()),
+    })
 }
 
 // ── Integration tests ─────────────────────────────────────────────────────────
