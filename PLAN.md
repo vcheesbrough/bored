@@ -28,12 +28,12 @@ Semantic versioning (`MAJOR.MINOR.PATCH`). `0.x` is pre-MVP; `1.0` is cut at the
 | 9 — Auth | `0.9` | `0.9.3` |
 | 10 — Bored MCP | `0.10` | `0.10.2` |
 | **🏁 MVP = 1.0** | `1.0` | `1.0.1` |
-| 10 — SSE + Drag-drop | `1.1` | `1.1.11` |
-| 11 — Board Ownership | `1.2` | `1.2.1` |
-| 12 — Soft Delete | `1.3` | `1.3.3` |
-| 13 — Change History | `1.4` | `1.4.2` |
-| 14 — Git Links | `1.5` | `1.5.2` |
-| 15 — CI/CD Integration | `1.6` | `1.6.3` |
+| 11 — SSE + Drag-drop | `1.1` | `1.1.11` |
+| 12 — Board Ownership | `1.2` | `1.2.1` |
+| 13 — Soft Delete | `1.3` | `1.3.3` |
+| 14 — Change History | `1.4` | `1.4.2` |
+| 15 — Git Links | `1.5` | `1.5.2` |
+| 16 — CI/CD Integration | `1.6` | `1.6.3` |
 
 **On merge to main**, Woodpecker constructs `VERSION=${CARGO_VERSION}.${CI_BUILD_NUMBER}`, tags the git commit (`v0.x.N`), and tags the Docker image with `:<sha>` and `:0.x.N`. No `:latest` tag is applied — deployments must reference an explicit version.
 
