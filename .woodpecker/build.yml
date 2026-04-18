@@ -58,7 +58,7 @@ steps:
   deploy-dev:
     when:
       - event: deployment
-        environment: dev
+        evaluate: 'CI_DEPLOY_TO == "dev"'
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -81,7 +81,7 @@ steps:
   deploy-prod:
     when:
       - event: deployment
-        environment: prod
+        evaluate: 'CI_DEPLOY_TO == "prod"'
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
