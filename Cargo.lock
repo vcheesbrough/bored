@@ -555,6 +555,7 @@ dependencies = [
  "serial_test",
  "shared",
  "surrealdb",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
