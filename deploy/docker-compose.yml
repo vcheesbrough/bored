@@ -24,7 +24,7 @@ services:
 volumes:
   bored-db:
     name: ${DB_VOLUME:?DB_VOLUME is required}
-    external: ${DB_VOLUME_EXTERNAL:-false}
+    external: true
 
 networks:
   proxy-backend:

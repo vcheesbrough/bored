@@ -49,6 +49,7 @@ steps:
     commands:
       - *compute-version
       - *docker-login
+      - docker volume create bored-dev-db
       - BORED_IMAGE_TAG=$$VERSION APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
@@ -61,4 +62,5 @@ steps:
     commands:
       - *compute-version
       - *docker-login
-      - BORED_IMAGE_TAG=$$VERSION APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db DB_VOLUME_EXTERNAL=true docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
+      - docker volume create bored-prod-db
+      - BORED_IMAGE_TAG=$$VERSION APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
