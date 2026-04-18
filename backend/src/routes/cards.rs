@@ -36,6 +36,24 @@ pub async fn list_cards(
     Ok(Json(cards.into_iter().map(DbCard::into_api).collect()))
 }
 
+pub async fn get_card(
+    State(state): State<AppState>,
+    Path(card_id): Path<String>,
+) -> Result<Json<shared::Card>, StatusCode> {
+    // Direct lookup by primary key — SurrealDB returns None if the record
+    // doesn't exist, which we surface as 404 rather than an internal error.
+    let card: Option<DbCard> = state
+        .db
+        .select(("cards", &card_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match card {
+        Some(c) => Ok(Json(c.into_api())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
 pub async fn create_card(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
