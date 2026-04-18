@@ -42,12 +42,11 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
 
     fn poll_ready(
         &mut self,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        <ServeDir as tower::Service<axum::http::Request<axum::body::Body>>>::poll_ready(
-            &mut self.inner,
-            cx,
-        )
+        // ServeDir is always ready; delegating here would reserve readiness on
+        // self.inner, but call() clones it — so the reservation would be discarded.
+        std::task::Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: axum::http::Request<axum::body::Body>) -> Self::Future {
@@ -821,7 +820,7 @@ mod tests {
         std::env::set_var("STATIC_DIR", dir.path().to_str().unwrap());
         let server = test_app().await;
         let resp = server.get("/boards/some-deep-link").await;
-        std::env::remove_var("STATIC_DIR");
+        std::env::remove_var("STATIC_DIR"); // remove before assert so cleanup runs even on failure
         resp.assert_status(StatusCode::OK);
     }
 
