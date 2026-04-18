@@ -4,7 +4,7 @@ when:
 steps:
   check:
     when:
-      - event: push
+      - event: [push, manual]
     image: rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c
     commands:
       - rustup component add rustfmt clippy llvm-tools-preview
@@ -15,7 +15,7 @@ steps:
 
   build:
     when:
-      - event: push
+      - event: [push, manual]
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
