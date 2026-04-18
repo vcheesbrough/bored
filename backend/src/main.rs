@@ -822,6 +822,8 @@ mod tests {
         let resp = server.get("/boards/some-deep-link").await;
         std::env::remove_var("STATIC_DIR"); // remove before assert so cleanup runs even on failure
         resp.assert_status(StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
+        assert!(resp.text().contains("<html>"));
     }
 
     // Verifies that unknown /api/* paths return 404 from the nested router and are
