@@ -12,7 +12,10 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rust TLS)
 use routes::boards::AppState;
 use std::net::SocketAddr;
-use tower_http::{services::{ServeDir, ServeFile}, trace::TraceLayer}; // Middleware: static files + request tracing
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+}; // Middleware: static files + request tracing
 
 // `app` is extracted from `main` so integration tests can call it directly
 // without spinning up a real TCP listener. Tests construct `AppState` with an
@@ -55,7 +58,10 @@ pub async fn app(state: AppState) -> Router {
         // `.not_found_service` falls back to `index.html` for any path that isn't a
         // real file on disk — this is what makes SPA deep-links (e.g. /boards/123)
         // survive a browser reload instead of returning 404.
-        .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(format!("{}/index.html", static_dir))))
+        .fallback_service(
+            ServeDir::new(&static_dir)
+                .not_found_service(ServeFile::new(format!("{}/index.html", static_dir))),
+        )
         // `TraceLayer` logs every request (method, path, status, latency) using
         // the `tracing` crate — visible as structured JSON in production.
         .layer(TraceLayer::new_for_http())
