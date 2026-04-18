@@ -36,6 +36,9 @@ pub async fn app(state: AppState) -> Router {
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
         .route("/cards/:id/move", post(routes::cards::move_card))
+        // `/api/info` lives inside the api sub-router so auth middleware added
+        // in a future iteration will apply to it by default.
+        .route("/info", get(info))
         .with_state(state);
 
     // `STATIC_DIR` lets the Docker image override where the compiled WASM frontend
@@ -44,7 +47,6 @@ pub async fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
-        .route("/api/info", get(info))
         // `.nest("/api", api)` mounts the api sub-router under `/api`, so
         // `/api/boards` maps to the `list_boards` handler above.
         .nest("/api", api)
@@ -706,5 +708,17 @@ mod tests {
 
         // Verify the full body is preserved verbatim.
         assert_eq!(card.body, "# My Card\n\nSome content");
+    }
+
+    #[tokio::test]
+    async fn info_route_returns_version_and_env() {
+        let server = test_app().await;
+        let resp = server.get("/api/info").await;
+        resp.assert_status_ok();
+        let info: shared::AppInfo = resp.json();
+        // Falls back to compile-time CARGO_PKG_VERSION when APP_VERSION is unset.
+        assert!(!info.version.is_empty());
+        // Falls back to "dev" when APP_ENV is unset.
+        assert_eq!(info.env, "dev");
     }
 }

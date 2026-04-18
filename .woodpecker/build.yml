@@ -36,7 +36,7 @@ steps:
         from_secret: github_token
     commands:
       - CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-      - PATCH=$(git ls-remote --tags https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
+      - PATCH=$(git ls-remote --tags --refs https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
       - echo "$$CARGO_VERSION.$$PATCH" > .version
       - echo "Version $(cat .version)"
 
@@ -58,6 +58,7 @@ steps:
   tag-release:
     when:
       - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     image: alpine/git
     environment:
       GITHUB_TOKEN:

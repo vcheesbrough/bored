@@ -942,28 +942,26 @@ Feature: Markdown cards
 ### Iteration 7 — CI / Deployments
 
 - Two deployment targets: **dev** and **production**
-- **Dev** deploys automatically on every successful build of `main`
-- **Production** is triggered manually via a Woodpecker UI pipeline dispatch (no auto-deploy)
+- **Dev** is triggered manually from any branch via a Woodpecker UI deployment dispatch — allows validating a feature branch on dev before merging
+- **Production** is triggered manually via a Woodpecker UI pipeline dispatch, from `main` only
 - Both targets run as Docker containers on the homelab; the bored repo owns its own compose file — no `bored-stack/` in `mini-config`
 
 **Woodpecker pipeline changes (`.woodpecker/build.yml`):**
-- Existing `build` step: compile, test, build Docker image, push to registry — unchanged
-- New `deploy-dev` step:
-  - `when: { branch: main, event: push }` — runs automatically after every successful build
-  - SSHes into the homelab and runs `docker compose -f /opt/bored/docker-compose.yml up -d` with env vars injected inline
-  - Dev stack uses an ephemeral named volume `bored-dev-db` (persistent across restarts but not treated as precious data)
-  - Connects to a dev subdomain (`bored-dev.desync.link`)
-- New `deploy-prod` step:
-  - `when: { event: manual }` — only runs when triggered explicitly from the Woodpecker UI
-  - Same mechanism but injects prod env vars; targets `bored.desync.link`
-  - Production volume `bored-prod-db` declared `external: true` — must be created manually before first deploy and is never removed by compose
+- `build` step: runs on every `push` event; builds a local Docker image tagged with `$CI_COMMIT_SHA` to validate the Dockerfile (no registry push)
+- `validate-deployment` step: runs on every `deployment` event; fails fast if the target is not `dev` or `prod`, or if `prod` is attempted from a non-`main` branch
+- `compute-version` step: runs on every `deployment` event; counts existing git tags matching the current `CARGO_VERSION` via `git ls-remote --tags --refs`, derives the next patch number, writes `MAJOR.MINOR.PATCH` to `.version` in the workspace
+- `push` step: runs on every `deployment` event; builds and pushes the image tagged with the computed version to the registry
+- `tag-release` step: runs on `prod` deployments only; creates a `v0.x.y` git tag
+- `deploy-dev` step: runs when `CI_PIPELINE_DEPLOY_TARGET == "dev"`; creates the volume if absent, runs `docker compose up -d`; `APP_ENV` is set to the source branch name
+- `deploy-prod` step: runs when `CI_PIPELINE_DEPLOY_TARGET == "prod"`; same mechanism with prod-specific env vars
+
+Lint (fmt, clippy, tests) runs inside the Docker `backend-builder` stage — Docker layer caching skips it when source is unchanged.
 
 **`deploy/docker-compose.yml` (in this repo):**
 - A single file serves both targets — all environment-specific values injected by the pipeline via env vars
-- Image tag: `${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}` — pipeline sets `${CI_COMMIT_SHA}` for dev, explicit semver for prod
-- Volume: `${DB_VOLUME:?DB_VOLUME is required}:/data` — pipeline sets `bored-dev-db` or `bored-prod-db`
-- Volume declaration uses `external: ${DB_VOLUME_EXTERNAL:-false}` — pipeline sets `true` for prod
-- `APP_ENV`, `BORED_HOST` and all runtime secrets injected the same way
+- Image tag: `${BORED_IMAGE_TAG}` — set to the computed semver (e.g. `0.7.0`) for both dev and prod
+- Volume: `${DB_VOLUME}:/data` — pipeline sets `bored-dev-db` or `bored-prod-db`; volume is always `external: true`; deploy step runs `docker volume create` (idempotent) before `compose up`
+- `APP_ENV`, `APP_VERSION`, `BORED_HOST`, `BORED_CONTAINER_NAME` all pipeline-injected; Docker Compose project name explicitly set (`-p bored-dev` / `-p bored`) to isolate the two stacks
 
 **mini-config changes (minimal):**
 - Add `bored-prod-db` to Backrest backup config
@@ -980,28 +978,34 @@ Feature: Markdown cards
 
 **CI steps summary:**
 ```
-push to main
-  → build + test
-  → docker build + push :sha and :0.7.x
-  → deploy-dev (automatic)
+push to any branch
+  → build step: docker build (local only, validates Dockerfile)
 
-manual trigger in Woodpecker UI
-  → deploy-prod (with explicit image tag parameter)
+manual deployment trigger in Woodpecker UI (target: dev)
+  → validate → compute-version → push image → deploy-dev
+
+manual deployment trigger in Woodpecker UI (target: prod, from main only)
+  → validate → compute-version → push image → tag-release → deploy-prod
 ```
 
 ```gherkin
 Feature: Dev deployment
-  Scenario: Merge to main triggers dev deploy
-    Given a PR is merged to main
-    When the Woodpecker build passes
-    Then the dev environment at bored-dev.desync.link is updated automatically
-    And the new version is reachable within 60 seconds
+  Scenario: Developer manually deploys to dev from any branch
+    Given a successful build exists for a feature branch
+    When a developer triggers a deployment with target "dev" in the Woodpecker UI
+    Then the dev environment at bored-dev.desync.link is updated
+    And the watermark shows the semver and branch name
 
 Feature: Production deployment
-  Scenario: Production deploy is manual only
-    Given a successful build exists for version 0.7.1
-    When a developer triggers the deploy-prod pipeline in the Woodpecker UI
+  Scenario: Production deploy is manual and restricted to main
+    Given a successful build exists on the main branch
+    When a developer triggers a deployment with target "prod" in the Woodpecker UI
     Then bored.desync.link is updated to that version
+    And a git tag v0.7.x is created
+
+  Scenario: Production deploy is blocked from non-main branches
+    Given a developer triggers a prod deployment from a feature branch
+    Then the pipeline fails at the validate step with a clear error message
 
   Scenario: Production database persists across deploys
     Given the production stack has boards and cards in bored-prod-db
