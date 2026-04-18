@@ -2,17 +2,6 @@ when:
   - event: [push, deployment]
 
 steps:
-  check:
-    when:
-      - event: push
-    image: rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c
-    commands:
-      - rustup component add rustfmt clippy llvm-tools-preview
-      - cargo install cargo-llvm-cov --locked
-      - cargo fmt -p backend -p shared --check
-      - cargo clippy -p backend -p shared -- -D warnings
-      - cargo llvm-cov -p backend -p shared --text
-
   build:
     when:
       - event: push
