@@ -11,6 +11,22 @@ steps:
     commands:
       - docker build -t registry.desync.link/bored:$$CI_COMMIT_SHA .
 
+  validate-deployment:
+    when:
+      - event: deployment
+    image: alpine
+    commands:
+      - |
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
+          echo "ERROR: deploy target must be 'dev' or 'prod' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
+          exit 1
+        fi
+      - |
+        if [ "$$CI_PIPELINE_DEPLOY_TARGET" = "prod" ] && [ "$$CI_COMMIT_BRANCH" != "main" ]; then
+          echo "ERROR: prod can only be deployed from main (current branch: '$$CI_COMMIT_BRANCH')"
+          exit 1
+        fi
+
   push:
     when:
       - event: deployment
