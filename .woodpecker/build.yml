@@ -53,7 +53,7 @@ steps:
   deploy-dev:
     when:
       - event: deployment
-        evaluate: 'CI_DEPLOY_TO == "dev"'
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     image: *docker-image
     volumes: *docker-socket
     environment: *registry-creds
@@ -65,7 +65,7 @@ steps:
   deploy-prod:
     when:
       - event: deployment
-        evaluate: 'CI_DEPLOY_TO == "prod"'
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     image: *docker-image
     volumes: *docker-socket
     environment: *registry-creds
