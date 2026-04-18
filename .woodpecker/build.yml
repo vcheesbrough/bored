@@ -13,9 +13,19 @@ steps:
       - cargo clippy -p backend -p shared -- -D warnings
       - cargo llvm-cov -p backend -p shared --text
 
-  build-and-push:
+  build:
     when:
       - event: push
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - docker build -t registry.desync.link/bored:$$CI_COMMIT_SHA .
+
+  push-dev:
+    when:
+      - branch: main
+        event: push
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -27,25 +37,7 @@ steps:
     commands:
       - |
         echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        docker buildx build --push \
-          -t registry.desync.link/bored:$$CI_COMMIT_SHA \
-          -t registry.desync.link/bored:$$VERSION .
-
-  tag-release:
-    when:
-      - event: manual
-    image: alpine/git
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-      BORED_DEPLOY_VERSION:
-        from_secret: bored_deploy_version
-    commands:
-      - |
-        git tag v$$BORED_DEPLOY_VERSION
-        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$BORED_DEPLOY_VERSION
+        docker push registry.desync.link/bored:$$CI_COMMIT_SHA
 
   deploy-dev:
     when:
@@ -70,6 +62,40 @@ steps:
           BORED_HOST=bored-dev.desync.link \
           DB_VOLUME=bored-dev-db \
           docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
+
+  push-prod:
+    when:
+      - event: manual
+    image: docker:27-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      BORED_DEPLOY_VERSION:
+        from_secret: bored_deploy_version
+    commands:
+      - |
+        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+        docker pull registry.desync.link/bored:$$CI_COMMIT_SHA
+        docker tag registry.desync.link/bored:$$CI_COMMIT_SHA registry.desync.link/bored:$$BORED_DEPLOY_VERSION
+        docker push registry.desync.link/bored:$$BORED_DEPLOY_VERSION
+
+  tag-release:
+    when:
+      - event: manual
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      BORED_DEPLOY_VERSION:
+        from_secret: bored_deploy_version
+    commands:
+      - |
+        git tag v$$BORED_DEPLOY_VERSION
+        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$BORED_DEPLOY_VERSION
 
   deploy-prod:
     when:
