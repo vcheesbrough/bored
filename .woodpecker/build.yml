@@ -1,10 +1,10 @@
 when:
-  - event: [push, manual]
+  - event: [push, deployment]
 
 steps:
   check:
     when:
-      - event: [push, manual]
+      - event: push
     image: rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c
     commands:
       - rustup component add rustfmt clippy llvm-tools-preview
@@ -15,17 +15,16 @@ steps:
 
   build:
     when:
-      - event: [push, manual]
+      - event: push
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - docker build -t registry.desync.link/bored:$$CI_COMMIT_SHA .
 
-  push-dev:
+  push:
     when:
-      - branch: main
-        event: push
+      - event: deployment
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -37,75 +36,29 @@ steps:
     commands:
       - |
         echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        docker push registry.desync.link/bored:$$CI_COMMIT_SHA
-
-  deploy-dev:
-    when:
-      - branch: main
-        event: push
-    image: alpine
-    environment:
-      MINI_SSH_KEY:
-        from_secret: mini_ssh_key
-    commands:
-      - |
-        apk add -q openssh-client
-        mkdir -p ~/.ssh
-        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
-        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
-        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
-        ssh $$SSH_OPTS vincent@10.0.0.29 " \
-          BORED_IMAGE_TAG=$$CI_COMMIT_SHA \
-          APP_ENV=development \
-          BORED_HOST=bored-dev.desync.link \
-          DB_VOLUME=bored-dev-db \
-          docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
-
-  push-prod:
-    when:
-      - event: manual
-    image: docker:27-cli
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-      BORED_DEPLOY_VERSION:
-        from_secret: bored_deploy_version
-    commands:
-      - |
-        echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-        docker pull registry.desync.link/bored:$$CI_COMMIT_SHA
-        docker tag registry.desync.link/bored:$$CI_COMMIT_SHA registry.desync.link/bored:$$BORED_DEPLOY_VERSION
-        docker push registry.desync.link/bored:$$BORED_DEPLOY_VERSION
+        docker build -t registry.desync.link/bored:$$BORED_VERSION .
+        docker push registry.desync.link/bored:$$BORED_VERSION
 
   tag-release:
     when:
-      - event: manual
+      - event: deployment
     image: alpine/git
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
-      BORED_DEPLOY_VERSION:
-        from_secret: bored_deploy_version
     commands:
       - |
-        git tag v$$BORED_DEPLOY_VERSION
-        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$BORED_DEPLOY_VERSION
+        git tag v$$BORED_VERSION
+        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$BORED_VERSION
 
-  deploy-prod:
+  deploy-dev:
     when:
-      - event: manual
+      - event: deployment
+        environment: dev
     image: alpine
     environment:
       MINI_SSH_KEY:
         from_secret: mini_ssh_key
-      BORED_DEPLOY_VERSION:
-        from_secret: bored_deploy_version
     commands:
       - |
         apk add -q openssh-client
@@ -116,7 +69,31 @@ steps:
         ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
         scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
         ssh $$SSH_OPTS vincent@10.0.0.29 " \
-          BORED_IMAGE_TAG=$$BORED_DEPLOY_VERSION \
+          BORED_IMAGE_TAG=$$BORED_VERSION \
+          APP_ENV=$$CI_COMMIT_BRANCH \
+          BORED_HOST=bored-dev.desync.link \
+          DB_VOLUME=bored-dev-db \
+          docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
+
+  deploy-prod:
+    when:
+      - event: deployment
+        environment: prod
+    image: alpine
+    environment:
+      MINI_SSH_KEY:
+        from_secret: mini_ssh_key
+    commands:
+      - |
+        apk add -q openssh-client
+        mkdir -p ~/.ssh
+        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
+        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
+        ssh $$SSH_OPTS vincent@10.0.0.29 " \
+          BORED_IMAGE_TAG=$$BORED_VERSION \
           APP_ENV=production \
           BORED_HOST=bored.desync.link \
           DB_VOLUME=bored-prod-db \
