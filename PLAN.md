@@ -971,6 +971,7 @@ Feature: Markdown cards
 - `WOODPECKER_SSH_KEY` secret: private key for homelab deploy SSH
 - `WOODPECKER_KNOWN_HOSTS`: pre-populated to avoid interactive host verification
 - Image registry credentials already present from the build step
+- Runtime secrets (`GITHUB_TOKEN`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_ISSUER_URL`, `OIDC_REDIRECT_URI`, `SESSION_SECRET`) stored as Woodpecker secrets and injected as env vars by the deploy step — the pipeline SSHes into the homelab and passes them to `docker compose up -d` so the container receives them as normal environment variables; no secrets file on disk
 
 **Tests:** none — deployment config is validated by a successful manual smoke test after first deploy
 
