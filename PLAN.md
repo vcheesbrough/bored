@@ -943,29 +943,30 @@ Feature: Markdown cards
 - Two deployment targets: **dev** and **production**
 - **Dev** deploys automatically on every successful build of `main`
 - **Production** is triggered manually via a Woodpecker UI pipeline dispatch (no auto-deploy)
-- Both targets run as Docker containers on the homelab, managed by `bored-stack/` in `mini-config`
+- Both targets run as Docker containers on the homelab; the bored repo owns its own compose file — no `bored-stack/` in `mini-config`
 
 **Woodpecker pipeline changes (`.woodpecker/build.yml`):**
 - Existing `build` step: compile, test, build Docker image, push to registry — unchanged
 - New `deploy-dev` step:
   - `when: { branch: main, event: push }` — runs automatically after every successful build
-  - SSHes into the homelab and runs `docker compose pull && docker compose up -d` for the dev stack
+  - SSHes into the homelab and runs `docker compose -f /opt/bored/docker-compose.yml up -d` with env vars injected inline
   - Dev stack uses an ephemeral named volume `bored-dev-db` (persistent across restarts but not treated as precious data)
-  - Connects to a dev subdomain (e.g. `bored-dev.desync.link`)
+  - Connects to a dev subdomain (`bored-dev.desync.link`)
 - New `deploy-prod` step:
   - `when: { event: manual }` — only runs when triggered explicitly from the Woodpecker UI
-  - Same deploy mechanism but targets the production stack
-  - Production stack mounts a Docker volume `bored-prod-db` declared `external: true` in `docker-compose.yml` — the volume must be created manually before the first deploy and is never removed by compose
-  - Connects to the production subdomain (`bored.desync.link`)
+  - Same mechanism but injects prod env vars; targets `bored.desync.link`
+  - Production volume `bored-prod-db` declared `external: true` — must be created manually before first deploy and is never removed by compose
 
-**mini-config changes (`bored-stack/`):**
-- A single `docker-compose.yml` serves both targets — all environment-specific values are injected by the pipeline via env vars; no separate dev/prod files
-- Image tag: `${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}` — pipeline sets this to `${CI_COMMIT_SHA}` for dev and the explicit semver (e.g. `0.7.1`) for prod
-- Volume: `${DB_VOLUME:?DB_VOLUME is required}:/data` — pipeline sets `DB_VOLUME=bored-dev-db` (dev) or `DB_VOLUME=bored-prod-db` (prod)
-- Volume declaration uses `external: ${DB_VOLUME_EXTERNAL:-false}` — pipeline sets `DB_VOLUME_EXTERNAL=true` for prod so compose never creates or removes the production volume
-- `APP_ENV` is passed by the pipeline (`development` for dev, `production` for prod)
-- Traefik host rule: `${BORED_HOST:?BORED_HOST is required}` — pipeline sets `bored-dev.desync.link` or `bored.desync.link`
-- Backrest backup config updated to include `bored-prod-db` volume — prod data is backed up alongside other homelab volumes
+**`deploy/docker-compose.yml` (in this repo):**
+- A single file serves both targets — all environment-specific values injected by the pipeline via env vars
+- Image tag: `${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}` — pipeline sets `${CI_COMMIT_SHA}` for dev, explicit semver for prod
+- Volume: `${DB_VOLUME:?DB_VOLUME is required}:/data` — pipeline sets `bored-dev-db` or `bored-prod-db`
+- Volume declaration uses `external: ${DB_VOLUME_EXTERNAL:-false}` — pipeline sets `true` for prod
+- `APP_ENV`, `BORED_HOST` and all runtime secrets injected the same way
+
+**mini-config changes (minimal):**
+- Add `bored-prod-db` to Backrest backup config
+- Add bored health check to `smoke-test.sh`
 
 **Environment / secrets:**
 - `WOODPECKER_SSH_KEY` secret: private key for homelab deploy SSH
