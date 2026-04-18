@@ -9,12 +9,15 @@ RUN mkdir -p backend/src && touch backend/src/main.rs
 RUN cd frontend && trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
+RUN rustup component add rustfmt clippy
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY shared/ shared/
 COPY frontend/Cargo.toml frontend/Cargo.toml
 RUN mkdir -p frontend/src && touch frontend/src/lib.rs
+RUN cargo fmt -p backend -p shared --check
+RUN cargo clippy -p backend -p shared -- -D warnings
 RUN cargo test -p backend -p shared --lib
 RUN cargo build --release -p backend
 
