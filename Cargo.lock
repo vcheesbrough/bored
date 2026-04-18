@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "axum-server",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -4650,7 +4650,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
 ]

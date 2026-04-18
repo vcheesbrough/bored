@@ -3,6 +3,8 @@ when:
 
 steps:
   check:
+    when:
+      - event: push
     image: rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c
     commands:
       - rustup component add rustfmt clippy llvm-tools-preview
@@ -13,7 +15,7 @@ steps:
 
   build-and-push:
     when:
-      - event: [push, manual]
+      - event: push
     image: docker:27-cli
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -33,7 +35,8 @@ steps:
 
   tag-release:
     when:
-      - event: [push, manual]
+      - branch: main
+        event: push
     image: alpine/git
     environment:
       GITHUB_TOKEN:
@@ -45,23 +48,52 @@ steps:
         git tag v$$VERSION
         git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
 
-  deploy:
+  deploy-dev:
     when:
-      - event: [push, manual]
+      - branch: main
+        event: push
     image: alpine
     environment:
       MINI_SSH_KEY:
         from_secret: mini_ssh_key
-    # StrictHostKeyChecking is fine here, it is not practical to add the server's host key to the image and this is a private network
     commands:
       - |
         apk add -q openssh-client
         mkdir -p ~/.ssh
         echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
         SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
-        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /srv/dev/mini-config/bored-stack"
-        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/srv/dev/mini-config/bored-stack/docker-compose.yml
-        ssh $$SSH_OPTS vincent@10.0.0.29 "cd /srv/dev/mini-config && BORED_VERSION=$$VERSION ./run-stack.sh bored-stack up -d --pull always"
+        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
+        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
+        ssh $$SSH_OPTS vincent@10.0.0.29 " \
+          BORED_IMAGE_TAG=$$CI_COMMIT_SHA \
+          APP_ENV=development \
+          BORED_HOST=bored-dev.desync.link \
+          DB_VOLUME=bored-dev-db \
+          docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
+
+  deploy-prod:
+    when:
+      - event: manual
+    image: alpine
+    environment:
+      MINI_SSH_KEY:
+        from_secret: mini_ssh_key
+      BORED_DEPLOY_VERSION:
+        from_secret: bored_deploy_version
+    commands:
+      - |
+        apk add -q openssh-client
+        mkdir -p ~/.ssh
+        echo "$$MINI_SSH_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        SSH_OPTS="-i ~/.ssh/id_rsa -o StrictHostKeyChecking=no"
+        ssh $$SSH_OPTS vincent@10.0.0.29 "mkdir -p /opt/bored"
+        scp $$SSH_OPTS deploy/docker-compose.yml vincent@10.0.0.29:/opt/bored/docker-compose.yml
+        ssh $$SSH_OPTS vincent@10.0.0.29 " \
+          BORED_IMAGE_TAG=$$BORED_DEPLOY_VERSION \
+          APP_ENV=production \
+          BORED_HOST=bored.desync.link \
+          DB_VOLUME=bored-prod-db \
+          DB_VOLUME_EXTERNAL=true \
+          docker compose -f /opt/bored/docker-compose.yml up -d --pull always"
