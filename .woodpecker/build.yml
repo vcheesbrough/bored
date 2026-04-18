@@ -35,18 +35,17 @@ steps:
 
   tag-release:
     when:
-      - branch: main
-        event: push
+      - event: manual
     image: alpine/git
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
+      BORED_DEPLOY_VERSION:
+        from_secret: bored_deploy_version
     commands:
       - |
-        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-        VERSION=$$CARGO_VERSION.$$CI_PIPELINE_NUMBER
-        git tag v$$VERSION
-        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$VERSION
+        git tag v$$BORED_DEPLOY_VERSION
+        git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$$BORED_DEPLOY_VERSION
 
   deploy-dev:
     when:
