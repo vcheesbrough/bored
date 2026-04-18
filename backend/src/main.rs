@@ -36,9 +36,6 @@ pub async fn app(state: AppState) -> Router {
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
         .route("/cards/:id/move", post(routes::cards::move_card))
-        // `/api/info` lives inside the api sub-router so auth middleware added
-        // in a future iteration will apply to it by default.
-        .route("/info", get(info))
         .with_state(state);
 
     // `STATIC_DIR` lets the Docker image override where the compiled WASM frontend
@@ -47,6 +44,10 @@ pub async fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        // `/api/info` is intentionally public — the frontend fetches it
+        // unauthenticated on every page load to populate the version watermark.
+        // It must stay outside any auth-gated sub-router.
+        .route("/api/info", get(info))
         // `.nest("/api", api)` mounts the api sub-router under `/api`, so
         // `/api/boards` maps to the `list_boards` handler above.
         .nest("/api", api)

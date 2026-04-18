@@ -35,11 +35,8 @@ steps:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      - echo "machine github.com login x-token password $$GITHUB_TOKEN" > ~/.netrc
-      - chmod 600 ~/.netrc
       - CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-      - PATCH=$(git ls-remote --tags --refs https://github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
-      - rm ~/.netrc
+      - PATCH=$(git ls-remote --tags --refs https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
       - echo "$$CARGO_VERSION.$$PATCH" > .version
       - echo "$$CARGO_VERSION.$$PATCH-$(echo $$CI_COMMIT_SHA | cut -c1-7)" > .version-dev
       - echo "Version $(cat .version), dev $(cat .version-dev)"
@@ -69,11 +66,8 @@ steps:
       GITHUB_TOKEN:
         from_secret: github_token
     commands:
-      - echo "machine github.com login x-token password $$GITHUB_TOKEN" > ~/.netrc
-      - chmod 600 ~/.netrc
       - git tag v$(cat .version)
-      - git push https://github.com/$$CI_REPO.git v$(cat .version)
-      - rm ~/.netrc
+      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$(cat .version)
 
   deploy-dev:
     when:
