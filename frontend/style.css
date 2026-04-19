@@ -477,6 +477,20 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   color: var(--yellow);
 }
 
+.card-count-badge {
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 999px;
+  min-width: 18px;
+  text-align: center;
+  line-height: 16px;
+}
+
 .add-card-btn {
   background: transparent;
   border: none;

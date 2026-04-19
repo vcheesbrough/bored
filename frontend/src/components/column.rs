@@ -22,6 +22,10 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     // the ghost placeholder rendered just above that card.
     let drag_over_card_id: RwSignal<Option<String>> = RwSignal::new(None);
 
+    // Reactive count derived from the cards list; updates automatically whenever
+    // cards are added, removed, or moved by SSE events.
+    let card_count = Signal::derive(move || cards.get().len());
+
     provide_context(ColumnCards(cards));
     provide_context(drag_over_card_id);
 
@@ -325,6 +329,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                     }
                 >"⠿"</span>
                 <span class="column-name">{move || column.get().name.clone()}</span>
+                <span class="card-count-badge">{card_count}</span>
                 <button
                     class="add-card-btn"
                     title="Add card"
