@@ -523,6 +523,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   position: relative;
+  flex-shrink: 0;
   /* min-height equivalent to 2 lines of card preview text */
   min-height: calc(13px * 1.5 * 2 + 20px);
 }
@@ -623,14 +624,20 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 /* Grid-stack wrapper: both children occupy the same grid cell so the
    wrapper height = max(rendered height, textarea height).  The card
-   therefore grows with content and never shifts between view/edit modes. */
+   therefore grows with content and never shifts between view/edit modes.
+   `grid-template-columns: 1fr` pins the track width to the container so
+   wide content (code blocks etc.) cannot blow out the card's border.
+   `overflow: hidden` is the final safety net against any escaping content. */
 .card-body-wrapper {
   display: grid;
+  grid-template-columns: 1fr;
   min-height: 120px;
+  overflow: hidden;
 }
 .card-body-rendered,
 .card-body-textarea {
   grid-area: 1 / 1;       /* same cell — stacked */
+  min-width: 0;           /* prevents grid items from expanding the 1fr track */
   width: 100%;
   box-sizing: border-box;
 }
