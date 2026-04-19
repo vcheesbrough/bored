@@ -121,16 +121,22 @@ pub fn ColumnView(
             } => {
                 if *from_column_id == col_id_sse && card.column_id == col_id_sse {
                     // Within-column reorder: remove the existing signal from
-                    // its old slot, update its data, and re-insert at the new
-                    // position.  Reusing the same RwSignal keeps the `For`
-                    // component from remounting the card component.
+                    // its old slot, update its data, and re-insert at the
+                    // correct sorted position.  Reusing the same RwSignal
+                    // keeps the `For` component from remounting the card.
+                    // NOTE: card.position is a sparse integer (e.g. 512, 1024)
+                    // NOT an array index — we must find the insertion point by
+                    // comparing against neighbours' positions.
                     let card = card.clone();
                     cards.update(|cs| {
                         if let Some(idx) = cs.iter().position(|s| s.get_untracked().id == card.id) {
                             let sig = cs.remove(idx);
                             sig.set(card.clone());
-                            let pos = (card.position as usize).min(cs.len());
-                            cs.insert(pos, sig);
+                            let insert_at = cs
+                                .iter()
+                                .position(|s| s.get_untracked().position > card.position)
+                                .unwrap_or(cs.len());
+                            cs.insert(insert_at, sig);
                         }
                     });
                 } else if *from_column_id == col_id_sse {
@@ -138,19 +144,19 @@ pub fn ColumnView(
                     let id = card.id.clone();
                     cards.update(|cs| cs.retain(|s| s.get_untracked().id != id));
                 } else if card.column_id == col_id_sse {
-                    // Cross-column move — this column is the destination: insert.
-                    // Use spawn_local to create the signal outside the effect's
-                    // per-run reactive scope.  If created synchronously here the
-                    // signal would be disposed on the next SSE event, causing
-                    // get_untracked() panics in subsequent retain() calls.
+                    // Cross-column move — this column is the destination: insert
+                    // at the correct sorted position.
                     let card = card.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         cards.update(|cs| {
                             if cs.iter().any(|s| s.get_untracked().id == card.id) {
                                 return;
                             }
-                            let pos = (card.position as usize).min(cs.len());
-                            cs.insert(pos, RwSignal::new(card));
+                            let insert_at = cs
+                                .iter()
+                                .position(|s| s.get_untracked().position > card.position)
+                                .unwrap_or(cs.len());
+                            cs.insert(insert_at, RwSignal::new(card));
                         });
                     });
                 }
