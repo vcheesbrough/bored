@@ -303,7 +303,7 @@ body {
 .page {
   flex: 1;
   min-height: 0;
-  padding: 16px 24px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -672,6 +672,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   transition: border-color 0.15s;
 }
 .card-body-rendered:hover:not(.card-body-hidden) { border-color: var(--border); }
+.card-body-rendered:focus { outline: none; }
 
 /* Full markdown styling for both the expanded inline card and the modal. */
 .card-markdown,
@@ -756,10 +757,9 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   font-size: 11px;
   color: var(--text-muted);
   min-width: 70px;
-  min-height: 16px;
   display: block;
   text-align: right;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 /* ── Modal (full-screen maximised card view) ─────── */
@@ -778,6 +778,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   flex-direction: column;
   overflow: hidden;
 }
+.modal:focus { outline: none; }
 
 /* Toolbar — Win11 titlebar layout: metadata left, buttons flush right with no gap. */
 .modal-toolbar {

@@ -67,6 +67,7 @@ pub fn CardItem(
     let navigate = StoredValue::new(use_navigate());
 
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
+    let body_rendered_ref = NodeRef::<leptos::html::Div>::new();
 
     // ── State machine ─────────────────────────────────────────────────────
     let card_state: RwSignal<CardState> = RwSignal::new(CardState::Collapsed);
@@ -88,6 +89,16 @@ pub fn CardItem(
     Effect::new(move |_| {
         if card_state.get() == CardState::Editing {
             if let Some(el) = textarea_ref.get() {
+                let _ = el.focus();
+            }
+        }
+    });
+
+    // Focus the rendered body div when entering Expanded so keyboard Esc works
+    // without the user needing to click first.
+    Effect::new(move |_| {
+        if card_state.get() == CardState::Expanded {
+            if let Some(el) = body_rendered_ref.get() {
                 let _ = el.focus();
             }
         }
@@ -289,6 +300,14 @@ pub fn CardItem(
                     card_state.set(CardState::Expanded);
                 }
             }
+
+            // Esc while Expanded collapses the card.  Editing mode stops
+            // propagation on its own Esc so this only fires from Expanded.
+            on:keydown=move |ev: web_sys::KeyboardEvent| {
+                if ev.key() == "Escape" && card_state.get_untracked() == CardState::Expanded {
+                    collapse();
+                }
+            }
         >
             // ── Collapsed: absolute number badge + clamped preview ────────
             <Show when=is_collapsed>
@@ -328,6 +347,8 @@ pub fn CardItem(
                 // Grid-stack body: rendered and textarea share one cell.
                 <div class="card-body-wrapper">
                     <div
+                        node_ref=body_rendered_ref
+                        tabindex="-1"
                         class="card-body-rendered"
                         class:card-body-hidden=move || !is_expanded()
                         on:click=move |e: leptos::ev::MouseEvent| {
@@ -354,6 +375,9 @@ pub fn CardItem(
                         on:blur=move |_| exit_editing()
                         on:keydown=move |ev: web_sys::KeyboardEvent| {
                             if ev.key() == "Escape" {
+                                // Stop propagation so the card-item keydown
+                                // handler does not also collapse immediately.
+                                ev.stop_propagation();
                                 exit_editing();
                             }
                         }

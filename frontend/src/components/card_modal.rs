@@ -150,13 +150,32 @@ pub fn CardModal(
 
     let body_signal = Signal::derive(move || body.get());
 
+    let modal_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Keep focus on the modal div when viewing (not editing) so keyboard Esc
+    // is received without requiring a click first.
+    Effect::new(move |_| {
+        if card.get().is_some() && !editing.get() {
+            if let Some(el) = modal_ref.get() {
+                let _ = el.focus();
+            }
+        }
+    });
+
     view! {
         <Show when=move || card.get().is_some() fallback=|| ()>
-            // Full-screen overlay — clicking the backdrop (which is unreachable
-            // since the modal fills the screen) would close, but the real close
-            // path is the Minimise button in the toolbar.
             <div class="modal-backdrop">
-                <div class="modal" on:click=|ev| ev.stop_propagation()>
+                <div
+                    class="modal"
+                    node_ref=modal_ref
+                    tabindex="-1"
+                    on:click=|ev| ev.stop_propagation()
+                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                        if ev.key() == "Escape" {
+                            flush_and_close();
+                        }
+                    }
+                >
 
                     // ── Toolbar: mirrors the inline card-toolbar ──────────────
                     <div class="modal-toolbar">
@@ -207,11 +226,6 @@ pub fn CardModal(
                                 prop:value=move || body.get()
                                 on:input=on_body_input
                                 on:blur=move |_| editing.set(false)
-                                on:keydown=move |ev| {
-                                    if ev.key() == "Escape" {
-                                        editing.set(false);
-                                    }
-                                }
                                 autofocus=true
                             />
                         </Show>
