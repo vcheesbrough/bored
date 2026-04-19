@@ -6,6 +6,11 @@ const BOARD_URL = /\/boards\/.+/;
 
 test.describe('Boards', () => {
   test('home page redirects to the first existing board', async ({ page, request }) => {
+    // Clear all boards so this board is guaranteed to be the redirect target.
+    const res = await request.get('/api/boards');
+    const boards = await res.json() as { id: string }[];
+    for (const b of boards) await request.delete(`/api/boards/${b.id}`);
+
     const board = await apiCreateBoard(request, `Redirect Board ${Date.now()}`);
     await page.goto('/');
     await expect(page).toHaveURL(BOARD_URL);

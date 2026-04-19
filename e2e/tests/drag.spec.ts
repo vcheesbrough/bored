@@ -1,19 +1,5 @@
-import { test, expect, Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from './helpers';
-
-// Column grips use the HTML5 drag API (dragstart/dragover/drop) on a <span
-// draggable="true">. Playwright's locator.dragTo() and mouse simulation don't
-// fire dragstart on plain non-input elements. We dispatch the events directly.
-async function dragColumnGrip(page: Page, fromIndex: number, toIndex: number) {
-  // page.dragAndDrop uses CDP Input.dispatchDragEvent which fires trusted
-  // drag events (isTrusted: true), unlike dispatchEvent() or mouse simulation.
-  await page.dragAndDrop(
-    `.column-grip >> nth=${fromIndex}`,
-    `.column-view >> nth=${toIndex}`
-  );
-  // Allow the optimistic reorder and API call to settle.
-  await page.waitForTimeout(500);
-}
 
 test.describe('Drag and drop', () => {
   test('move card to another column', async ({ page, request }) => {

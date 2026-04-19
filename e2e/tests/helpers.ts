@@ -4,6 +4,7 @@ import { APIRequestContext, Page } from '@playwright/test';
 
 export async function apiCreateBoard(request: APIRequestContext, name: string) {
   const res = await request.post('/api/boards', { data: { name } });
+  if (!res.ok()) throw new Error(`POST /api/boards failed: ${res.status()} ${await res.text()}`);
   return await res.json() as { id: string; name: string };
 }
 
@@ -16,6 +17,7 @@ export async function apiCreateColumn(
   const res = await request.post(`/api/boards/${boardId}/columns`, {
     data: { name, position },
   });
+  if (!res.ok()) throw new Error(`POST /api/boards/${boardId}/columns failed: ${res.status()} ${await res.text()}`);
   return await res.json() as { id: string; name: string; board_id: string };
 }
 
@@ -27,6 +29,7 @@ export async function apiCreateCard(
   const res = await request.post(`/api/columns/${columnId}/cards`, {
     data: { body },
   });
+  if (!res.ok()) throw new Error(`POST /api/columns/${columnId}/cards failed: ${res.status()} ${await res.text()}`);
   return await res.json() as { id: string; body: string; column_id: string; number: number };
 }
 

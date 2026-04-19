@@ -175,8 +175,9 @@ test.describe('SSE real-time updates', () => {
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 async function openTwoContexts(browser: Browser) {
-  const ctxA = await browser.newContext();
-  const ctxB = await browser.newContext();
+  const baseURL = process.env.BASE_URL;
+  const ctxA = await browser.newContext({ baseURL, ignoreHTTPSErrors: true });
+  const ctxB = await browser.newContext({ baseURL, ignoreHTTPSErrors: true });
   return [ctxA, ctxB] as const;
 }
 
