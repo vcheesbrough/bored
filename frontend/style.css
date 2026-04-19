@@ -614,13 +614,13 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 /* Save-state icon shown to the left of the card number in the float panel. */
 .card-save-icon {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.7;
+  font-size: 12px;
+  opacity: 0.5;
+  filter: grayscale(0.4);
   padding-left: 10px;
   pointer-events: none;
   user-select: none;
-  min-width: 14px;
+  min-width: 18px;
   text-align: center;
 }
 

@@ -328,7 +328,7 @@ pub fn CardItem(
                         {move || match save_status.get() {
                             SaveStatus::Idle    => "",
                             SaveStatus::Saving  => "·",
-                            SaveStatus::Saved   => "✓",
+                            SaveStatus::Saved   => "💾",
                             SaveStatus::Failed  => "!",
                         }}
                     </span>
