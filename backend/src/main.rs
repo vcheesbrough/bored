@@ -1084,5 +1084,128 @@ mod tests {
             .expect("CardMoved event timed out")
             .expect("broadcast channel closed");
         assert!(matches!(event.event, events::BoardEvent::CardMoved { .. }));
+
+        // UPDATE card → CardUpdated
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("updated body".to_string()),
+                position: None,
+                column_id: None,
+            })
+            .await
+            .assert_status_ok();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("CardUpdated event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::CardUpdated { .. }
+        ));
+
+        // DELETE card → CardDeleted
+        server
+            .delete(&format!("/api/cards/{}", card.id))
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("CardDeleted event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::CardDeleted { .. }
+        ));
+
+        // UPDATE column → ColumnUpdated
+        server
+            .put(&format!("/api/columns/{}", col.id))
+            .json(&shared::UpdateColumnRequest {
+                name: Some("Renamed".to_string()),
+                position: None,
+            })
+            .await
+            .assert_status_ok();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("ColumnUpdated event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::ColumnUpdated { .. }
+        ));
+
+        // REORDER columns → ColumnsReordered
+        let cols: Vec<shared::Column> = server
+            .get(&format!("/api/boards/{}/columns", board.id))
+            .await
+            .json();
+        let order: Vec<String> = cols.iter().rev().map(|c| c.id.clone()).collect();
+        server
+            .put(&format!("/api/boards/{}/columns/reorder", board.id))
+            .json(&shared::ColumnsReorderRequest { order })
+            .await
+            .assert_status_ok();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("ColumnsReordered event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::ColumnsReordered { .. }
+        ));
+
+        // DELETE column → ColumnDeleted
+        server
+            .delete(&format!("/api/columns/{}", col.id))
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("ColumnDeleted event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::ColumnDeleted { .. }
+        ));
+
+        // UPDATE board → BoardUpdated
+        server
+            .put(&format!("/api/boards/{}", board.id))
+            .json(&shared::UpdateBoardRequest {
+                name: "Renamed Board".to_string(),
+            })
+            .await
+            .assert_status_ok();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("BoardUpdated event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::BoardUpdated { .. }
+        ));
+
+        // DELETE board → BoardDeleted
+        server
+            .delete(&format!("/api/boards/{}", board.id))
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("BoardDeleted event timed out")
+            .expect("broadcast channel closed");
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::BoardDeleted { .. }
+        ));
     }
 }
