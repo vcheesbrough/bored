@@ -315,9 +315,9 @@ body {
   color: var(--text);
 }
 
-/* Board view gets less top padding — columns sit just below the navbar. */
+/* Board view fills the full area below the navbar — no page background visible. */
 .board-view {
-  padding-top: 8px;
+  padding: 0;
 }
 
 /* ── Boards list ─────────────────────────────────── */
@@ -433,8 +433,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 .columns-row {
   display: flex;
-  gap: 16px;
-  padding: 4px 0 16px;
+  gap: 0;
   flex: 1;
   min-height: 0;
   align-items: stretch;
@@ -443,8 +442,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* ── Column ──────────────────────────────────────── */
 .column-view {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-right: 1px solid var(--border);
   flex: 1;
   min-width: var(--col-min-width);
   min-height: 0;
@@ -508,6 +506,8 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .card-list::-webkit-scrollbar-track { background: transparent; }
 .card-list::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
 
+.column-view:last-child { border-right: none; }
+
 .modal-section-label {
   font-size: 12px;
   color: var(--text-muted);
@@ -517,7 +517,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* ── Card item ───────────────────────────────────── */
 .card-item {
   background: var(--surface-2);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius);
   padding: 10px 12px 10px 12px;
   cursor: pointer;
@@ -666,12 +666,10 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* Rendered markdown content in the expanded card; click enters edit mode. */
 .card-body-rendered {
   cursor: text;
-  border: 1px solid transparent;
+  border: none;
   border-radius: var(--radius);
   padding: 10px 12px;
-  transition: border-color 0.15s;
 }
-.card-body-rendered:hover:not(.card-body-hidden) { border-color: var(--border); }
 .card-body-rendered:focus { outline: none; }
 
 /* Full markdown styling for both the expanded inline card and the modal. */
@@ -714,7 +712,6 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .card-body-textarea,
 .modal-body-textarea {
   background: var(--surface-2);
-  border: 1px solid var(--accent);
   border-radius: var(--radius);
   color: var(--text);
   font-family: var(--mono);
@@ -725,7 +722,15 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   box-sizing: border-box;
   align-self: stretch;
 }
-.card-body-textarea:focus,
+/* Inline card textarea: borderless — the card's own accent border signals edit mode. */
+.card-body-textarea {
+  border: none;
+}
+/* Modal textarea keeps an accent border so the edit region is visible in full-screen. */
+.modal-body-textarea {
+  border: 1px solid var(--accent);
+}
+.card-body-textarea:focus { outline: none; }
 .modal-body-textarea:focus { outline: none; border-color: var(--accent); }
 
 /* Inline card textarea: grows with its content so there is no internal
