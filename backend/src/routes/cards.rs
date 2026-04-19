@@ -24,11 +24,7 @@ fn midpoint_position(col_cards: &[DbCard], idx: usize) -> i32 {
         col_cards[idx - 1].position
     };
     let right = if idx >= col_cards.len() {
-        col_cards
-            .last()
-            .map(|c| c.position)
-            .unwrap_or(0)
-            + 2 * POSITION_GAP
+        col_cards.last().map(|c| c.position).unwrap_or(0) + 2 * POSITION_GAP
     } else {
         col_cards[idx].position
     };
