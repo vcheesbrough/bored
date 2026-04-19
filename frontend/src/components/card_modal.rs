@@ -11,11 +11,13 @@ enum SaveStatus {
     Failed,
 }
 
-/// Full-screen card detail modal — used for the maximised card view reached via
-/// the "⤢ Maximise" button or by navigating directly to `/boards/:id?card=:id`.
+/// Full-screen card detail modal — shown when `?card=<id>` is in the URL.
 ///
 /// Interaction model mirrors the inline `CardItem`:
 ///   rendered view → click body → textarea (auto-save) → blur/Escape → rendered
+///
+/// The toolbar mirrors the inline card toolbar:
+///   [#number]  [↓ Minimise]  [Delete]
 ///
 /// `on_close` is called after flushing any pending edits so the caller can
 /// navigate away (e.g. remove the `?card=` query parameter from the URL).
@@ -25,8 +27,8 @@ pub fn CardModal(
     card: RwSignal<Option<shared::Card>>,
     on_updated: Callback<shared::Card>,
     on_delete: Callback<String>,
-    /// Invoked when the user closes or minimizes the modal, after any pending
-    /// save has been flushed.  Use this to pop the route / query parameter.
+    /// Invoked when the user closes or minimises the modal, after any pending
+    /// save has been flushed. Use this to pop the route / query parameter.
     on_close: Callback<()>,
 ) -> impl IntoView {
     let body = RwSignal::new(String::new());
@@ -88,9 +90,8 @@ pub fn CardModal(
         }
     };
 
-    // Flush any unsaved body, wait for it to complete, then close the modal.
-    // The modal stays open during the flush so the user sees a failure if the
-    // request errors out.
+    // Flush any unsaved body then close. The modal stays open during the flush
+    // so the user sees a failure if the request errors out.
     let flush_and_close = move || {
         let current = body.get_untracked();
         let last_saved = saved_body.get_untracked();
@@ -146,26 +147,37 @@ pub fn CardModal(
 
     view! {
         <Show when=move || card.get().is_some() fallback=|| ()>
-            <div class="modal-backdrop" on:click=move |_| flush_and_close()>
+            // Full-screen overlay — clicking the backdrop (which is unreachable
+            // since the modal fills the screen) would close, but the real close
+            // path is the Minimise button in the toolbar.
+            <div class="modal-backdrop">
                 <div class="modal" on:click=|ev| ev.stop_propagation()>
-                    // "⤡ Minimise" — returns to inline view by navigating away.
-                    <button
-                        class="modal-minimize"
-                        title="Return to board"
-                        on:click=move |_| flush_and_close()
-                    >"⤡"</button>
-                    <button
-                        class="modal-close"
-                        on:click=move |_| flush_and_close()
-                    >"×"</button>
 
-                    <div class="modal-header">
+                    // ── Toolbar: mirrors the inline card-toolbar ──────────────
+                    <div class="modal-toolbar">
                         <span class="modal-card-number">
                             {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
                         </span>
+                        <span class="card-save-status">
+                            {move || match save_status.get() {
+                                SaveStatus::Idle   => "",
+                                SaveStatus::Saving => "Saving…",
+                                SaveStatus::Saved  => "Saved",
+                                SaveStatus::Failed => "Save failed",
+                            }}
+                        </span>
+                        <button
+                            class="card-toolbar-btn"
+                            title="Return to board"
+                            on:click=move |_| flush_and_close()
+                        >"↓ Minimise"</button>
+                        <button
+                            class="card-toolbar-btn btn-danger"
+                            on:click=on_delete_click
+                        >"Delete"</button>
                     </div>
 
-                    // Body region: rendered markdown ↔ textarea toggle.
+                    // ── Body region: rendered markdown ↔ textarea toggle ──────
                     <div class="modal-body-region">
                         <Show when=move || !editing.get() fallback=|| ()>
                             <div
@@ -197,20 +209,6 @@ pub fn CardModal(
                                 autofocus=true
                             />
                         </Show>
-                    </div>
-
-                    <div class="modal-footer">
-                        <span class="save-status">
-                            {move || match save_status.get() {
-                                SaveStatus::Idle   => "",
-                                SaveStatus::Saving => "Saving…",
-                                SaveStatus::Saved  => "Saved",
-                                SaveStatus::Failed => "Save failed",
-                            }}
-                        </span>
-                        <button type="button" class="btn-danger" on:click=on_delete_click>
-                            "Delete"
-                        </button>
                     </div>
                 </div>
             </div>
