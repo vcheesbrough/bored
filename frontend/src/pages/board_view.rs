@@ -135,7 +135,15 @@ pub fn BoardView() -> impl IntoView {
             BoardSseEvent::ColumnCreated { column } => {
                 // Ignore events for other boards (SSE stream is global).
                 if column.board_id == bid {
-                    columns.update(|cs| cs.push(RwSignal::new(column)));
+                    // Guard against double-insert: BoardChooser optimistically
+                    // pushes the new column on API success; the SSE event that
+                    // follows must not add it a second time.
+                    columns.update(|cs| {
+                        if cs.iter().any(|s| s.get_untracked().id == column.id) {
+                            return;
+                        }
+                        cs.push(RwSignal::new(column));
+                    });
                 }
             }
             BoardSseEvent::ColumnUpdated { column } => {
