@@ -168,13 +168,14 @@ pub fn CardModal(
                         </span>
                         <button
                             class="card-toolbar-btn"
-                            title="Return to board"
+                            title="Restore to board"
                             on:click=move |_| flush_and_close()
                         >"🗗"</button>
                         <button
-                            class="card-toolbar-btn btn-danger"
+                            class="card-toolbar-btn card-toolbar-close"
+                            title="Delete"
                             on:click=on_delete_click
-                        >"Delete"</button>
+                        >"✕"</button>
                     </div>
 
                     // ── Body region: rendered markdown ↔ textarea toggle ──────

@@ -280,16 +280,17 @@ pub fn CardItem(
                             e.stop_propagation();
                             collapse();
                         }
-                    >"↑ Collapse"</button>
+                    >"─"</button>
                     <button
                         class="card-toolbar-btn"
                         title="Maximise"
                         on:click=on_maximize_click
                     >"🗖"</button>
                     <button
-                        class="card-toolbar-btn card-toolbar-delete btn-danger"
+                        class="card-toolbar-btn card-toolbar-close"
+                        title="Delete"
                         on:click=on_delete_click
-                    >"Delete"</button>
+                    >"✕"</button>
                 </div>
 
                 // Expanded: rendered markdown body; click enters Editing.
