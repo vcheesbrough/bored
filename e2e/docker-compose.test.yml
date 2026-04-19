@@ -1,0 +1,32 @@
+services:
+  app:
+    image: ${TEST_IMAGE:?TEST_IMAGE must be set}
+    environment:
+      DATABASE_PATH: /tmp/bored-test.db
+      APP_ENV: test
+      APP_VERSION: test
+      LOG_LEVEL: warn
+    networks:
+      - e2e-net
+
+  playwright:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
+        WORKDIR /e2e
+        COPY package.json package-lock.json ./
+        RUN npm ci
+        COPY . .
+        CMD ["npx", "playwright", "test"]
+    environment:
+      BASE_URL: https://app:443
+    volumes:
+      - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
+    depends_on:
+      - app
+    networks:
+      - e2e-net
+
+networks:
+  e2e-net:
