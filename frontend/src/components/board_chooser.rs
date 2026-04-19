@@ -98,35 +98,37 @@ pub fn BoardChooser(
         });
     };
 
-    let delete_board_cb: Callback<(String, String)> = Callback::new(move |(board_id, b_name): (String, String)| {
-        let confirmed = window()
-            .confirm_with_message(&format!(
-                "Delete board \"{}\" and all its columns and cards?",
-                b_name
-            ))
-            .unwrap_or(false);
-        if !confirmed {
-            return;
-        }
-        let was_current = board_id == current_id();
-        let nav = navigate_for_delete.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            match crate::api::delete_board(&board_id).await {
-                Ok(()) => {
-                    boards.update(|bs| bs.retain(|b| b.id != board_id));
-                    if was_current {
-                        let next_id = boards.with_untracked(|bs| bs.first().map(|b| b.id.clone()));
-                        show.set(false);
-                        match next_id {
-                            Some(id) => nav(&format!("/boards/{}", id), Default::default()),
-                            None => nav("/", Default::default()),
+    let delete_board_cb: Callback<(String, String)> =
+        Callback::new(move |(board_id, b_name): (String, String)| {
+            let confirmed = window()
+                .confirm_with_message(&format!(
+                    "Delete board \"{}\" and all its columns and cards?",
+                    b_name
+                ))
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+            let was_current = board_id == current_id();
+            let nav = navigate_for_delete.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::api::delete_board(&board_id).await {
+                    Ok(()) => {
+                        boards.update(|bs| bs.retain(|b| b.id != board_id));
+                        if was_current {
+                            let next_id =
+                                boards.with_untracked(|bs| bs.first().map(|b| b.id.clone()));
+                            show.set(false);
+                            match next_id {
+                                Some(id) => nav(&format!("/boards/{}", id), Default::default()),
+                                None => nav("/", Default::default()),
+                            }
                         }
                     }
+                    Err(e) => leptos::logging::error!("failed to delete board: {e}"),
                 }
-                Err(e) => leptos::logging::error!("failed to delete board: {e}"),
-            }
+            });
         });
-    });
 
     let delete_col = move |sig: RwSignal<shared::Column>| {
         let col = sig.get_untracked();
