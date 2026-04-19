@@ -1,6 +1,7 @@
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
+use crate::components::confirm_modal::ConfirmModal;
 use crate::components::markdown::MarkdownPreview;
 
 #[derive(Clone, PartialEq)]
@@ -126,7 +127,11 @@ pub fn CardModal(
         on_close.run(());
     };
 
-    let on_delete_click = move |_| {
+    let show_confirm = RwSignal::new(false);
+
+    let on_delete_click = move |_| show_confirm.set(true);
+
+    let on_confirmed = Callback::new(move |_: ()| {
         if let Some(c) = card.get_untracked() {
             let card_id = c.id.clone();
             let card_id_cb = card_id.clone();
@@ -141,7 +146,7 @@ pub fn CardModal(
                 }
             });
         }
-    };
+    });
 
     let body_signal = Signal::derive(move || body.get());
 
@@ -212,6 +217,8 @@ pub fn CardModal(
                         </Show>
                     </div>
                 </div>
+
+                <ConfirmModal show=show_confirm on_confirm=on_confirmed />
             </div>
         </Show>
     }

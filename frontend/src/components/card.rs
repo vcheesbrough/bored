@@ -4,6 +4,7 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 use leptos_router::NavigateOptions;
 
 use crate::components::column::ColumnCards;
+use crate::components::confirm_modal::ConfirmModal;
 use crate::components::markdown::MarkdownPreview;
 use crate::events::DragPayload;
 
@@ -152,8 +153,16 @@ pub fn CardItem(
     };
 
     // ── Delete / maximize ─────────────────────────────────────────────────
+    let show_confirm = RwSignal::new(false);
+
+    // Clicking the ✕ button opens the confirmation modal rather than
+    // deleting immediately. The actual API call is in `on_confirmed`.
     let on_delete_click = move |e: leptos::ev::MouseEvent| {
         e.stop_propagation();
+        show_confirm.set(true);
+    };
+
+    let on_confirmed = Callback::new(move |_: ()| {
         let card_id = card.get_untracked().id.clone();
         let card_id_cb = card_id.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -162,7 +171,7 @@ pub fn CardItem(
                 Err(e) => leptos::logging::error!("delete card failed: {e}"),
             }
         });
-    };
+    });
 
     let on_maximize_click = move |e: leptos::ev::MouseEvent| {
         e.stop_propagation();
@@ -343,6 +352,8 @@ pub fn CardItem(
                     </div>
                 </Show>
             </Show>
+
+            <ConfirmModal show=show_confirm on_confirm=on_confirmed />
         </div>
     }
 }
