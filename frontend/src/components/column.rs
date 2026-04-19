@@ -5,6 +5,13 @@ use crate::components::card::CardItem;
 use crate::components::card_modal::CardModal;
 use crate::events::{BoardSseEvent, DragPayload};
 
+/// Context type provided by `ColumnView` so that `CardItem` children can
+/// look up their own current position within the column at drop time.
+/// Using a dedicated newtype avoids colliding with any other
+/// `RwSignal<Vec<…>>` that might exist in the context chain.
+#[derive(Clone, Copy)]
+pub struct ColumnCards(pub RwSignal<Vec<RwSignal<shared::Card>>>);
+
 #[component]
 pub fn ColumnView(
     // `RwSignal<shared::Column>` lets `BoardChooser` rename this column and
@@ -14,6 +21,10 @@ pub fn ColumnView(
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
     let selected_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
     let show_add = RwSignal::new(false);
+
+    // Expose this column's cards signal to `CardItem` children so they can
+    // resolve their own index at drop time without needing it as a prop.
+    provide_context(ColumnCards(cards));
 
     // ── Context ────────────────────────────────────────────────────────────
     // These signals are provided by `BoardView` via `provide_context`.
@@ -100,12 +111,28 @@ pub fn ColumnView(
                 ref card,
                 ref from_column_id,
             } => {
-                if *from_column_id == col_id_sse {
-                    // This column is the source — remove the card.
+                if *from_column_id == col_id_sse && card.column_id == col_id_sse {
+                    // Within-column reorder: remove the existing signal from
+                    // its old slot, update its data, and re-insert at the new
+                    // position.  Reusing the same RwSignal keeps the `For`
+                    // component from remounting the card component.
+                    let card = card.clone();
+                    cards.update(|cs| {
+                        if let Some(idx) =
+                            cs.iter().position(|s| s.get_untracked().id == card.id)
+                        {
+                            let sig = cs.remove(idx);
+                            sig.set(card.clone());
+                            let pos = (card.position as usize).min(cs.len());
+                            cs.insert(pos, sig);
+                        }
+                    });
+                } else if *from_column_id == col_id_sse {
+                    // Cross-column move — this column is the source: remove.
                     let id = card.id.clone();
                     cards.update(|cs| cs.retain(|s| s.get_untracked().id != id));
                 } else if card.column_id == col_id_sse {
-                    // This column is the destination — insert at the stated position.
+                    // Cross-column move — this column is the destination: insert.
                     // Use spawn_local to create the signal outside the effect's
                     // per-run reactive scope.  If created synchronously here the
                     // signal would be disposed on the next SSE event, causing
