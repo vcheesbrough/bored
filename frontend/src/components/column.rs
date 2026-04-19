@@ -193,10 +193,25 @@ pub fn ColumnView(
         }
     };
 
-    // Clear the outline and ghost when the drag leaves this card list.
-    let on_cardlist_dragleave = move |_: web_sys::DragEvent| {
-        card_list_drag_over.set(false);
-        drag_over_card_id.set(None);
+    // Clear the outline and ghost only when the cursor truly leaves the
+    // card-list bounds.  Without the relatedTarget check, dragleave fires
+    // when the cursor enters any child element (e.g. a card), causing the
+    // ghost to flicker on every movement across cards.
+    let on_cardlist_dragleave = move |e: web_sys::DragEvent| {
+        use wasm_bindgen::JsCast;
+        let still_inside = e
+            .related_target()
+            .and_then(|rt| rt.dyn_into::<web_sys::Node>().ok())
+            .and_then(|rt| {
+                e.current_target()
+                    .and_then(|ct| ct.dyn_into::<web_sys::Node>().ok())
+                    .map(|ct| ct.contains(Some(&rt)))
+            })
+            .unwrap_or(false);
+        if !still_inside {
+            card_list_drag_over.set(false);
+            drag_over_card_id.set(None);
+        }
     };
 
     let on_cardlist_drop = {
