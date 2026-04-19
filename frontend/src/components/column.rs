@@ -186,10 +186,13 @@ pub fn ColumnView(
     // "no-drop" behavior so the drop event can fire.
     let on_cardlist_dragover = move |e: web_sys::DragEvent| {
         if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
-            // `prevent_default()` on dragover is required to enable dropping.
             e.prevent_default();
-            // Show the drop-zone outline only while a card drag is active.
             card_list_drag_over.set(true);
+            // Cards call stop_propagation on their own dragover, so this handler
+            // only fires when the cursor is over the card-list's own area (gaps,
+            // padding, empty space below cards).  Clear the per-card ghost target
+            // so the bottom ghost renders instead.
+            drag_over_card_id.set(None);
         }
     };
 
