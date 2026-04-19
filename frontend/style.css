@@ -12,7 +12,7 @@
   --yellow:    #fbbf24; /* amber-400: card numbers, board title */
   --danger:    #ef4444; /* red-500 */
   --radius:    8px;
-  --col-min-width: 200px;
+  --col-min-width: 370px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
 }
 
