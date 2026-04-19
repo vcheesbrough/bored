@@ -1,12 +1,12 @@
-/* Design system — deep navy palette + indigo accent + yellow highlights */
+/* Design system — UBC navy palette + indigo accent + yellow highlights */
 :root {
-  --bg:        #0d1b2a; /* deep navy */
-  --surface:   #132337; /* card surface / column bg */
-  --surface-2: #1a2d42; /* input fields, card items */
-  --surface-3: #223550; /* hover state */
-  --border:    #2a4060; /* subtle border */
-  --text:      #ffffff; /* primary text */
-  --text-muted:#7eabd4; /* muted / secondary text */
+  --bg:        #002145; /* UBC navy */
+  --surface:   #002d5e; /* column / panel background */
+  --surface-2: #003878; /* card items, input fields */
+  --surface-3: #004590; /* hover state */
+  --border:    #1a5299; /* subtle border */
+  --text:      #e8f3ff; /* primary text */
+  --text-muted:#6fa8db; /* muted / secondary text */
   --accent:    #6366f1; /* indigo-500 for interactive elements */
   --accent-hover: #818cf8; /* indigo-400 */
   --yellow:    #fbbf24; /* amber-400: card numbers, board title */
