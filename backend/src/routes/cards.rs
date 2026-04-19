@@ -74,6 +74,44 @@ async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<(), surreald
     Ok(())
 }
 
+/// Compute a sparse position for inserting a brand-new card at the TOP of
+/// `col_id` (index 0 in the sorted sibling list).  Unlike
+/// `compute_sparse_position` there is no card to exclude, so we query all
+/// existing cards in the column.
+async fn compute_top_position(db: &Surreal<Db>, col_id: &str) -> Result<i32, surrealdb::Error> {
+    let col_cards: Vec<DbCard> = db
+        .query(
+            "SELECT * FROM cards \
+             WHERE column = type::thing('columns', $col_id) \
+             ORDER BY position ASC",
+        )
+        .bind(("col_id", col_id.to_string()))
+        .await?
+        .take(0)?;
+
+    let new_pos = midpoint_position(&col_cards, 0);
+
+    // If the gap between the sentinel (0) and the current first card has been
+    // exhausted, rebalance the whole column before computing the new position.
+    if !col_cards.is_empty() && needs_rebalance(&col_cards, 0, new_pos) {
+        rebalance_column(db, col_id).await?;
+
+        let col_cards: Vec<DbCard> = db
+            .query(
+                "SELECT * FROM cards \
+                 WHERE column = type::thing('columns', $col_id) \
+                 ORDER BY position ASC",
+            )
+            .bind(("col_id", col_id.to_string()))
+            .await?
+            .take(0)?;
+
+        return Ok(midpoint_position(&col_cards, 0));
+    }
+
+    Ok(new_pos)
+}
+
 /// Compute a single sparse position value for moving `card_id` to index
 /// `target_index` within `col_id`.  Only the moved card is ever written;
 /// no other cards are modified in the happy path.
@@ -209,7 +247,14 @@ pub async fn create_card(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let card_number = counter.map(|c| c.count).unwrap_or(1);
 
-    // Derive next_position atomically inside the CREATE to avoid TOCTOU races.
+    // Compute the sparse position for inserting at the TOP of the column.
+    // This is done before the CREATE so the position is known up front;
+    // the two-step approach is safe because card IDs are ULIDs and the
+    // counter increment above already serialises concurrent creates.
+    let top_pos = compute_top_position(&state.db, &col_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let card: Option<DbCard> = state
         .db
         .query(
@@ -217,13 +262,13 @@ pub async fn create_card(
              column = type::thing('columns', $col_id), \
              body = $body, \
              number = $number, \
-             position = (array::max((SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id))) ?? 0) + $gap",
+             position = $position",
         )
         .bind(("id", id))
         .bind(("col_id", col_id))
         .bind(("body", payload.body))
         .bind(("number", card_number))
-        .bind(("gap", POSITION_GAP))
+        .bind(("position", top_pos))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)

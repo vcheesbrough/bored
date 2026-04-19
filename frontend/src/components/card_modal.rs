@@ -3,7 +3,6 @@ use leptos::prelude::*;
 
 use crate::components::markdown::MarkdownPreview;
 
-// Status of the background auto-save, shown in the modal footer.
 #[derive(Clone, PartialEq)]
 enum SaveStatus {
     Idle,
@@ -12,22 +11,30 @@ enum SaveStatus {
     Failed,
 }
 
+/// Full-screen card detail modal — used for the maximised card view reached via
+/// the "⤢ Maximise" button or by navigating directly to `/boards/:id?card=:id`.
+///
+/// Interaction model mirrors the inline `CardItem`:
+///   rendered view → click body → textarea (auto-save) → blur/Escape → rendered
+///
+/// `on_close` is called after flushing any pending edits so the caller can
+/// navigate away (e.g. remove the `?card=` query parameter from the URL).
 #[component]
 pub fn CardModal(
-    // `None` = closed, `Some(card)` = open for that card.
+    /// `None` = hidden, `Some(card)` = open for that card.
     card: RwSignal<Option<shared::Card>>,
     on_updated: Callback<shared::Card>,
     on_delete: Callback<String>,
+    /// Invoked when the user closes or minimizes the modal, after any pending
+    /// save has been flushed.  Use this to pop the route / query parameter.
+    on_close: Callback<()>,
 ) -> impl IntoView {
-    // The markdown body being edited. Kept in sync with the open card on open.
     let body = RwSignal::new(String::new());
-    // Whether the body region is in edit (textarea) or rendered (preview) mode.
     let editing = RwSignal::new(false);
-    // Last body value successfully persisted to the server, used to detect unsaved changes.
     let saved_body = RwSignal::new(String::new());
     let save_status = RwSignal::new(SaveStatus::Idle);
 
-    // When a different card is opened, reset all state to match the new card.
+    // Reset all local state when a new card is opened.
     Effect::new(move |_| {
         if let Some(c) = card.get() {
             body.set(c.body.clone());
@@ -37,8 +44,6 @@ pub fn CardModal(
         }
     });
 
-    // Performs a PUT to the server with the current body and updates state accordingly.
-    // Returns the card ID that was saved, for the on_updated callback.
     let do_save = move |card_id: String, current_body: String| {
         save_status.set(SaveStatus::Saving);
         wasm_bindgen_futures::spawn_local(async move {
@@ -55,45 +60,37 @@ pub fn CardModal(
                 }
                 Err(e) => {
                     save_status.set(SaveStatus::Failed);
-                    leptos::logging::error!("auto-save failed: {e}");
+                    leptos::logging::error!("modal auto-save failed: {e}");
                 }
             }
         });
     };
 
-    // Debounced save: fires 500 ms after the user stops typing.
-    // Each keystroke spawns a future that sleeps, then checks if the body has
-    // changed again during the sleep — if yes, the sleep winner bails out to let
-    // the newer future handle the save. This avoids multiple concurrent saves.
+    // Debounced auto-save: 500 ms after the last keystroke.
     let on_body_input = move |ev: leptos::ev::Event| {
         let new_body = event_target_value(&ev);
         body.set(new_body.clone());
         save_status.set(SaveStatus::Idle);
 
-        // Capture what we intend to save *now* so the async block can compare
-        // after the timeout to see if more typing happened in the meantime.
-        let body_at_schedule = new_body;
+        let snapshot = new_body;
         if let Some(c) = card.get_untracked() {
             let card_id = c.id.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 TimeoutFuture::new(500).await;
-                // Bail if the modal was already closed — flush_and_close has
-                // already saved (or is saving) the final body.
                 if card.get_untracked().is_none() {
                     return;
                 }
-                // Check that no further edits happened during the sleep.
                 let current = body.get_untracked();
-                if current == body_at_schedule {
+                if current == snapshot {
                     do_save(card_id, current);
                 }
             });
         }
     };
 
-    // Flushes any unsaved body, waits for the save to complete, then closes the
-    // modal. Keeping the modal open during the flush ensures the user sees a
-    // failure if the request errors, rather than silently losing the edit.
+    // Flush any unsaved body, wait for it to complete, then close the modal.
+    // The modal stays open during the flush so the user sees a failure if the
+    // request errors out.
     let flush_and_close = move || {
         let current = body.get_untracked();
         let last_saved = saved_body.get_untracked();
@@ -112,11 +109,11 @@ pub fn CardModal(
                             on_updated.run(updated);
                             card.set(None);
                             editing.set(false);
+                            on_close.run(());
                         }
                         Err(e) => {
-                            // Leave modal open so the user can see the failure.
                             save_status.set(SaveStatus::Failed);
-                            leptos::logging::error!("flush save failed: {e}");
+                            leptos::logging::error!("modal flush save failed: {e}");
                         }
                     }
                 });
@@ -125,6 +122,7 @@ pub fn CardModal(
         }
         card.set(None);
         editing.set(false);
+        on_close.run(());
     };
 
     let on_delete_click = move |_| {
@@ -133,38 +131,47 @@ pub fn CardModal(
             let card_id_cb = card_id.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 match crate::api::delete_card(&card_id).await {
-                    Ok(()) => on_delete.run(card_id_cb),
-                    Err(e) => leptos::logging::error!("failed to delete card: {e}"),
+                    Ok(()) => {
+                        card.set(None);
+                        on_close.run(());
+                        on_delete.run(card_id_cb);
+                    }
+                    Err(e) => leptos::logging::error!("modal delete failed: {e}"),
                 }
             });
         }
     };
 
-    // Derive a Signal<String> for MarkdownPreview from the mutable body signal.
     let body_signal = Signal::derive(move || body.get());
 
     view! {
         <Show when=move || card.get().is_some() fallback=|| ()>
             <div class="modal-backdrop" on:click=move |_| flush_and_close()>
                 <div class="modal" on:click=|ev| ev.stop_propagation()>
-                    <button class="modal-close" on:click=move |_| flush_and_close()>"×"</button>
+                    // "⤡ Minimise" — returns to inline view by navigating away.
+                    <button
+                        class="modal-minimize"
+                        title="Return to board"
+                        on:click=move |_| flush_and_close()
+                    >"⤡"</button>
+                    <button
+                        class="modal-close"
+                        on:click=move |_| flush_and_close()
+                    >"×"</button>
+
                     <div class="modal-header">
                         <span class="modal-card-number">
                             {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
                         </span>
                     </div>
 
-                    // Body region: switches between rendered markdown and a raw textarea.
-                    // Both occupy the same layout box so the modal doesn't jump.
+                    // Body region: rendered markdown ↔ textarea toggle.
                     <div class="modal-body-region">
-                        // Rendered view — visible when not editing.
                         <Show when=move || !editing.get() fallback=|| ()>
                             <div
                                 class="modal-body-rendered"
-                                // Clicking the rendered view enters edit mode.
                                 on:click=move |_| editing.set(true)
                             >
-                                // Show a muted placeholder when the body is empty.
                                 <Show
                                     when=move || !body.get().is_empty()
                                     fallback=move || view! {
@@ -176,34 +183,28 @@ pub fn CardModal(
                             </div>
                         </Show>
 
-                        // Edit view — visible when editing.
                         <Show when=move || editing.get() fallback=|| ()>
                             <textarea
                                 class="modal-body-textarea"
                                 prop:value=move || body.get()
                                 on:input=on_body_input
-                                // Blurring exits edit mode and returns to the rendered view.
                                 on:blur=move |_| editing.set(false)
-                                // Escape also exits edit mode.
                                 on:keydown=move |ev| {
                                     if ev.key() == "Escape" {
                                         editing.set(false);
                                     }
                                 }
-                                // `node_ref` + autofocus would be ideal but auto:focus on
-                                // <Show> mount is sufficient here via the CSS :focus style.
                                 autofocus=true
                             />
                         </Show>
                     </div>
 
-                    // Footer: save status indicator + delete action.
                     <div class="modal-footer">
                         <span class="save-status">
                             {move || match save_status.get() {
-                                SaveStatus::Idle => "",
+                                SaveStatus::Idle   => "",
                                 SaveStatus::Saving => "Saving…",
-                                SaveStatus::Saved => "Saved",
+                                SaveStatus::Saved  => "Saved",
                                 SaveStatus::Failed => "Save failed",
                             }}
                         </span>

@@ -17,7 +17,6 @@ pub fn AddCardModal(
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let body = body_input.get_untracked();
-        // Disable submit while body is empty — no card with no content.
         if body.trim().is_empty() {
             return;
         }
@@ -34,7 +33,6 @@ pub fn AddCardModal(
         });
     };
 
-    // Whether submit should be disabled: body is blank.
     let submit_disabled = move || body_input.get().trim().is_empty();
 
     view! {
@@ -45,20 +43,23 @@ pub fn AddCardModal(
         >
             <div class="modal" on:click=|ev| ev.stop_propagation()>
                 <button class="modal-close" on:click=move |_| close()>"×"</button>
-                <p class="modal-section-label">"New card in "" {column_name.clone()} """</p>
+                // Column name interpolated correctly — previous code had a
+                // quoting bug that rendered the Rust expression literally.
+                <p class="modal-section-label">
+                    "New card in " {column_name.clone()}
+                </p>
                 <form on:submit=on_submit>
-                    // Single markdown body textarea — no separate title field.
                     <textarea
                         class="modal-body-textarea"
                         placeholder="Card content (markdown supported)"
                         prop:value=move || body_input.get()
                         on:input=move |ev| body_input.set(event_target_value(&ev))
+                        autofocus=true
                     />
                     <div class="modal-actions">
                         <button type="button" class="btn-ghost" on:click=move |_| close()>
                             "Cancel"
                         </button>
-                        // `prop:disabled` binds reactively to the boolean signal.
                         <button type="submit" prop:disabled=submit_disabled>
                             "Add card"
                         </button>

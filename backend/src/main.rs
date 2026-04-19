@@ -241,13 +241,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_board_seeds_default_columns() {
+    async fn create_board_starts_empty() {
+        // New boards have no default columns — the user creates them manually.
         let server = test_app().await;
 
         let create_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Seeded".to_string(),
+                name: "Empty Board".to_string(),
             })
             .await;
         create_resp.assert_status(StatusCode::CREATED);
@@ -258,12 +259,7 @@ mod tests {
             .await;
         list_resp.assert_status_ok();
         let columns: Vec<shared::Column> = list_resp.json();
-        // `.iter().map(|c| c.name.as_str()).collect()` builds a Vec<&str> from the
-        // column names so we can compare against a string slice literal.
-        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["Todo", "Done"]);
-        assert_eq!(columns[0].position, 0);
-        assert_eq!(columns[1].position, 1);
+        assert_eq!(columns.len(), 0, "new board must have no default columns");
     }
 
     #[tokio::test]
@@ -888,7 +884,23 @@ mod tests {
             .await
             .json();
 
-        // Add a third column alongside the two default ones (Todo, Done).
+        // Create three columns explicitly (no default columns since iteration 13).
+        let col_a: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Todo".to_string(),
+                position: 0,
+            })
+            .await
+            .json();
+        let col_b: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Done".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
         let col_c: shared::Column = server
             .post(&format!("/api/boards/{}/columns", board.id))
             .json(&shared::CreateColumnRequest {
@@ -898,14 +910,8 @@ mod tests {
             .await
             .json();
 
-        let cols: Vec<shared::Column> = server
-            .get(&format!("/api/boards/{}/columns", board.id))
-            .await
-            .json();
-
-        // Capture the auto-seeded column IDs.
-        let col_todo = cols.iter().find(|c| c.name == "Todo").unwrap().id.clone();
-        let col_done = cols.iter().find(|c| c.name == "Done").unwrap().id.clone();
+        let col_todo = col_a.id.clone();
+        let col_done = col_b.id.clone();
         let col_ip = col_c.id.clone();
 
         // Reorder to: In Progress, Todo, Done.
@@ -942,11 +948,15 @@ mod tests {
             .await
             .json();
 
-        let cols_a: Vec<shared::Column> = server
-            .get(&format!("/api/boards/{}/columns", board_a.id))
+        // Create a column on board A explicitly (no default columns since iteration 13).
+        let col_a_todo: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board_a.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Todo".to_string(),
+                position: 0,
+            })
             .await
             .json();
-        let col_a_todo = cols_a.iter().find(|c| c.name == "Todo").unwrap();
         let original_position = col_a_todo.position;
 
         // Board B — the attacker's board. Submit board A's column ID in the order.
@@ -958,12 +968,23 @@ mod tests {
             .await
             .json();
 
-        let cols_b: Vec<shared::Column> = server
-            .get(&format!("/api/boards/{}/columns", board_b.id))
+        // Create two columns on board B explicitly.
+        let col_b_todo: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board_b.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Todo".to_string(),
+                position: 0,
+            })
             .await
             .json();
-        let col_b_todo = cols_b.iter().find(|c| c.name == "Todo").unwrap();
-        let col_b_done = cols_b.iter().find(|c| c.name == "Done").unwrap();
+        let col_b_done: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board_b.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Done".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
 
         // Inject board A's column into board B's reorder request.
         // The WHERE board = … clause should make this a no-op for col_a_todo.
@@ -984,7 +1005,7 @@ mod tests {
             .get(&format!("/api/boards/{}/columns", board_a.id))
             .await
             .json();
-        let col_a_todo_after = cols_a_after.iter().find(|c| c.name == "Todo").unwrap();
+        let col_a_todo_after = cols_a_after.iter().find(|c| c.id == col_a_todo.id).unwrap();
         assert_eq!(
             col_a_todo_after.position, original_position,
             "foreign column position must be unchanged after cross-board reorder"
@@ -1031,7 +1052,7 @@ mod tests {
             .post(&format!("/api/boards/{}/columns", board.id))
             .json(&shared::CreateColumnRequest {
                 name: "Col".to_string(),
-                position: 2,
+                position: 0,
             })
             .await
             .json();
@@ -1044,6 +1065,22 @@ mod tests {
             event.event,
             events::BoardEvent::ColumnCreated { .. }
         ));
+
+        // Create a second column so there is somewhere to move the card to.
+        let other_col: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Other Col".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
+
+        // Drain the ColumnCreated event for other_col so it doesn't interfere.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("second ColumnCreated event timed out")
+            .expect("broadcast channel closed");
 
         // CREATE card → CardCreated
         let card: shared::Card = server
@@ -1062,13 +1099,6 @@ mod tests {
             event.event,
             events::BoardEvent::CardCreated { .. }
         ));
-
-        // MOVE card → CardMoved
-        let cols: Vec<shared::Column> = server
-            .get(&format!("/api/boards/{}/columns", board.id))
-            .await
-            .json();
-        let other_col = cols.iter().find(|c| c.id != col.id).unwrap();
 
         server
             .post(&format!("/api/cards/{}/move", card.id))
