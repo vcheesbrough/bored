@@ -102,4 +102,88 @@ test.describe('Cards', () => {
     // Card should still be there.
     await expect(page.locator('.card-item')).toHaveCount(1);
   });
+
+  test('card body persists after page reload', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `Card Persist Board ${Date.now()}`);
+    const col = await apiCreateColumn(request, board.id, 'Column');
+    await apiCreateCard(request, col.id, '');
+    await gotoBoardView(page, board.id);
+
+    // Expand and edit the card body.
+    await page.locator('.card-item').first().click();
+    await page.locator('.card-body-rendered').first().click();
+    const body = `Persistent content ${Date.now()}`;
+    await page.locator('.card-body-textarea').first().fill(body);
+    await page.locator('.card-body-textarea').first().press('Escape');
+
+    // Reload and verify the content survived.
+    await page.reload();
+    await page.waitForSelector('.columns-row');
+    await page.locator('.card-item').first().click();
+    await expect(page.locator('.card-markdown').first()).toContainText('Persistent content');
+  });
+
+  test('edit card body in full-screen modal and verify save', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `Card Modal Edit Board ${Date.now()}`);
+    const col = await apiCreateColumn(request, board.id, 'Column');
+    await apiCreateCard(request, col.id, 'Original');
+    await gotoBoardView(page, board.id);
+
+    // Open the modal.
+    await page.locator('.card-item').first().click();
+    await page.locator('[title="Maximise"]').first().click();
+    await expect(page.locator('.modal-backdrop')).toBeVisible();
+
+    // Click the rendered body to enter edit mode, then fill the textarea.
+    await page.locator('.modal-body-rendered').click();
+    const newBody = `Modal edit ${Date.now()}`;
+    await page.locator('.modal-body-textarea').fill(newBody);
+
+    // Close with the restore button to return to the board.
+    await page.locator('[title="Restore to board"]').click();
+    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
+
+    // Reload and verify content persisted.
+    await page.reload();
+    await page.waitForSelector('.columns-row');
+    await page.locator('.card-item').first().click();
+    await expect(page.locator('.card-markdown').first()).toContainText('Modal edit');
+  });
+
+  test('Esc from editing returns to expanded, second Esc collapses card', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `Card Esc Board ${Date.now()}`);
+    const col = await apiCreateColumn(request, board.id, 'Column');
+    await apiCreateCard(request, col.id, 'Esc test');
+    await gotoBoardView(page, board.id);
+
+    // Click to expand, then click body to enter edit mode.
+    await page.locator('.card-item').first().click();
+    await page.locator('.card-body-rendered').first().click();
+    await expect(page.locator('.card-body-textarea').first()).toBeVisible();
+
+    // First Esc: editing → expanded (textarea hidden, rendered shown).
+    await page.locator('.card-body-textarea').first().press('Escape');
+    await expect(page.locator('.card-body-textarea').first()).not.toBeVisible();
+    await expect(page.locator('.card-item.card-expanded')).toBeVisible();
+
+    // Second Esc: expanded → collapsed.
+    await page.locator('.card-item').first().press('Escape');
+    await expect(page.locator('.card-item.card-expanded')).not.toBeVisible();
+  });
+
+  test('Esc closes full-screen modal', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `Card Modal Esc Board ${Date.now()}`);
+    const col = await apiCreateColumn(request, board.id, 'Column');
+    await apiCreateCard(request, col.id, 'Modal Esc test');
+    await gotoBoardView(page, board.id);
+
+    // Open modal.
+    await page.locator('.card-item').first().click();
+    await page.locator('[title="Maximise"]').first().click();
+    await expect(page.locator('.modal-backdrop')).toBeVisible();
+
+    // Esc should close the modal.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
+  });
 });

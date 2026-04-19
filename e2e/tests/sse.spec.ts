@@ -119,6 +119,30 @@ test.describe('SSE real-time updates', () => {
     await ctxB.close();
   });
 
+  test('column renamed in context A updates in context B', async ({ browser, request }) => {
+    const board = await apiCreateBoard(request, `SSE Col Rename Board ${Date.now()}`);
+    const col = await apiCreateColumn(request, board.id, 'Original Name');
+
+    const [ctxA, ctxB] = await openTwoContexts(browser);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+
+    await expect(pageB.locator('.column-name').filter({ hasText: 'Original Name' })).toBeVisible();
+
+    // Rename via API (broadcasts SSE); mirrors what the chooser UI calls.
+    await request.put(`/api/columns/${col.id}`, { data: { name: 'Renamed Column' } });
+
+    await expect(pageA.locator('.column-name').filter({ hasText: 'Renamed Column' })).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(pageB.locator('.column-name').filter({ hasText: 'Renamed Column' })).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(pageB.locator('.column-name').filter({ hasText: 'Original Name' })).not.toBeVisible();
+
+    await ctxA.close();
+    await ctxB.close();
+  });
+
   test('column deleted in context A disappears in context B', async ({ browser, request }) => {
     const board = await apiCreateBoard(request, `SSE Col Delete Board ${Date.now()}`);
     const col = await apiCreateColumn(request, board.id, 'Delete Column');
