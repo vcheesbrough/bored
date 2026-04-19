@@ -428,7 +428,8 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: hidden;
+  overflow-x: auto;
 }
 
 .columns-row {
@@ -436,6 +437,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   gap: 0;
   flex: 1;
   min-height: 0;
+  min-width: max-content;
   align-items: stretch;
 }
 
