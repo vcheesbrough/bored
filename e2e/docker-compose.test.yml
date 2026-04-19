@@ -21,6 +21,8 @@ services:
         CMD ["npx", "playwright", "test"]
     environment:
       BASE_URL: https://app:443
+    volumes:
+      - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
       - app
     networks:

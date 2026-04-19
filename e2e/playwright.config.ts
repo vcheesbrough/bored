@@ -15,6 +15,8 @@ export default defineConfig({
     baseURL,
     headless: true,
     ignoreHTTPSErrors: true,
+    screenshot: 'only-on-failure',
+    trace: 'on-first-retry',
   },
   projects: [
     {
@@ -22,5 +24,8 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  reporter: process.env.CI ? 'dot' : 'list',
+  reporter: [
+    process.env.CI ? ['dot'] : ['list'],
+    ['html', { open: 'never' }],
+  ],
 });
