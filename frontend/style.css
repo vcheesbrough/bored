@@ -734,6 +734,12 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   border-radius: var(--radius);
 }
 
+/* Fills the remaining space below cards; acts as the "append to bottom" drop zone. */
+.card-list-end {
+  flex: 1;
+  min-height: 48px;
+}
+
 /* Ghost placeholder shown at the drop insertion point while dragging a card. */
 .card-ghost {
   min-height: 48px;
