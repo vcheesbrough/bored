@@ -36,7 +36,7 @@ body {
 /* ── Navbar ─────────────────────────────────────── */
 .navbar {
   background: var(--surface);
-  border-bottom: 1px solid var(--yellow);
+  border-bottom: 1px solid var(--border);
   padding: 0 24px;
   height: 48px;
   display: flex;
@@ -458,6 +458,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   display: flex;
@@ -537,7 +538,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   position: absolute;
   top: 6px;
   right: 8px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   /* Yellow card numbers per design spec */
   color: var(--yellow);
@@ -608,9 +609,21 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* Number badge inside the floating panel — inline rather than absolute. */
 .card-float-panel .card-number {
   position: static;
-  padding: 0 6px 0 10px;
+  padding: 0 6px 0 4px;
   pointer-events: none;
   user-select: none;
+}
+
+/* Save-state icon shown to the left of the card number in the float panel. */
+.card-save-icon {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  padding-left: 10px;
+  pointer-events: none;
+  user-select: none;
+  min-width: 14px;
+  text-align: center;
 }
 
 /* Win11-style titlebar buttons — square, borderless, icon-only.

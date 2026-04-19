@@ -323,6 +323,15 @@ pub fn CardItem(
                     class="card-float-panel"
                     on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
                 >
+                    // Save-state icon sits left of the card number — subtle, not a distraction.
+                    <span class="card-save-icon">
+                        {move || match save_status.get() {
+                            SaveStatus::Idle    => "",
+                            SaveStatus::Saving  => "·",
+                            SaveStatus::Saved   => "✓",
+                            SaveStatus::Failed  => "!",
+                        }}
+                    </span>
                     <span class="card-number">{move || format!("#{:03}", number.get())}</span>
                     <button
                         class="card-toolbar-btn"
@@ -385,14 +394,6 @@ pub fn CardItem(
                     />
                 </div>
 
-                <span class="card-save-status">
-                    {move || match save_status.get() {
-                        SaveStatus::Idle    => "",
-                        SaveStatus::Saving  => "Saving…",
-                        SaveStatus::Saved   => "Saved",
-                        SaveStatus::Failed  => "Save failed",
-                    }}
-                </span>
             </Show>
 
             <ConfirmModal show=show_confirm on_confirm=on_confirmed />

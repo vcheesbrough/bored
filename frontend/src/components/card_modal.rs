@@ -179,16 +179,16 @@ pub fn CardModal(
 
                     // ── Toolbar: mirrors the inline card-toolbar ──────────────
                     <div class="modal-toolbar">
-                        <span class="modal-card-number">
-                            {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
-                        </span>
-                        <span class="card-save-status">
+                        <span class="card-save-icon">
                             {move || match save_status.get() {
                                 SaveStatus::Idle   => "",
-                                SaveStatus::Saving => "Saving…",
-                                SaveStatus::Saved  => "Saved",
-                                SaveStatus::Failed => "Save failed",
+                                SaveStatus::Saving => "·",
+                                SaveStatus::Saved  => "✓",
+                                SaveStatus::Failed => "!",
                             }}
+                        </span>
+                        <span class="modal-card-number">
+                            {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
                         </span>
                         <button
                             class="card-toolbar-btn"
