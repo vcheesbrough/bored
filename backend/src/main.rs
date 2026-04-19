@@ -1021,7 +1021,10 @@ mod tests {
             .await
             .expect("BoardCreated event timed out")
             .expect("broadcast channel closed");
-        assert!(matches!(event.event, events::BoardEvent::BoardCreated { .. }));
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::BoardCreated { .. }
+        ));
 
         // CREATE column → ColumnCreated
         let col: shared::Column = server
@@ -1037,7 +1040,10 @@ mod tests {
             .await
             .expect("ColumnCreated event timed out")
             .expect("broadcast channel closed");
-        assert!(matches!(event.event, events::BoardEvent::ColumnCreated { .. }));
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::ColumnCreated { .. }
+        ));
 
         // CREATE card → CardCreated
         let card: shared::Card = server
@@ -1052,7 +1058,10 @@ mod tests {
             .await
             .expect("CardCreated event timed out")
             .expect("broadcast channel closed");
-        assert!(matches!(event.event, events::BoardEvent::CardCreated { .. }));
+        assert!(matches!(
+            event.event,
+            events::BoardEvent::CardCreated { .. }
+        ));
 
         // MOVE card → CardMoved
         let cols: Vec<shared::Column> = server

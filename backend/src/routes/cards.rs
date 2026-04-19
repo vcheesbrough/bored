@@ -102,7 +102,9 @@ pub async fn create_card(
             let api_card = c.into_api();
             let _ = state.events.send(BroadcastEvent {
                 board_id,
-                event: BoardEvent::CardCreated { card: api_card.clone() },
+                event: BoardEvent::CardCreated {
+                    card: api_card.clone(),
+                },
             });
             Ok((StatusCode::CREATED, Json(api_card)))
         }
@@ -210,7 +212,9 @@ pub async fn update_card(
             let api_card = c.into_api();
             let _ = state.events.send(BroadcastEvent {
                 board_id,
-                event: BoardEvent::CardUpdated { card: api_card.clone() },
+                event: BoardEvent::CardUpdated {
+                    card: api_card.clone(),
+                },
             });
             Ok(Json(api_card))
         }
@@ -243,7 +247,9 @@ pub async fn delete_card(
                 .unwrap_or_default();
             let _ = state.events.send(BroadcastEvent {
                 board_id,
-                event: BoardEvent::CardDeleted { card_id: card_id.clone() },
+                event: BoardEvent::CardDeleted {
+                    card_id: card_id.clone(),
+                },
             });
             Ok(StatusCode::NO_CONTENT)
         }

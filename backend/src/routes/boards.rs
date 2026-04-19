@@ -88,7 +88,9 @@ pub async fn create_board(
     // (no receivers) — we intentionally ignore it.
     let _ = state.events.send(BroadcastEvent {
         board_id: api_board.id.clone(),
-        event: BoardEvent::BoardCreated { board: api_board.clone() },
+        event: BoardEvent::BoardCreated {
+            board: api_board.clone(),
+        },
     });
 
     Ok((StatusCode::CREATED, Json(api_board)))
@@ -138,7 +140,9 @@ pub async fn update_board(
             let api_board = b.into_api();
             let _ = state.events.send(BroadcastEvent {
                 board_id: api_board.id.clone(),
-                event: BoardEvent::BoardUpdated { board: api_board.clone() },
+                event: BoardEvent::BoardUpdated {
+                    board: api_board.clone(),
+                },
             });
             Ok(Json(api_board))
         }

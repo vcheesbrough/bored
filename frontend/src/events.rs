@@ -19,25 +19,48 @@ use serde::Deserialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoardSseEvent {
     // ── Card events ──────────────────────────────────────────────────────
-    CardCreated { card: shared::Card },
-    CardUpdated { card: shared::Card },
-    CardDeleted { card_id: String },
+    CardCreated {
+        card: shared::Card,
+    },
+    CardUpdated {
+        card: shared::Card,
+    },
+    CardDeleted {
+        card_id: String,
+    },
     /// `from_column_id` is the column the card was in before the move.
     /// Having it avoids an extra API call on the receiving column.
-    CardMoved { card: shared::Card, from_column_id: String },
+    CardMoved {
+        card: shared::Card,
+        from_column_id: String,
+    },
 
     // ── Column events ─────────────────────────────────────────────────────
-    ColumnCreated { column: shared::Column },
-    ColumnUpdated { column: shared::Column },
-    ColumnDeleted { column_id: String },
+    ColumnCreated {
+        column: shared::Column,
+    },
+    ColumnUpdated {
+        column: shared::Column,
+    },
+    ColumnDeleted {
+        column_id: String,
+    },
     /// Full ordered column list after a bulk reorder — receivers replace
     /// their column array rather than trying to patch individual positions.
-    ColumnsReordered { columns: Vec<shared::Column> },
+    ColumnsReordered {
+        columns: Vec<shared::Column>,
+    },
 
     // ── Board events ──────────────────────────────────────────────────────
-    BoardCreated { board: shared::Board },
-    BoardUpdated { board: shared::Board },
-    BoardDeleted { board_id: String },
+    BoardCreated {
+        board: shared::Board,
+    },
+    BoardUpdated {
+        board: shared::Board,
+    },
+    BoardDeleted {
+        board_id: String,
+    },
 }
 
 /// What is currently being dragged — stored in a context `RwSignal` provided

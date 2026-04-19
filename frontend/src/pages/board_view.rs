@@ -73,17 +73,20 @@ pub fn BoardView() -> impl IntoView {
 
         // `Closure::new` wraps a Rust closure as a heap-allocated JS function.
         // The closure captures `sse_event` (a `Copy` signal handle — cheap).
-        let cb = Closure::<dyn Fn(web_sys::MessageEvent)>::new(
-            move |msg: web_sys::MessageEvent| {
+        let cb =
+            Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |msg: web_sys::MessageEvent| {
                 // `data()` returns a `JsValue`; `.as_string()` converts it only
                 // if the value really is a JS string (it always is for SSE).
-                let Some(data) = msg.data().as_string() else { return };
+                let Some(data) = msg.data().as_string() else {
+                    return;
+                };
                 // Parse the JSON; keep-alive "ping" strings silently return None.
-                let Some(event) = crate::events::parse_sse_event(&data) else { return };
+                let Some(event) = crate::events::parse_sse_event(&data) else {
+                    return;
+                };
                 // Writing the signal notifies all reactive effects that read it.
                 sse_event.set(Some(event));
-            },
-        );
+            });
         // Attach the handler. `as_ref().unchecked_ref()` converts the Rust
         // closure reference to the `&Function` type expected by the Web API.
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
@@ -140,9 +143,7 @@ pub fn BoardView() -> impl IntoView {
                     // Find the existing signal and update it in-place so the
                     // column header re-renders without remounting the component.
                     columns.with_untracked(|cs| {
-                        if let Some(sig) =
-                            cs.iter().find(|s| s.get_untracked().id == column.id)
-                        {
+                        if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == column.id) {
                             sig.set(column);
                         }
                     });
@@ -155,7 +156,11 @@ pub fn BoardView() -> impl IntoView {
             }
             BoardSseEvent::ColumnsReordered { columns: reordered } => {
                 // Only apply if the event belongs to the current board.
-                if reordered.first().map(|c| c.board_id == bid).unwrap_or(false) {
+                if reordered
+                    .first()
+                    .map(|c| c.board_id == bid)
+                    .unwrap_or(false)
+                {
                     // Sort existing signals in-place rather than replacing them
                     // with new ones — this preserves each ColumnView's card state
                     // and avoids re-mounting components for unchanged columns.

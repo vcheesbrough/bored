@@ -15,13 +15,12 @@ pub fn CardItem(
 ) -> impl IntoView {
     // `DragPayload` context — written on dragstart so drop targets know
     // which card is in flight and which column it came from.
-    let drag_payload = use_context::<RwSignal<DragPayload>>()
-        .expect("drag_payload context missing");
+    let drag_payload =
+        use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
 
     // `ColumnCards` context — provided by the enclosing `ColumnView` so we
     // can resolve our own current index at drop time without prop-drilling.
-    let column_cards = use_context::<ColumnCards>()
-        .expect("column_cards context missing");
+    let column_cards = use_context::<ColumnCards>().expect("column_cards context missing");
 
     // Derive a reactive body signal so `MarkdownPreview` re-renders after
     // the card is edited in the modal.

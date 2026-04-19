@@ -72,7 +72,9 @@ pub async fn create_column(
             let api_col = c.into_api();
             let _ = state.events.send(BroadcastEvent {
                 board_id: board_id.clone(),
-                event: BoardEvent::ColumnCreated { column: api_col.clone() },
+                event: BoardEvent::ColumnCreated {
+                    column: api_col.clone(),
+                },
             });
             Ok((StatusCode::CREATED, Json(api_col)))
         }
@@ -122,7 +124,9 @@ pub async fn update_column(
             let api_col = c.into_api();
             let _ = state.events.send(BroadcastEvent {
                 board_id,
-                event: BoardEvent::ColumnUpdated { column: api_col.clone() },
+                event: BoardEvent::ColumnUpdated {
+                    column: api_col.clone(),
+                },
             });
             Ok(Json(api_col))
         }
@@ -224,7 +228,9 @@ pub async fn reorder_columns(
 
     let _ = state.events.send(BroadcastEvent {
         board_id,
-        event: BoardEvent::ColumnsReordered { columns: api_cols.clone() },
+        event: BoardEvent::ColumnsReordered {
+            columns: api_cols.clone(),
+        },
     });
 
     Ok(Json(api_cols))

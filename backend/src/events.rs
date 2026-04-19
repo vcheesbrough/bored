@@ -121,11 +121,7 @@ pub async fn sse_handler(
         .filter_map(|result| result.ok())
         // Drop events that don't belong to the client's board. If no board_id
         // was supplied (e.g. an admin client), all events pass through.
-        .filter(move |b| {
-            board_filter
-                .as_ref()
-                .map_or(true, |bid| bid == &b.board_id)
-        })
+        .filter(move |b| board_filter.as_ref().map_or(true, |bid| bid == &b.board_id))
         // Serialize the inner event (not the wrapper) to JSON and wrap in an SSE `Event`.
         .map(|b| {
             let data = serde_json::to_string(&b.event)

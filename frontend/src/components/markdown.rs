@@ -31,10 +31,8 @@ fn to_html(md: &str) -> String {
 /// `set_inner_html()` on the underlying DOM element reactively.
 #[component]
 pub fn MarkdownPreview(
-    #[prop(into)]
-    body: Signal<String>,
-    #[prop(optional)]
-    class: &'static str,
+    #[prop(into)] body: Signal<String>,
+    #[prop(optional)] class: &'static str,
 ) -> impl IntoView {
     view! {
         <div class=class inner_html=move || to_html(&body.get())></div>

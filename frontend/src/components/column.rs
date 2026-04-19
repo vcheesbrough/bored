@@ -32,12 +32,12 @@ pub fn ColumnView(
 
     // ── Context ────────────────────────────────────────────────────────────
     // These signals are provided by `BoardView` via `provide_context`.
-    let sse_event = use_context::<RwSignal<Option<BoardSseEvent>>>()
-        .expect("sse_event context missing");
-    let drag_payload = use_context::<RwSignal<DragPayload>>()
-        .expect("drag_payload context missing");
-    let columns_ctx = use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>()
-        .expect("columns context missing");
+    let sse_event =
+        use_context::<RwSignal<Option<BoardSseEvent>>>().expect("sse_event context missing");
+    let drag_payload =
+        use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
+    let columns_ctx =
+        use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>().expect("columns context missing");
 
     // ── Static column metadata ─────────────────────────────────────────────
     // Read once, untracked — the column ID and board ID don't change over the
@@ -98,9 +98,8 @@ pub fn ColumnView(
             }
             BoardSseEvent::CardDeleted { card_id } => {
                 // We don't know the column from the event; check if the card is ours.
-                let owned = cards.with_untracked(|cs| {
-                    cs.iter().any(|s| s.get_untracked().id == card_id)
-                });
+                let owned =
+                    cards.with_untracked(|cs| cs.iter().any(|s| s.get_untracked().id == card_id));
                 if owned {
                     cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
                     // Close modal if the deleted card was open.
@@ -122,9 +121,7 @@ pub fn ColumnView(
                     // component from remounting the card component.
                     let card = card.clone();
                     cards.update(|cs| {
-                        if let Some(idx) =
-                            cs.iter().position(|s| s.get_untracked().id == card.id)
-                        {
+                        if let Some(idx) = cs.iter().position(|s| s.get_untracked().id == card.id) {
                             let sig = cs.remove(idx);
                             sig.set(card.clone());
                             let pos = (card.position as usize).min(cs.len());
@@ -212,9 +209,7 @@ pub fn ColumnView(
                 let target_col = col_id.clone();
                 let position = cards.with_untracked(|cs| cs.len() as i32);
                 wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(err) =
-                        crate::api::move_card(&card_id, target_col, position).await
-                    {
+                    if let Err(err) = crate::api::move_card(&card_id, target_col, position).await {
                         leptos::logging::error!("move_card failed: {err}");
                     }
                     // The SSE CardMoved event updates the UI for all clients.
@@ -275,8 +270,11 @@ pub fn ColumnView(
                             cs.iter().position(|s| s.get_untracked().id == target_id)
                         {
                             let removed = cs.remove(drag_idx);
-                            let insert_at =
-                                if drag_idx < tgt_idx { tgt_idx - 1 } else { tgt_idx };
+                            let insert_at = if drag_idx < tgt_idx {
+                                tgt_idx - 1
+                            } else {
+                                tgt_idx
+                            };
                             cs.insert(insert_at, removed);
                         }
                     }
