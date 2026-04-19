@@ -17,6 +17,7 @@ steps:
       GIT_CONFIG_COUNT: 1
       GIT_CONFIG_KEY_0: safe.directory
       GIT_CONFIG_VALUE_0: "*"
+      CLAUDE_TIMEOUT: 600
       CLAUDE_CODE_OAUTH_TOKEN:
         from_secret: claude_oauth_token
       PR_REVIEWER_GH_APP_ID:
