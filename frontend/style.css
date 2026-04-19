@@ -697,8 +697,10 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   cursor: grabbing;
 }
 
-/* Highlight a column's card list when a card is dragged over it */
-.card-list:hover {
+/* Highlight a column's card list when a card is actively dragged over it.
+   The class is toggled by on:dragover / on:dragleave / on:drop so the
+   outline only appears during an actual drag operation, not on normal hover. */
+.card-list.drag-over {
   outline: 2px dashed var(--border);
   outline-offset: -2px;
   border-radius: var(--radius);

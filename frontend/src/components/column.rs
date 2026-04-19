@@ -21,6 +21,10 @@ pub fn ColumnView(
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
     let selected_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
     let show_add = RwSignal::new(false);
+    // Tracks whether a card is currently dragged over *this* column's card list.
+    // Drives the CSS `.drag-over` class so the outline only appears during an
+    // actual drag, not on ordinary mouse hover.
+    let card_list_drag_over = RwSignal::new(false);
 
     // Expose this column's cards signal to `CardItem` children so they can
     // resolve their own index at drop time without needing it as a prop.
@@ -182,13 +186,22 @@ pub fn ColumnView(
         if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
             // `prevent_default()` on dragover is required to enable dropping.
             e.prevent_default();
+            // Show the drop-zone outline only while a card drag is active.
+            card_list_drag_over.set(true);
         }
+    };
+
+    // Clear the outline when the drag leaves this card list without dropping.
+    let on_cardlist_dragleave = move |_: web_sys::DragEvent| {
+        card_list_drag_over.set(false);
     };
 
     let on_cardlist_drop = {
         let col_id = col_id_card_drop.clone();
         move |e: web_sys::DragEvent| {
             e.prevent_default();
+            // Clear outline regardless of whether the payload is valid.
+            card_list_drag_over.set(false);
             // Move is only valid when a card is in flight.
             if let DragPayload::Card {
                 card_id,
@@ -322,7 +335,11 @@ pub fn ColumnView(
             // Card list — accepts card drops from any column.
             <div
                 class="card-list"
+                // `.drag-over` is toggled reactively so the dashed outline only
+                // appears when a card is actually in flight over this list.
+                class:drag-over=move || card_list_drag_over.get()
                 on:dragover=on_cardlist_dragover
+                on:dragleave=on_cardlist_dragleave
                 on:drop=on_cardlist_drop
             >
                 <For
