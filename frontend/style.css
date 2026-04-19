@@ -437,7 +437,6 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   gap: 0;
   flex: 1;
   min-height: 0;
-  min-width: max-content;
   align-items: stretch;
 }
 
