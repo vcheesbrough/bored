@@ -22,6 +22,11 @@ pub fn CardItem(
     // can resolve our own current index at drop time without prop-drilling.
     let column_cards = use_context::<ColumnCards>().expect("column_cards context missing");
 
+    // `drag_over_card_id` context — written here on dragover so the column
+    // can render a ghost placeholder at the correct insertion point.
+    let drag_over_card_id =
+        use_context::<RwSignal<Option<String>>>().expect("drag_over_card_id context missing");
+
     // Derive reactive signals so each derived view re-renders only when its
     // specific field changes, not on every card update.
     let body = Signal::derive(move || card.get().body);
@@ -45,12 +50,16 @@ pub fn CardItem(
             }
             // Allow dropping a dragged card onto this card.
             on:dragover=move |e: web_sys::DragEvent| {
-                if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
-                    // Must prevent default to make this element a valid drop target.
+                let payload = drag_payload.get_untracked();
+                if let DragPayload::Card { card_id: ref dragged_id, .. } = payload {
                     e.prevent_default();
-                    // Stop bubbling so the parent card-list dragover doesn't
-                    // also fire (no harm if it does, but keeps intent clear).
                     e.stop_propagation();
+                    let this_id = card.get_untracked().id;
+                    // Skip ghost for the card being dragged — inserting before
+                    // itself is a no-op so no placeholder is needed.
+                    if dragged_id != &this_id {
+                        drag_over_card_id.set(Some(this_id));
+                    }
                 }
             }
             // Handle a card being dropped directly onto this card, which
