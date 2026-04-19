@@ -47,6 +47,10 @@ pub fn CardItem(
     /// Called when the card is deleted so the parent column can remove it
     /// from its list immediately (before the SSE `CardDeleted` event arrives).
     on_delete: Callback<String>,
+    /// Shared signal set to a card's ID by `ColumnView` when a brand-new card
+    /// should start in editing mode.  The matching `CardItem` claims the
+    /// board-level expanded-card lock, enters `Editing`, then clears the signal.
+    new_card_id: RwSignal<Option<String>>,
 ) -> impl IntoView {
     // ── Contexts ─────────────────────────────────────────────────────────
     let drag_payload =
@@ -165,10 +169,22 @@ pub fn CardItem(
     Effect::new(move |_| {
         let active = expanded_card_id.get();
         let my_id = card.get_untracked().id.clone();
-        if active.as_deref() != Some(&my_id)
-            && card_state.get_untracked() != CardState::Collapsed
-        {
+        if active.as_deref() != Some(&my_id) && card_state.get_untracked() != CardState::Collapsed {
             collapse_silent();
+        }
+    });
+
+    // When `ColumnView` sets `new_card_id` to this card's ID, immediately
+    // enter editing mode and claim the board-level expanded-card lock.
+    // Works whether the card was mounted before or after the signal was set
+    // (handles the SSE-vs-optimistic-insert race).
+    Effect::new(move |_| {
+        let target = new_card_id.get();
+        let my_id = card.get_untracked().id.clone();
+        if target.as_deref() == Some(&my_id) {
+            expanded_card_id.set(Some(my_id));
+            card_state.set(CardState::Editing);
+            new_card_id.set(None);
         }
     });
 

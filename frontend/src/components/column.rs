@@ -1,6 +1,5 @@
 use leptos::prelude::*;
 
-use crate::components::add_card_modal::AddCardModal;
 use crate::components::card::CardItem;
 use crate::events::{BoardSseEvent, DragPayload};
 
@@ -12,7 +11,10 @@ pub struct ColumnCards(pub RwSignal<Vec<RwSignal<shared::Card>>>);
 #[component]
 pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
-    let show_add = RwSignal::new(false);
+    // Tracks which card ID (if any) should open in editing mode on mount.
+    // Set just before inserting the card into `cards` so the matching
+    // `CardItem` picks it up as soon as the `For` loop renders it.
+    let new_card_id: RwSignal<Option<String>> = RwSignal::new(None);
     // Tracks whether a card drag is currently over this column's card list,
     // driving the dashed `.drag-over` outline.
     let card_list_drag_over = RwSignal::new(false);
@@ -41,7 +43,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let col_id_col_drop = col_id.clone();
     let col_id_dragstart = col_id.clone();
     let col_id_for_modal = col_id.clone();
-    let col_name_for_modal = initial.name.clone();
 
     // ── Initial card fetch ─────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -327,7 +328,23 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                 <button
                     class="add-card-btn"
                     title="Add card"
-                    on:click=move |_| show_add.set(true)
+                    on:click=move |_| {
+                        // Immediately create an empty card at the top of the
+                        // column; the new `CardItem` starts in editing mode.
+                        let col_id = col_id_for_modal.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            match crate::api::create_card(&col_id, String::new()).await {
+                                Ok(card) => {
+                                    // Signal the matching CardItem to start in
+                                    // editing mode before inserting it into
+                                    // the list so the For loop picks it up.
+                                    new_card_id.set(Some(card.id.clone()));
+                                    on_card_created.run(card);
+                                }
+                                Err(e) => leptos::logging::error!("create card failed: {e}"),
+                            }
+                        });
+                    }
                 >"+"</button>
             </div>
 
@@ -352,7 +369,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                                 }>
                                     <div class="card-ghost" />
                                 </Show>
-                                <CardItem card=sig on_delete=on_card_delete />
+                                <CardItem card=sig on_delete=on_card_delete new_card_id=new_card_id />
                             }
                         }
                     }
@@ -379,12 +396,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                 </div>
             </div>
 
-            <AddCardModal
-                column_id=col_id_for_modal
-                column_name=col_name_for_modal
-                show=show_add
-                on_created=on_card_created
-            />
         </div>
     }
 }

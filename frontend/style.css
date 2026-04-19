@@ -722,11 +722,18 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   padding: 10px 12px;
   resize: none;
   box-sizing: border-box;
-  /* Inline card: textarea fills the grid cell set by the rendered content. */
   align-self: stretch;
 }
 .card-body-textarea:focus,
 .modal-body-textarea:focus { outline: none; border-color: var(--accent); }
+
+/* Inline card textarea: grows with its content so there is no internal
+   scrollbar — only the column's card-list scrolls. */
+.card-body-textarea {
+  field-sizing: content;
+  overflow: hidden;
+  min-height: 120px;
+}
 
 /* In the full-screen modal, the textarea should fill the body region. */
 .modal-body-textarea {

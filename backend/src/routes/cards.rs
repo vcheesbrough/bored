@@ -215,11 +215,6 @@ pub async fn create_card(
     Path(col_id): Path<String>,
     Json(payload): Json<shared::CreateCardRequest>,
 ) -> Result<(StatusCode, Json<shared::Card>), StatusCode> {
-    // Reject empty bodies — a card with no content is not useful.
-    if payload.body.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
     let column: Option<DbColumn> = state
         .db
         .select(("columns", &col_id))
@@ -304,14 +299,6 @@ pub async fn update_card(
         Some(e) => e,
         None => return Err(StatusCode::NOT_FOUND),
     };
-
-    // Reject an explicitly-supplied body that is empty or whitespace-only,
-    // consistent with the same guard on create_card.
-    if let Some(ref body) = payload.body {
-        if body.trim().is_empty() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-    }
 
     // Always look up the current column so we have the board ID for the SSE event.
     let current_col: Option<DbColumn> = state
