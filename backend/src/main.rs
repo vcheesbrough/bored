@@ -1012,7 +1012,15 @@ mod tests {
             .await
             .json();
 
-        let event = rx.try_recv().expect("expected BoardCreated event");
+        // Use a bounded async wait instead of try_recv so the test doesn't race
+        // the handler. The send always happens before the HTTP response returns,
+        // but relying on try_recv returning Ok rather than Empty is fragile under
+        // a busy executor. 1 s is generous — in practice the channel is ready
+        // in microseconds.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("BoardCreated event timed out")
+            .expect("broadcast channel closed");
         assert!(matches!(event.event, events::BoardEvent::BoardCreated { .. }));
 
         // CREATE column → ColumnCreated
@@ -1025,7 +1033,10 @@ mod tests {
             .await
             .json();
 
-        let event = rx.try_recv().expect("expected ColumnCreated event");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("ColumnCreated event timed out")
+            .expect("broadcast channel closed");
         assert!(matches!(event.event, events::BoardEvent::ColumnCreated { .. }));
 
         // CREATE card → CardCreated
@@ -1037,7 +1048,10 @@ mod tests {
             .await
             .json();
 
-        let event = rx.try_recv().expect("expected CardCreated event");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("CardCreated event timed out")
+            .expect("broadcast channel closed");
         assert!(matches!(event.event, events::BoardEvent::CardCreated { .. }));
 
         // MOVE card → CardMoved
@@ -1056,7 +1070,10 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = rx.try_recv().expect("expected CardMoved event");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("CardMoved event timed out")
+            .expect("broadcast channel closed");
         assert!(matches!(event.event, events::BoardEvent::CardMoved { .. }));
     }
 }
