@@ -149,7 +149,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
         cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
     });
 
-    // Called by AddCardModal on successful create; inserts at the correct
+    // Called by the + button handler on successful create; inserts at the correct
     // sorted position (the backend assigns a top-of-column sparse position).
     let on_card_created = Callback::new(move |card: shared::Card| {
         cards.update(|cs| {

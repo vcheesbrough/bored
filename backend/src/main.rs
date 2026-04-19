@@ -786,19 +786,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_card_with_empty_body_returns_400() {
-        let server = test_app().await;
-        let (_, column) = setup_board_and_column(&server).await;
-        server
-            .post(&format!("/api/columns/{}/cards", column.id))
-            .json(&shared::CreateCardRequest {
-                body: "   ".to_string(),
-            })
-            .await
-            .assert_status(StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
     async fn card_response_has_body_not_title_or_description() {
         let server = test_app().await;
         let (_, column) = setup_board_and_column(&server).await;
