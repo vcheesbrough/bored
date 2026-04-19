@@ -52,12 +52,17 @@ pub enum BoardSseEvent {
     },
 
     // ── Board events ──────────────────────────────────────────────────────
+    // These variants are deserialized from SSE but not yet matched in the
+    // frontend; the fields are retained for future use.
+    #[allow(dead_code)]
     BoardCreated {
         board: shared::Board,
     },
+    #[allow(dead_code)]
     BoardUpdated {
         board: shared::Board,
     },
+    #[allow(dead_code)]
     BoardDeleted {
         board_id: String,
     },

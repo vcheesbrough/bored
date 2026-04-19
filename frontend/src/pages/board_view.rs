@@ -1,41 +1,93 @@
 use leptos::prelude::*;
-use leptos_router::hooks::use_params_map;
+use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::prelude::*;
 
 use crate::components::board_chooser::BoardChooser;
+use crate::components::card::ExpandedCardId;
+use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
 use crate::events::{BoardSseEvent, DragPayload};
 
 #[component]
 pub fn BoardView() -> impl IntoView {
-    // `use_params_map()` returns a reactive map of URL parameters.
     let params = use_params_map();
-    // Derived signal — re-evaluates whenever the user navigates to a different board.
+    let query = use_query_map();
+    let navigate = use_navigate();
+
+    // Board ID from the route path parameter.
     let board_id = move || params.with(|p| p.get("id").unwrap_or_default());
+    // Optional card ID from the `?card=` query parameter; drives the maximised overlay.
+    let maximised_card_id = move || query.with(|q| q.get("card"));
 
     let board_name = RwSignal::new(String::new());
-    // Each column is wrapped in its own `RwSignal` so renaming one column
-    // in the chooser propagates to the column header without touching the others.
     let columns: RwSignal<Vec<RwSignal<shared::Column>>> = RwSignal::new(Vec::new());
     let loading = RwSignal::new(true);
 
+    // Watermark: version + environment fetched once from the backend.
+    let watermark = RwSignal::new(format!("v{}", env!("CARGO_PKG_VERSION")));
+
     // ── Context signals ────────────────────────────────────────────────────
-    // These are provided so child components can access them without props.
-
-    // Latest SSE event received from the server. Each child component reads
-    // this in an effect and filters for events relevant to it.
     let sse_event: RwSignal<Option<BoardSseEvent>> = RwSignal::new(None);
-    // Encodes what is currently being dragged (card or column). Set by
-    // the element's dragstart handler; read by potential drop targets.
     let drag_payload: RwSignal<DragPayload> = RwSignal::new(DragPayload::None);
+    // Tracks which card (if any) is currently expanded or editing across the
+    // whole board so that only one card can be open at a time.
+    let expanded_card_id: RwSignal<Option<String>> = RwSignal::new(None);
 
-    // `provide_context` makes these signals available to any descendant
-    // component via `use_context::<T>()` without threading them as props.
     provide_context(sse_event);
     provide_context(drag_payload);
-    // Columns is also provided so ColumnView can trigger a bulk reorder
-    // without needing to receive the full list as an additional prop.
     provide_context(columns);
+    provide_context(ExpandedCardId(expanded_card_id));
+
+    // ── Maximised card overlay ─────────────────────────────────────────────
+    // When the URL has `?card=<id>`, we fetch that card and show it in a
+    // full-screen `CardModal`.  Navigating away from the URL (or closing the
+    // modal) removes the query parameter without remounting the board.
+    let maximised_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
+
+    Effect::new(move |_| {
+        match maximised_card_id() {
+            Some(card_id) => {
+                wasm_bindgen_futures::spawn_local(async move {
+                    match crate::api::fetch_card(&card_id).await {
+                        Ok(card) => maximised_card.set(Some(card)),
+                        Err(e) => leptos::logging::error!("fetch maximised card failed: {e}"),
+                    }
+                });
+            }
+            None => {
+                // Clear any stale card when the query param is removed.
+                maximised_card.set(None);
+            }
+        }
+    });
+
+    // Navigate back to the plain board URL when the modal signals it should close.
+    let on_modal_close = Callback::new(move |_: ()| {
+        navigate(&format!("/boards/{}", board_id()), Default::default());
+    });
+
+    let on_modal_updated = Callback::new(move |_: shared::Card| {
+        // SSE `CardUpdated` event keeps the column list in sync; no extra action needed.
+    });
+
+    let on_modal_delete = Callback::new(move |_: String| {
+        // SSE `CardDeleted` removes the card from all columns.
+    });
+
+    // ── Watermark fetch ────────────────────────────────────────────────────
+    Effect::new(move |_| {
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(info) = crate::api::fetch_app_info().await {
+                let label = if info.env == "production" {
+                    format!("v{}", info.version)
+                } else {
+                    let branch = info.env.splitn(2, '/').last().unwrap_or(&info.env);
+                    format!("v{} {}", info.version, branch)
+                };
+                watermark.set(label);
+            }
+        });
+    });
 
     // ── Browser tab title ─────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -44,26 +96,14 @@ pub fn BoardView() -> impl IntoView {
             document().set_title(&format!("{name} — bored"));
         }
     });
-
-    on_cleanup(|| {
-        document().set_title("bored");
-    });
+    on_cleanup(|| document().set_title("bored"));
 
     // ── SSE connection ────────────────────────────────────────────────────
-    // Opens a board-scoped SSE connection whenever the board ID changes.
-    // Re-runs when the user navigates to a different board because `board_id()`
-    // is a reactive read inside the effect — Leptos re-fires the effect and
-    // the cleanup below closes the old EventSource before opening a new one.
-    //
-    // Passing `?board_id=` ensures the server only sends events for this board,
-    // preventing data leaks between unrelated boards on a shared server.
     Effect::new(move |_| {
         let bid = board_id();
         if bid.is_empty() {
             return;
         }
-        // `EventSource::new` opens the SSE connection. The browser handles
-        // reconnection automatically on transient network failures.
         let url = format!("/api/events?board_id={bid}");
         let Ok(es) = web_sys::EventSource::new(&url) else {
             leptos::logging::error!("EventSource: failed to open {url}");
@@ -71,40 +111,23 @@ pub fn BoardView() -> impl IntoView {
         };
         let es_for_cleanup = es.clone();
 
-        // `Closure::new` wraps a Rust closure as a heap-allocated JS function.
-        // The closure captures `sse_event` (a `Copy` signal handle — cheap).
         let cb =
             Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |msg: web_sys::MessageEvent| {
-                // `data()` returns a `JsValue`; `.as_string()` converts it only
-                // if the value really is a JS string (it always is for SSE).
                 let Some(data) = msg.data().as_string() else {
                     return;
                 };
-                // Parse the JSON; keep-alive "ping" strings silently return None.
                 let Some(event) = crate::events::parse_sse_event(&data) else {
                     return;
                 };
-                // Writing the signal notifies all reactive effects that read it.
                 sse_event.set(Some(event));
             });
-        // Attach the handler. `as_ref().unchecked_ref()` converts the Rust
-        // closure reference to the `&Function` type expected by the Web API.
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
-        // `forget()` transfers Rust's ownership of the closure to JS so it
-        // isn't dropped when this effect body returns. The EventSource holds
-        // a JS reference to the function; closing the source (below) is the
-        // only clean-up needed.
         cb.forget();
 
-        // Close the connection when this reactive scope is torn down (i.e.
-        // when the user navigates away from any board view).
-        on_cleanup(move || {
-            es_for_cleanup.close();
-        });
+        on_cleanup(move || es_for_cleanup.close());
     });
 
     // ── Initial data fetch ────────────────────────────────────────────────
-    // Re-runs whenever `board_id()` changes (user navigates to a different board).
     Effect::new(move |_| {
         let id = board_id();
         if id.is_empty() {
@@ -126,18 +149,12 @@ pub fn BoardView() -> impl IntoView {
     });
 
     // ── Column-level SSE events ───────────────────────────────────────────
-    // Handles events that add, remove, rename, or reorder columns.
-    // Card-level events are handled inside each `ColumnView` component.
     Effect::new(move |_| {
         let Some(event) = sse_event.get() else { return };
-        let bid = board_id(); // read reactive dep so we recheck on navigation
+        let bid = board_id();
         match event {
             BoardSseEvent::ColumnCreated { column } => {
-                // Ignore events for other boards (SSE stream is global).
                 if column.board_id == bid {
-                    // Guard against double-insert: BoardChooser optimistically
-                    // pushes the new column on API success; the SSE event that
-                    // follows must not add it a second time.
                     columns.update(|cs| {
                         if cs.iter().any(|s| s.get_untracked().id == column.id) {
                             return;
@@ -148,8 +165,6 @@ pub fn BoardView() -> impl IntoView {
             }
             BoardSseEvent::ColumnUpdated { column } => {
                 if column.board_id == bid {
-                    // Find the existing signal and update it in-place so the
-                    // column header re-renders without remounting the component.
                     columns.with_untracked(|cs| {
                         if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == column.id) {
                             sig.set(column);
@@ -158,20 +173,14 @@ pub fn BoardView() -> impl IntoView {
                 }
             }
             BoardSseEvent::ColumnDeleted { column_id } => {
-                // No board_id in the event; safe to retain-filter — if the column
-                // isn't ours, it simply won't be found.
                 columns.update(|cs| cs.retain(|s| s.get_untracked().id != column_id));
             }
             BoardSseEvent::ColumnsReordered { columns: reordered } => {
-                // Only apply if the event belongs to the current board.
                 if reordered
                     .first()
                     .map(|c| c.board_id == bid)
                     .unwrap_or(false)
                 {
-                    // Sort existing signals in-place rather than replacing them
-                    // with new ones — this preserves each ColumnView's card state
-                    // and avoids re-mounting components for unchanged columns.
                     columns.update(|cs| {
                         cs.sort_by_key(|sig| {
                             let id = sig.get_untracked().id.clone();
@@ -183,7 +192,7 @@ pub fn BoardView() -> impl IntoView {
                     });
                 }
             }
-            _ => {} // card events are handled in ColumnView
+            _ => {}
         }
     });
 
@@ -192,11 +201,12 @@ pub fn BoardView() -> impl IntoView {
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
             <BoardChooser board_name=board_name columns=columns />
+            <span class="navbar-watermark">{move || watermark.get()}</span>
         </nav>
 
         <div class="page board-view">
             <Show when=move || loading.get() fallback=|| ()>
-                <p class="loading-text">"Loading..."</p>
+                <p class="loading-text">"Loading…"</p>
             </Show>
 
             <div class="columns-row">
@@ -207,5 +217,13 @@ pub fn BoardView() -> impl IntoView {
                 />
             </div>
         </div>
+
+        // Maximised card overlay — shown when `?card=<id>` is in the URL.
+        <CardModal
+            card=maximised_card
+            on_updated=on_modal_updated
+            on_delete=on_modal_delete
+            on_close=on_modal_close
+        />
     }
 }

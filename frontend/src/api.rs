@@ -96,6 +96,14 @@ pub async fn delete_column(column_id: &str) -> Result<(), gloo_net::Error> {
     }
 }
 
+pub async fn fetch_card(card_id: &str) -> Result<shared::Card, gloo_net::Error> {
+    Request::get(&format!("/api/cards/{card_id}"))
+        .send()
+        .await?
+        .json::<shared::Card>()
+        .await
+}
+
 pub async fn fetch_cards(column_id: &str) -> Result<Vec<shared::Card>, gloo_net::Error> {
     Request::get(&format!("/api/columns/{column_id}/cards"))
         .send()

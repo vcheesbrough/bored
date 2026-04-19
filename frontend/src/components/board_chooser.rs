@@ -263,9 +263,6 @@ pub fn BoardChooser(
                     each=move || columns.get()
                     key=|sig| sig.get_untracked().id.clone()
                     children=move |sig| {
-                        let start_edit = start_edit.clone();
-                        let commit_edit = commit_edit.clone();
-                        let delete_col = delete_col.clone();
                         let is_editing = move || {
                             editing_col.with(|e| {
                                 e.as_ref()
@@ -278,7 +275,6 @@ pub fn BoardChooser(
                                     class="chooser-col-name"
                                     style:display=move || if is_editing() { "none" } else { "block" }
                                     on:click={
-                                        let start_edit = start_edit.clone();
                                         move |_| start_edit(&sig.get_untracked())
                                     }
                                 >
@@ -291,11 +287,9 @@ pub fn BoardChooser(
                                     prop:value=move || edit_buf.get()
                                     on:input=move |ev| edit_buf.set(event_target_value(&ev))
                                     on:blur={
-                                        let commit_edit = commit_edit.clone();
                                         move |_| commit_edit(sig)
                                     }
                                     on:keydown={
-                                        let commit_edit = commit_edit.clone();
                                         move |ev| {
                                             if ev.key() == "Enter" {
                                                 ev.prevent_default();
