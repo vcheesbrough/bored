@@ -11,7 +11,7 @@ services:
 
   playwright:
     build:
-      context: ./e2e
+      context: .
       dockerfile_inline: |
         FROM mcr.microsoft.com/playwright:v1.59.1-noble
         WORKDIR /e2e
