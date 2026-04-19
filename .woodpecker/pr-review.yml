@@ -6,7 +6,7 @@ when:
 
 steps:
   review:
-    image: registry.desync.link/claude-pr-agent:85d140f@sha256:2c65e71034001d344312b879f5218e0f6cd7a6af0a466ba93bf3deaef1948049
+    image: registry.desync.link/claude-pr-agent:4beb5aa@sha256:c738c93047bdb4f3903712f645ca928d06a97a1def06582fefb09804af7e3bb8
     pull: true
     environment:
       # Git 2.35+ rejects directories owned by a different user than the
