@@ -22,6 +22,10 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     // the ghost placeholder rendered just above that card.
     let drag_over_card_id: RwSignal<Option<String>> = RwSignal::new(None);
 
+    // Reactive count derived from the cards list; updates automatically whenever
+    // cards are added, removed, or moved by SSE events.
+    let card_count = Signal::derive(move || cards.get().len());
+
     provide_context(ColumnCards(cards));
     provide_context(drag_over_card_id);
 
@@ -151,8 +155,13 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
 
     // Called by the + button handler on successful create; inserts at the correct
     // sorted position (the backend assigns a top-of-column sparse position).
+    // Guard against double-insert: the SSE CardCreated event can arrive before
+    // the API response if the round-trip races, so we check before inserting.
     let on_card_created = Callback::new(move |card: shared::Card| {
         cards.update(|cs| {
+            if cs.iter().any(|s| s.get_untracked().id == card.id) {
+                return;
+            }
             let insert_at = cs
                 .iter()
                 .position(|s| s.get_untracked().position > card.position)
@@ -325,6 +334,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                     }
                 >"⠿"</span>
                 <span class="column-name">{move || column.get().name.clone()}</span>
+                <span class="card-count-badge">{card_count}</span>
                 <button
                     class="add-card-btn"
                     title="Add card"

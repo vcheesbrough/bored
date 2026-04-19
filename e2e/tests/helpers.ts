@@ -33,6 +33,23 @@ export async function apiCreateCard(
   return await res.json() as { id: string; body: string; column_id: string; number: number };
 }
 
+export async function apiDeleteCard(request: APIRequestContext, cardId: string) {
+  const res = await request.delete(`/api/cards/${cardId}`);
+  if (!res.ok()) throw new Error(`DELETE /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);
+}
+
+export async function apiMoveCard(
+  request: APIRequestContext,
+  cardId: string,
+  columnId: string,
+  position = 0
+) {
+  const res = await request.post(`/api/cards/${cardId}/move`, {
+    data: { column_id: columnId, position },
+  });
+  if (!res.ok()) throw new Error(`POST /api/cards/${cardId}/move failed: ${res.status()} ${await res.text()}`);
+}
+
 // ── Browser helpers ───────────────────────────────────────────────────────
 
 /** Navigate to a board and wait for the columns row to be present. */
