@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 
-use crate::events::BoardEvent;
+use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbColumn};
 use crate::routes::boards::AppState;
 
@@ -71,9 +71,12 @@ pub async fn create_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if column.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    // Destructure early to capture the board ID for the SSE event.
+    let column = match column {
+        Some(c) => c,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let board_id = column.board.id.to_raw();
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
 
@@ -97,8 +100,9 @@ pub async fn create_card(
     match card {
         Some(c) => {
             let api_card = c.into_api();
-            let _ = state.events.send(BoardEvent::CardCreated {
-                card: api_card.clone(),
+            let _ = state.events.send(BroadcastEvent {
+                board_id,
+                event: BoardEvent::CardCreated { card: api_card.clone() },
             });
             Ok((StatusCode::CREATED, Json(api_card)))
         }
@@ -130,6 +134,17 @@ pub async fn update_card(
         }
     }
 
+    // Always look up the current column so we have the board ID for the SSE event.
+    let current_col: Option<DbColumn> = state
+        .db
+        .select(("columns", existing.column.id.to_raw()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let board_id = current_col
+        .as_ref()
+        .map(|c| c.board.id.to_raw())
+        .unwrap_or_default();
+
     // Validate target column if provided, and guard against cross-board moves.
     if let Some(ref col_id) = payload.column_id {
         let target_col: Option<DbColumn> = state
@@ -143,13 +158,7 @@ pub async fn update_card(
             None => return Err(StatusCode::NOT_FOUND),
         };
 
-        let current_col: Option<DbColumn> = state
-            .db
-            .select(("columns", existing.column.id.to_raw()))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if let Some(current_col) = current_col {
+        if let Some(ref current_col) = current_col {
             if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
                 return Err(StatusCode::UNPROCESSABLE_ENTITY);
             }
@@ -199,8 +208,9 @@ pub async fn update_card(
     match card {
         Some(c) => {
             let api_card = c.into_api();
-            let _ = state.events.send(BoardEvent::CardUpdated {
-                card: api_card.clone(),
+            let _ = state.events.send(BroadcastEvent {
+                board_id,
+                event: BoardEvent::CardUpdated { card: api_card.clone() },
             });
             Ok(Json(api_card))
         }
@@ -218,9 +228,22 @@ pub async fn delete_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        Some(_) => {
-            let _ = state.events.send(BoardEvent::CardDeleted {
-                card_id: card_id.clone(),
+        Some(deleted) => {
+            // Look up the column to find the board ID for the SSE event.
+            // The column may have been cascade-deleted with its board, so
+            // fall back to an empty string if it's gone — SSE delivery is
+            // best-effort and no connected client will be scoped to a
+            // non-existent board anyway.
+            let board_id = state
+                .db
+                .select::<Option<DbColumn>>(("columns", deleted.column.id.to_raw()))
+                .await
+                .unwrap_or(None)
+                .map(|c| c.board.id.to_raw())
+                .unwrap_or_default();
+            let _ = state.events.send(BroadcastEvent {
+                board_id,
+                event: BoardEvent::CardDeleted { card_id: card_id.clone() },
             });
             Ok(StatusCode::NO_CONTENT)
         }
@@ -266,8 +289,11 @@ pub async fn move_card(
     // subscribers which column to remove the card from.
     let from_column_id = existing.column.id.to_raw();
 
+    // Board ID for the SSE event — always available from the target column.
+    let board_id = target_col.board.id.to_raw();
+
     if let Some(current_col) = current_col {
-        if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
+        if current_col.board.id.to_raw() != board_id {
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
@@ -286,9 +312,12 @@ pub async fn move_card(
     match card {
         Some(c) => {
             let api_card = c.into_api();
-            let _ = state.events.send(BoardEvent::CardMoved {
-                card: api_card.clone(),
-                from_column_id,
+            let _ = state.events.send(BroadcastEvent {
+                board_id,
+                event: BoardEvent::CardMoved {
+                    card: api_card.clone(),
+                    from_column_id,
+                },
             });
             Ok(Json(api_card))
         }

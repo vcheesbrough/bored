@@ -6,7 +6,7 @@ use axum::{
 use surrealdb::{engine::local::Db, Surreal};
 use tokio::sync::broadcast;
 
-use crate::events::{BoardEvent, BROADCAST_CAPACITY};
+use crate::events::{BoardEvent, BroadcastEvent, BROADCAST_CAPACITY};
 use crate::models::DbBoard;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
@@ -23,7 +23,10 @@ pub struct AppState {
     /// a clone of the event to every currently-subscribed SSE client. We ignore the
     /// error returned when there are no subscribers (that just means nobody is
     /// listening right now, which is fine).
-    pub events: broadcast::Sender<BoardEvent>,
+    ///
+    /// Each message is a `BroadcastEvent` that bundles the event with the board ID
+    /// it originated from, so SSE clients can filter to their own board's stream.
+    pub events: broadcast::Sender<BroadcastEvent>,
 }
 
 impl AppState {
@@ -32,7 +35,7 @@ impl AppState {
         // `broadcast::channel` returns (Sender, Receiver). We keep the Sender
         // in AppState and drop the initial Receiver — new receivers are created
         // by calling `sender.subscribe()` in the SSE handler.
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (tx, _rx) = broadcast::channel::<BroadcastEvent>(BROADCAST_CAPACITY);
         Self { db, events: tx }
     }
 }
@@ -83,8 +86,9 @@ pub async fn create_board(
     let api_board = board.into_api();
     // Fire-and-forget: if no SSE client is connected, the send returns Err
     // (no receivers) — we intentionally ignore it.
-    let _ = state.events.send(BoardEvent::BoardCreated {
-        board: api_board.clone(),
+    let _ = state.events.send(BroadcastEvent {
+        board_id: api_board.id.clone(),
+        event: BoardEvent::BoardCreated { board: api_board.clone() },
     });
 
     Ok((StatusCode::CREATED, Json(api_board)))
@@ -132,8 +136,9 @@ pub async fn update_board(
     match board {
         Some(b) => {
             let api_board = b.into_api();
-            let _ = state.events.send(BoardEvent::BoardUpdated {
-                board: api_board.clone(),
+            let _ = state.events.send(BroadcastEvent {
+                board_id: api_board.id.clone(),
+                event: BoardEvent::BoardUpdated { board: api_board.clone() },
             });
             Ok(Json(api_board))
         }
@@ -168,7 +173,10 @@ pub async fn delete_board(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let _ = state.events.send(BoardEvent::BoardDeleted { board_id: id });
+    let _ = state.events.send(BroadcastEvent {
+        board_id: id.clone(),
+        event: BoardEvent::BoardDeleted { board_id: id },
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

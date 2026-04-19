@@ -1013,7 +1013,7 @@ mod tests {
             .json();
 
         let event = rx.try_recv().expect("expected BoardCreated event");
-        assert!(matches!(event, events::BoardEvent::BoardCreated { .. }));
+        assert!(matches!(event.event, events::BoardEvent::BoardCreated { .. }));
 
         // CREATE column → ColumnCreated
         let col: shared::Column = server
@@ -1026,7 +1026,7 @@ mod tests {
             .json();
 
         let event = rx.try_recv().expect("expected ColumnCreated event");
-        assert!(matches!(event, events::BoardEvent::ColumnCreated { .. }));
+        assert!(matches!(event.event, events::BoardEvent::ColumnCreated { .. }));
 
         // CREATE card → CardCreated
         let card: shared::Card = server
@@ -1038,7 +1038,7 @@ mod tests {
             .json();
 
         let event = rx.try_recv().expect("expected CardCreated event");
-        assert!(matches!(event, events::BoardEvent::CardCreated { .. }));
+        assert!(matches!(event.event, events::BoardEvent::CardCreated { .. }));
 
         // MOVE card → CardMoved
         let cols: Vec<shared::Column> = server
@@ -1057,6 +1057,6 @@ mod tests {
             .assert_status_ok();
 
         let event = rx.try_recv().expect("expected CardMoved event");
-        assert!(matches!(event, events::BoardEvent::CardMoved { .. }));
+        assert!(matches!(event.event, events::BoardEvent::CardMoved { .. }));
     }
 }

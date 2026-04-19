@@ -50,17 +50,23 @@ pub fn BoardView() -> impl IntoView {
     });
 
     // ── SSE connection ────────────────────────────────────────────────────
-    // Open exactly one `EventSource` when this component mounts. We read no
-    // reactive signals here, so the effect runs once and never re-runs.
-    // The connection is closed by `on_cleanup` when the component unmounts.
+    // Opens a board-scoped SSE connection whenever the board ID changes.
+    // Re-runs when the user navigates to a different board because `board_id()`
+    // is a reactive read inside the effect — Leptos re-fires the effect and
+    // the cleanup below closes the old EventSource before opening a new one.
     //
-    // The stream broadcasts ALL board events; individual components filter
-    // for events that belong to their specific column or board.
+    // Passing `?board_id=` ensures the server only sends events for this board,
+    // preventing data leaks between unrelated boards on a shared server.
     Effect::new(move |_| {
+        let bid = board_id();
+        if bid.is_empty() {
+            return;
+        }
         // `EventSource::new` opens the SSE connection. The browser handles
         // reconnection automatically on transient network failures.
-        let Ok(es) = web_sys::EventSource::new("/api/events") else {
-            leptos::logging::error!("EventSource: failed to open /api/events");
+        let url = format!("/api/events?board_id={bid}");
+        let Ok(es) = web_sys::EventSource::new(&url) else {
+            leptos::logging::error!("EventSource: failed to open {url}");
             return;
         };
         let es_for_cleanup = es.clone();

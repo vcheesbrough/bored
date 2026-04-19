@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 
-use crate::events::BoardEvent;
+use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbBoard, DbColumn};
 use crate::routes::boards::AppState;
 
@@ -59,7 +59,7 @@ pub async fn create_column(
         .db
         .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position")
         .bind(("id", id))
-        .bind(("board_id", board_id))
+        .bind(("board_id", board_id.clone()))
         .bind(("name", payload.name))
         .bind(("position", payload.position))
         .await
@@ -70,8 +70,9 @@ pub async fn create_column(
     match column {
         Some(c) => {
             let api_col = c.into_api();
-            let _ = state.events.send(BoardEvent::ColumnCreated {
-                column: api_col.clone(),
+            let _ = state.events.send(BroadcastEvent {
+                board_id: board_id.clone(),
+                event: BoardEvent::ColumnCreated { column: api_col.clone() },
             });
             Ok((StatusCode::CREATED, Json(api_col)))
         }
@@ -90,9 +91,12 @@ pub async fn update_column(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if existing.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    // Destructure early to capture the board ID for the SSE event.
+    let existing = match existing {
+        Some(c) => c,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let board_id = existing.board.id.to_raw();
 
     // Build a partial update map from whichever fields were supplied.
     let mut patch = serde_json::Map::new();
@@ -116,8 +120,9 @@ pub async fn update_column(
     match column {
         Some(c) => {
             let api_col = c.into_api();
-            let _ = state.events.send(BoardEvent::ColumnUpdated {
-                column: api_col.clone(),
+            let _ = state.events.send(BroadcastEvent {
+                board_id,
+                event: BoardEvent::ColumnUpdated { column: api_col.clone() },
             });
             Ok(Json(api_col))
         }
@@ -135,9 +140,12 @@ pub async fn delete_column(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if existing.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    // Destructure early to capture the board ID for the SSE event.
+    let existing = match existing {
+        Some(c) => c,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let board_id = existing.board.id.to_raw();
 
     // Cascade: delete all cards in this column before deleting the column itself.
     state
@@ -153,9 +161,10 @@ pub async fn delete_column(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let _ = state
-        .events
-        .send(BoardEvent::ColumnDeleted { column_id: col_id });
+    let _ = state.events.send(BroadcastEvent {
+        board_id,
+        event: BoardEvent::ColumnDeleted { column_id: col_id },
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -205,7 +214,7 @@ pub async fn reorder_columns(
         .query(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
-        .bind(("id", board_id))
+        .bind(("id", board_id.clone()))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -213,8 +222,9 @@ pub async fn reorder_columns(
 
     let api_cols: Vec<shared::Column> = columns.into_iter().map(DbColumn::into_api).collect();
 
-    let _ = state.events.send(BoardEvent::ColumnsReordered {
-        columns: api_cols.clone(),
+    let _ = state.events.send(BroadcastEvent {
+        board_id,
+        event: BoardEvent::ColumnsReordered { columns: api_cols.clone() },
     });
 
     Ok(Json(api_cols))

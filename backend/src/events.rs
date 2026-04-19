@@ -10,9 +10,9 @@
 // their next recv(); we treat that as a skip and continue (the client will
 // reconcile on its next full-reload if necessary).
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
@@ -67,6 +67,31 @@ pub enum BoardEvent {
     BoardDeleted { board_id: String },
 }
 
+/// Wraps a `BoardEvent` with the ID of the board it originated from.
+///
+/// The broadcast channel carries these wrappers so the SSE handler can filter
+/// to only the events that belong to the board the client subscribed to.
+/// Without this, a client viewing board A would receive every event for every
+/// board in the system — a data leak between unrelated boards.
+#[derive(Clone)]
+pub struct BroadcastEvent {
+    /// ID of the board this event belongs to.
+    pub board_id: String,
+    /// The actual event payload.
+    pub event: BoardEvent,
+}
+
+/// Query parameters accepted by `GET /api/events`.
+#[derive(Deserialize)]
+pub struct SseQuery {
+    /// If present, the stream only delivers events for this board ID.
+    ///
+    /// Clients should always supply this to avoid receiving mutations for
+    /// boards they are not currently viewing. The board ID comes from the
+    /// URL of the board page (e.g. `/boards/:id`).
+    board_id: Option<String>,
+}
+
 /// `GET /api/events` — subscribe to the board event stream.
 ///
 /// Returns an SSE response that streams JSON-encoded `BoardEvent` payloads.
@@ -80,10 +105,13 @@ pub enum BoardEvent {
 ///      freeing the slot in the broadcast channel automatically.
 pub async fn sse_handler(
     State(state): State<AppState>,
+    Query(query): Query<SseQuery>,
 ) -> Sse<impl futures_util::stream::Stream<Item = Result<Event, Infallible>>> {
     // `subscribe()` creates a new `Receiver` that will see all events sent
     // *after* this point. Events sent before this call are not replayed.
     let rx = state.events.subscribe();
+    // Move the optional board filter into the stream combinator.
+    let board_filter = query.board_id;
 
     // `BroadcastStream` converts the `Receiver` into a `Stream`. It yields
     // `Ok(T)` for each message and `Err(BroadcastStreamRecvError::Lagged(n))`
@@ -91,10 +119,17 @@ pub async fn sse_handler(
     let stream = BroadcastStream::new(rx)
         // Skip lagged errors — the client's next full-page reload will reconcile.
         .filter_map(|result| result.ok())
-        // Serialize each event to JSON and wrap it in an SSE `Event`.
-        .map(|event| {
-            let data =
-                serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"error"}"#.to_string());
+        // Drop events that don't belong to the client's board. If no board_id
+        // was supplied (e.g. an admin client), all events pass through.
+        .filter(move |b| {
+            board_filter
+                .as_ref()
+                .map_or(true, |bid| bid == &b.board_id)
+        })
+        // Serialize the inner event (not the wrapper) to JSON and wrap in an SSE `Event`.
+        .map(|b| {
+            let data = serde_json::to_string(&b.event)
+                .unwrap_or_else(|_| r#"{"type":"error"}"#.to_string());
             Ok::<Event, Infallible>(Event::default().data(data))
         });
 
