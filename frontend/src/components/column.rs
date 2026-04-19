@@ -220,23 +220,47 @@ pub fn ColumnView(
         let col_id = col_id_card_drop.clone();
         move |e: web_sys::DragEvent| {
             e.prevent_default();
-            // Clear outline and ghost regardless of whether the payload is valid.
             card_list_drag_over.set(false);
+            // Snapshot drag_over_card_id before clearing it: the ghost shifts
+            // the target card down, so the cursor may be over the ghost area
+            // (not the card itself) at drop time.  The card's own on:drop may
+            // therefore not fire.  Use drag_over_card_id here to recover the
+            // intended insertion point in that case.
+            let hover_id = drag_over_card_id.get_untracked();
             drag_over_card_id.set(None);
-            // Move is only valid when a card is in flight.
             if let DragPayload::Card {
                 card_id,
                 from_column_id: _,
             } = drag_payload.get_untracked()
             {
-                // Append to the bottom of the column (position = current length).
                 let target_col = col_id.clone();
-                let position = cards.with_untracked(|cs| cs.len() as i32);
+                let position = cards.with_untracked(|cs| {
+                    if let Some(ref hover_card_id) = hover_id {
+                        // Insert before the hovered card, adjusting for the
+                        // dragged card's removal from the siblings list.
+                        let target_idx = cs
+                            .iter()
+                            .position(|s| s.get_untracked().id == *hover_card_id)
+                            .unwrap_or(cs.len());
+                        let drag_before = cs
+                            .iter()
+                            .position(|s| s.get_untracked().id == card_id)
+                            .map(|di| di < target_idx)
+                            .unwrap_or(false);
+                        if drag_before {
+                            (target_idx - 1) as i32
+                        } else {
+                            target_idx as i32
+                        }
+                    } else {
+                        // No card hovered — append to end.
+                        cs.len() as i32
+                    }
+                });
                 wasm_bindgen_futures::spawn_local(async move {
                     if let Err(err) = crate::api::move_card(&card_id, target_col, position).await {
                         leptos::logging::error!("move_card failed: {err}");
                     }
-                    // The SSE CardMoved event updates the UI for all clients.
                 });
                 drag_payload.set(DragPayload::None);
             }
