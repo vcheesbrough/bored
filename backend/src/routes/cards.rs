@@ -5,7 +5,7 @@ use axum::{
 };
 
 use crate::events::{BoardEvent, BroadcastEvent};
-use crate::models::{DbCard, DbColumn};
+use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::AppState;
 
 pub async fn list_cards(
@@ -80,6 +80,18 @@ pub async fn create_card(
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
 
+    // Claim the next card number by atomically incrementing the global counter.
+    // SurrealDB record-level mutations are atomic, so concurrent creates cannot
+    // receive the same count value.
+    let counter: Option<DbCardCounter> = state
+        .db
+        .query("UPDATE card_counter:global SET count += 1 RETURN AFTER")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let card_number = counter.map(|c| c.count).unwrap_or(1);
+
     // Derive next_position atomically inside the CREATE to avoid TOCTOU races.
     let card: Option<DbCard> = state
         .db
@@ -87,11 +99,13 @@ pub async fn create_card(
             "CREATE type::thing('cards', $id) SET \
              column = type::thing('columns', $col_id), \
              body = $body, \
+             number = $number, \
              position = (array::max((SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id))) ?? -1) + 1",
         )
         .bind(("id", id))
         .bind(("col_id", col_id))
         .bind(("body", payload.body))
+        .bind(("number", card_number))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)

@@ -46,6 +46,7 @@ pub struct Card {
     pub column_id: String,
     pub body: String,
     pub position: i32,
+    pub number: u32,
     pub created_at: String,
     pub updated_at: String,
 }
