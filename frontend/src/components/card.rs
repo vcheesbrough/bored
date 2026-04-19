@@ -302,47 +302,48 @@ pub fn CardItem(
                     >"✕"</button>
                 </div>
 
-                // Expanded: rendered markdown body; click enters Editing.
-                // Editing: textarea with debounced auto-save.
-                // The save-status line is always rendered (empty in Expanded)
-                // so it doesn't add height when switching to Editing mode.
-                <Show
-                    when=is_expanded
-                    fallback=move || view! {
-                        // ── Editing state ──────────────────────────────────
-                        <textarea
-                            class="card-body-textarea"
-                            prop:value=move || body.get()
-                            on:input=on_body_input
-                            on:blur=move |_| exit_editing()
-                            on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                if ev.key() == "Escape" {
-                                    exit_editing();
+                // Fixed-height wrapper: both the rendered div and the textarea
+                // are positioned absolutely inside it, so neither element can
+                // influence the wrapper's height and the card never shifts size.
+                <div class="card-body-wrapper">
+                    <Show
+                        when=is_expanded
+                        fallback=move || view! {
+                            // ── Editing state ──────────────────────────────
+                            <textarea
+                                class="card-body-textarea"
+                                prop:value=move || body.get()
+                                on:input=on_body_input
+                                on:blur=move |_| exit_editing()
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    if ev.key() == "Escape" {
+                                        exit_editing();
+                                    }
                                 }
-                            }
-                            on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
-                            autofocus=true
-                        />
-                    }
-                >
-                    // ── Expanded state ─────────────────────────────────────
-                    <div
-                        class="card-body-rendered"
-                        on:click=move |e: leptos::ev::MouseEvent| {
-                            e.stop_propagation();
-                            card_state.set(CardState::Editing);
+                                on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
+                                autofocus=true
+                            />
                         }
                     >
-                        <Show
-                            when=move || !body.get().is_empty()
-                            fallback=|| view! {
-                                <p class="card-body-placeholder">"Click to edit…"</p>
+                        // ── Expanded state ─────────────────────────────────
+                        <div
+                            class="card-body-rendered"
+                            on:click=move |e: leptos::ev::MouseEvent| {
+                                e.stop_propagation();
+                                card_state.set(CardState::Editing);
                             }
                         >
-                            <MarkdownPreview body=body_signal class="card-markdown" />
-                        </Show>
-                    </div>
-                </Show>
+                            <Show
+                                when=move || !body.get().is_empty()
+                                fallback=|| view! {
+                                    <p class="card-body-placeholder">"Click to edit…"</p>
+                                }
+                            >
+                                <MarkdownPreview body=body_signal class="card-markdown" />
+                            </Show>
+                        </div>
+                    </Show>
+                </div>
 
                 // Always rendered so it doesn't shift layout when save fires.
                 <span class="card-save-status">

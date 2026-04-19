@@ -621,18 +621,32 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   color: #fff;
 }
 
-/* Rendered markdown content in the expanded card; click enters edit mode.
-   Padding, box-sizing, and min-height must match .card-body-textarea exactly
-   so the card does not shift size when toggling between view and edit. */
+/* Fixed-height wrapper — determines the card body size; children are
+   positioned absolutely inside so neither affects the wrapper's height. */
+.card-body-wrapper {
+  position: relative;
+  height: 160px;
+  margin-bottom: 2px;
+}
+
+/* Both the rendered view and the textarea fill the wrapper exactly. */
+.card-body-rendered,
+.card-body-textarea {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+/* Rendered markdown content in the expanded card; click enters edit mode. */
 .card-body-rendered {
   cursor: text;
   border: 1px solid transparent;
   border-radius: var(--radius);
   padding: 10px 12px;
-  box-sizing: border-box;
+  overflow-y: auto;
   transition: border-color 0.15s;
-  min-height: 120px;
-  width: 100%;
 }
 .card-body-rendered:hover { border-color: var(--border); }
 
@@ -675,8 +689,6 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* Textarea used for editing a card body (both inline and in the modal). */
 .card-body-textarea,
 .modal-body-textarea {
-  flex: 1;
-  min-height: 120px;
   background: var(--surface-2);
   border: 1px solid var(--accent);
   border-radius: var(--radius);
@@ -685,8 +697,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   font-size: 13px;
   line-height: 1.6;
   padding: 10px 12px;
-  resize: vertical;
-  width: 100%;
+  resize: none;
   box-sizing: border-box;
 }
 .card-body-textarea:focus,
