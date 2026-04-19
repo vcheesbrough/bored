@@ -621,13 +621,15 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   color: #fff;
 }
 
-/* Rendered markdown content in the expanded card; click enters edit mode. */
+/* Rendered markdown content in the expanded card; click enters edit mode.
+   min-height matches the textarea so the card doesn't resize on mode switch. */
 .card-body-rendered {
   cursor: text;
   border: 1px solid transparent;
   border-radius: var(--radius);
   padding: 4px 8px;
   transition: border-color 0.15s;
+  min-height: 120px;
 }
 .card-body-rendered:hover { border-color: var(--border); }
 
@@ -671,7 +673,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .card-body-textarea,
 .modal-body-textarea {
   flex: 1;
-  min-height: 0;
+  min-height: 120px;
   background: var(--surface-2);
   border: 1px solid var(--accent);
   border-radius: var(--radius);
