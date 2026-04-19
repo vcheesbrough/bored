@@ -304,6 +304,8 @@ pub fn CardItem(
 
                 // Expanded: rendered markdown body; click enters Editing.
                 // Editing: textarea with debounced auto-save.
+                // The save-status line is always rendered (empty in Expanded)
+                // so it doesn't add height when switching to Editing mode.
                 <Show
                     when=is_expanded
                     fallback=move || view! {
@@ -318,19 +320,9 @@ pub fn CardItem(
                                     exit_editing();
                                 }
                             }
-                            // Prevent the outer click handler from treating
-                            // clicks inside the textarea as a state transition.
                             on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
                             autofocus=true
                         />
-                        <span class="card-save-status">
-                            {move || match save_status.get() {
-                                SaveStatus::Idle    => "",
-                                SaveStatus::Saving  => "Saving…",
-                                SaveStatus::Saved   => "Saved",
-                                SaveStatus::Failed  => "Save failed",
-                            }}
-                        </span>
                     }
                 >
                     // ── Expanded state ─────────────────────────────────────
@@ -351,6 +343,16 @@ pub fn CardItem(
                         </Show>
                     </div>
                 </Show>
+
+                // Always rendered so it doesn't shift layout when save fires.
+                <span class="card-save-status">
+                    {move || match save_status.get() {
+                        SaveStatus::Idle    => "",
+                        SaveStatus::Saving  => "Saving…",
+                        SaveStatus::Saved   => "Saved",
+                        SaveStatus::Failed  => "Save failed",
+                    }}
+                </span>
             </Show>
 
             <ConfirmModal show=show_confirm on_confirm=on_confirmed />

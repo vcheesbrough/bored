@@ -622,14 +622,17 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 }
 
 /* Rendered markdown content in the expanded card; click enters edit mode.
-   min-height matches the textarea so the card doesn't resize on mode switch. */
+   Padding, box-sizing, and min-height must match .card-body-textarea exactly
+   so the card does not shift size when toggling between view and edit. */
 .card-body-rendered {
   cursor: text;
   border: 1px solid transparent;
   border-radius: var(--radius);
-  padding: 4px 8px;
+  padding: 10px 12px;
+  box-sizing: border-box;
   transition: border-color 0.15s;
   min-height: 120px;
+  width: 100%;
 }
 .card-body-rendered:hover { border-color: var(--border); }
 
