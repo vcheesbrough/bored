@@ -58,6 +58,9 @@ pub fn CardItem(
     // closure without making it `FnOnce`.
     let navigate = StoredValue::new(use_navigate());
 
+    // NodeRef used to programmatically focus the textarea when entering edit mode.
+    let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
+
     // ── State machine ─────────────────────────────────────────────────────
     let card_state: RwSignal<CardState> = RwSignal::new(CardState::Collapsed);
 
@@ -75,6 +78,15 @@ pub fn CardItem(
         if card_state.get_untracked() != CardState::Editing {
             body.set(c.body.clone());
             saved_body.set(c.body);
+        }
+    });
+
+    // Focus the textarea whenever the card enters editing mode.
+    Effect::new(move |_| {
+        if card_state.get() == CardState::Editing {
+            if let Some(el) = textarea_ref.get() {
+                let _ = el.focus();
+            }
         }
     });
 
@@ -302,47 +314,46 @@ pub fn CardItem(
                     >"✕"</button>
                 </div>
 
-                // Fixed-height wrapper: both the rendered div and the textarea
-                // are positioned absolutely inside it, so neither element can
-                // influence the wrapper's height and the card never shifts size.
+                // Both elements live in the DOM simultaneously, stacked in a CSS
+                // grid cell. The wrapper height = max(rendered, textarea) so the
+                // card expands with content and never shifts between modes.
+                // Whichever is inactive is hidden via visibility so it still
+                // contributes to layout but doesn't intercept pointer events.
                 <div class="card-body-wrapper">
-                    <Show
-                        when=is_expanded
-                        fallback=move || view! {
-                            // ── Editing state ──────────────────────────────
-                            <textarea
-                                class="card-body-textarea"
-                                prop:value=move || body.get()
-                                on:input=on_body_input
-                                on:blur=move |_| exit_editing()
-                                on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                    if ev.key() == "Escape" {
-                                        exit_editing();
-                                    }
-                                }
-                                on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
-                                autofocus=true
-                            />
+                    // ── Expanded state (rendered markdown) ─────────────────
+                    <div
+                        class="card-body-rendered"
+                        class:card-body-hidden=move || !is_expanded()
+                        on:click=move |e: leptos::ev::MouseEvent| {
+                            e.stop_propagation();
+                            card_state.set(CardState::Editing);
                         }
                     >
-                        // ── Expanded state ─────────────────────────────────
-                        <div
-                            class="card-body-rendered"
-                            on:click=move |e: leptos::ev::MouseEvent| {
-                                e.stop_propagation();
-                                card_state.set(CardState::Editing);
+                        <Show
+                            when=move || !body.get().is_empty()
+                            fallback=|| view! {
+                                <p class="card-body-placeholder">"Click to edit…"</p>
                             }
                         >
-                            <Show
-                                when=move || !body.get().is_empty()
-                                fallback=|| view! {
-                                    <p class="card-body-placeholder">"Click to edit…"</p>
-                                }
-                            >
-                                <MarkdownPreview body=body_signal class="card-markdown" />
-                            </Show>
-                        </div>
-                    </Show>
+                            <MarkdownPreview body=body_signal class="card-markdown" />
+                        </Show>
+                    </div>
+
+                    // ── Editing state (textarea) ────────────────────────────
+                    <textarea
+                        node_ref=textarea_ref
+                        class="card-body-textarea"
+                        class:card-body-hidden=is_expanded
+                        prop:value=move || body.get()
+                        on:input=on_body_input
+                        on:blur=move |_| exit_editing()
+                        on:keydown=move |ev: web_sys::KeyboardEvent| {
+                            if ev.key() == "Escape" {
+                                exit_editing();
+                            }
+                        }
+                        on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
+                    />
                 </div>
 
                 // Always rendered so it doesn't shift layout when save fires.
