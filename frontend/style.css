@@ -1,17 +1,19 @@
-/* Design system — zinc palette + indigo accent */
+/* Design system — UBC navy palette + indigo accent + yellow highlights */
 :root {
-  --bg:        #09090b; /* zinc-950 */
-  --surface:   #18181b; /* zinc-900 */
-  --surface-2: #27272a; /* zinc-800 */
-  --surface-3: #3f3f46; /* zinc-700 */
-  --border:    #3f3f46; /* zinc-700 */
-  --text:      #f4f4f5; /* zinc-100 */
-  --text-muted:#a1a1aa; /* zinc-400 */
-  --accent:    #6366f1; /* indigo-500 */
+  --bg:        #002145; /* UBC navy */
+  --surface:   #002d5e; /* column / panel background */
+  --surface-2: #003878; /* card items, input fields */
+  --surface-3: #004590; /* hover state */
+  --border:    #1a5299; /* subtle border */
+  --text:      #e8f3ff; /* primary text */
+  --text-muted:#6fa8db; /* muted / secondary text */
+  --accent:    #6366f1; /* indigo-500 for interactive elements */
   --accent-hover: #818cf8; /* indigo-400 */
+  --yellow:    #fbbf24; /* amber-400: card numbers, board title */
   --danger:    #ef4444; /* red-500 */
   --radius:    8px;
-  --col-min-width: 200px;
+  --col-min-width: 370px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -36,25 +38,40 @@ body {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   padding: 0 24px;
-  height: 52px;
+  height: 48px;
   display: flex;
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
+  font-family: var(--mono);
 }
 
 .navbar-brand {
   font-weight: 700;
-  font-size: 16px;
+  font-size: 15px;
   color: var(--text);
   letter-spacing: 0.02em;
   text-decoration: none;
+  font-family: var(--mono);
 }
 
 .navbar-sep {
-  color: var(--surface-3);
+  color: var(--border);
   font-size: 16px;
   user-select: none;
+  flex-shrink: 0;
+  font-family: var(--mono);
+}
+
+/* Version watermark — shown in the navbar right edge */
+.navbar-watermark {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  user-select: none;
+  pointer-events: none;
   flex-shrink: 0;
 }
 
@@ -70,9 +87,10 @@ body {
 .navbar-board-btn {
   background: transparent;
   border: none;
-  color: var(--text);
-  font-weight: 600;
+  color: var(--yellow);
+  font-weight: 700;
   font-size: 15px;
+  font-family: var(--mono);
   padding: 4px 8px;
   border-radius: var(--radius);
   cursor: pointer;
@@ -114,7 +132,7 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
   z-index: 50;
   flex-direction: column;
   overflow: hidden;
@@ -285,7 +303,7 @@ body {
 .page {
   flex: 1;
   min-height: 0;
-  padding: 32px 24px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -295,6 +313,11 @@ body {
   font-size: 22px;
   font-weight: 700;
   color: var(--text);
+}
+
+/* Board view fills the full area below the navbar — no page background visible. */
+.board-view {
+  padding: 0;
 }
 
 /* ── Boards list ─────────────────────────────────── */
@@ -405,13 +428,13 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: hidden;
+  overflow-x: auto;
 }
 
 .columns-row {
   display: flex;
-  gap: 16px;
-  padding: 4px 0 16px;
+  gap: 0;
   flex: 1;
   min-height: 0;
   align-items: stretch;
@@ -420,8 +443,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* ── Column ──────────────────────────────────────── */
 .column-view {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-right: 1px solid var(--border);
   flex: 1;
   min-width: var(--col-min-width);
   min-height: 0;
@@ -430,12 +452,14 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 }
 
 .column-header {
-  padding: 10px 10px 10px 14px;
+  padding: 8px 10px 8px 14px;
   font-weight: 700;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: var(--mono);
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   display: flex;
@@ -450,6 +474,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--yellow);
 }
 
 .add-card-btn {
@@ -473,7 +498,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 10px;
+  padding: 8px;
   overflow-y: auto;
   flex: 1;
   min-height: 0;
@@ -482,6 +507,11 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .card-list::-webkit-scrollbar { width: 4px; }
 .card-list::-webkit-scrollbar-track { background: transparent; }
 .card-list::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
+
+/* Firefox */
+.card-list { scrollbar-color: var(--surface-3) transparent; }
+
+.column-view:last-child { border-right: none; }
 
 .modal-section-label {
   font-size: 12px;
@@ -492,107 +522,313 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 /* ── Card item ───────────────────────────────────── */
 .card-item {
   background: var(--surface-2);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  padding: 14px 12px;
+  padding: 10px 12px 10px 12px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   position: relative;
+  flex-shrink: 0;
+  /* min-height equivalent to 2 lines of card preview text */
+  min-height: calc(13px * 1.5 * 2 + 20px);
 }
 
 .card-number {
   position: absolute;
   top: 6px;
   right: 8px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text-muted);
-  font-family: monospace;
+  /* Yellow card numbers per design spec */
+  color: var(--yellow);
+  font-family: var(--mono);
   letter-spacing: 0.3px;
   pointer-events: none;
   user-select: none;
 }
 
-.card-item:hover {
+.card-item:not(.card-expanded):hover {
   border-color: var(--accent);
   background: var(--surface-3);
 }
 
-/* Clipped markdown preview — shows up to ~6 lines before hiding overflow. */
-/* max-height instead of -webkit-line-clamp so block-level children (h1, p) render correctly. */
+/* Fade gradient at the bottom of collapsed cards: only rendered when in
+   collapsed state (not expanded/editing).  The gradient fades the last
+   visible line of the preview to hint that more content exists. */
+.card-item:not(.card-expanded)::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2em;
+  background: linear-gradient(to bottom, transparent, var(--surface-2));
+  border-radius: 0 0 var(--radius) var(--radius);
+  pointer-events: none;
+}
+
+/* Clipped markdown preview — default 2-line min, up to ~8 lines max before hiding. */
 .card-preview {
   font-size: 13px;
   color: var(--text);
-  max-height: calc(13px * 1.5 * 6);
+  max-height: calc(13px * 1.5 * 8);
   overflow: hidden;
   line-height: 1.5;
+  /* leave room for the card number badge in the top-right */
+  padding-right: 36px;
 }
 
-/* Suppress paragraph margin inside clamped previews so spacing stays tight. */
 .card-preview p { margin: 0; }
-.card-preview h1 { font-size: 16px; font-weight: 700; margin: 0 0 2px; line-height: 1.3; }
+.card-preview h1 { font-size: 15px; font-weight: 700; margin: 0 0 2px; line-height: 1.3; }
 .card-preview h2 { font-size: 14px; font-weight: 700; margin: 0 0 2px; line-height: 1.3; }
 .card-preview h3 { font-size: 13px; font-weight: 600; margin: 0; }
 
-/* ── Modal ───────────────────────────────────────── */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.65);
+/* ── Expanded / editing card ─────────────────────── */
+
+/* When expanded the outer cursor reverts to default (not grab). */
+.card-expanded {
+  cursor: default;
+  border-color: var(--accent) !important;
+}
+
+/* Floating panel: number badge + Win11-style buttons, sits at the top-right
+   corner of the card absolutely so body content flows underneath it. */
+.card-float-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  border-bottom-left-radius: var(--radius);
+}
+
+/* Number badge inside the floating panel — inline rather than absolute. */
+.card-float-panel .card-number {
+  position: static;
+  padding: 0 6px 0 4px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Save-state icon shown to the left of the card number in the float panel. */
+.card-save-icon {
+  font-size: 12px;
+  opacity: 0.5;
+  filter: grayscale(0.4);
+  padding-left: 10px;
+  pointer-events: none;
+  user-select: none;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* Win11-style titlebar buttons — square, borderless, icon-only.
+   Font size is slightly larger (16 px vs 14 px) while button area is unchanged. */
+.card-toolbar-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  width: 46px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  border-radius: 0;
+  padding: 0;
+  flex-shrink: 0;
+}
+.card-toolbar-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+/* Close button turns red on hover, matching Win11. */
+.card-toolbar-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+/* Grid-stack wrapper: both children occupy the same grid cell so the
+   wrapper height = max(rendered height, textarea height).  The card
+   therefore grows with content and never shifts between view/edit modes.
+   `grid-template-columns: 1fr` pins the track width to the container so
+   wide content (code blocks etc.) cannot blow out the card's border.
+   `overflow: hidden` is the final safety net against any escaping content. */
+.card-body-wrapper {
+  display: grid;
+  grid-template-columns: 1fr;
+  min-height: 120px;
+  overflow: hidden;
+}
+.card-body-rendered,
+.card-body-textarea {
+  grid-area: 1 / 1;       /* same cell — stacked */
+  min-width: 0;           /* prevents grid items from expanding the 1fr track */
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Inactive element: invisible but still occupies space in the grid cell. */
+.card-body-hidden {
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Rendered markdown content in the expanded card; click enters edit mode. */
+.card-body-rendered {
+  cursor: text;
+  border: none;
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.card-body-rendered:focus { outline: none; }
+
+/* Full markdown styling for both the expanded inline card and the modal. */
+.card-markdown,
+.modal-markdown {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.card-markdown h1, .modal-markdown h1 { font-size: 20px; font-weight: 700; margin: 0 0 8px; }
+.card-markdown h2, .modal-markdown h2 { font-size: 17px; font-weight: 600; margin: 12px 0 6px; }
+.card-markdown h3, .modal-markdown h3 { font-size: 15px; font-weight: 600; margin: 10px 0 4px; }
+.card-markdown p,  .modal-markdown p  { margin: 0 0 8px; }
+.card-markdown ul, .card-markdown ol,
+.modal-markdown ul, .modal-markdown ol { margin: 0 0 8px; padding-left: 20px; }
+.card-markdown li, .modal-markdown li { margin-bottom: 2px; }
+.card-markdown a,  .modal-markdown a  { color: var(--accent); text-decoration: underline; }
+.card-markdown code, .modal-markdown code {
+  background: var(--surface-2);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.card-markdown pre, .modal-markdown pre {
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 12px;
+  overflow-x: auto;
+}
+.card-markdown pre code, .modal-markdown pre code { background: none; padding: 0; }
+.card-markdown blockquote, .modal-markdown blockquote {
+  border-left: 3px solid var(--border);
+  margin: 0 0 8px;
+  padding-left: 12px;
+  color: var(--text-muted);
+}
+
+/* Textarea used for editing a card body (both inline and in the modal). */
+.card-body-textarea,
+.modal-body-textarea {
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  resize: none;
+  box-sizing: border-box;
+  align-self: stretch;
+}
+/* Inline card textarea: borderless — the card's own accent border signals edit mode. */
+.card-body-textarea {
+  border: none;
+}
+/* Modal textarea keeps an accent border so the edit region is visible in full-screen. */
+.modal-body-textarea {
+  border: 1px solid var(--accent);
+}
+.card-body-textarea:focus { outline: none; }
+.modal-body-textarea:focus { outline: none; border-color: var(--accent); }
+
+/* Inline card textarea: grows with its content so there is no internal
+   scrollbar — only the column's card-list scrolls. */
+.card-body-textarea {
+  field-sizing: content;
+  overflow: hidden;
+  min-height: 120px;
+}
+
+/* In the full-screen modal, the textarea should fill the body region. */
+.modal-body-textarea {
+  height: 100%;
+  resize: none;
+}
+
+/* Placeholder text shown when a card body is empty. */
+.card-body-placeholder,
+.modal-body-placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 13px;
+  margin: 0;
+}
+
+/* Small save-status indicator below the textarea. */
+.card-save-status,
+.save-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 70px;
+  display: block;
+  text-align: right;
+  margin-top: 2px;
+}
+
+/* ── Modal (full-screen maximised card view) ─────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
   z-index: 100;
-  padding: 16px;
+  display: flex;
 }
 
 .modal {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 24px;
   width: 100%;
-  max-width: 520px;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  position: relative;
+  overflow: hidden;
 }
+.modal:focus { outline: none; }
 
-.modal-header {
+/* Toolbar — Win11 titlebar layout: metadata left, buttons flush right with no gap. */
+.modal-toolbar {
   display: flex;
   align-items: center;
-  padding-right: 32px;
+  gap: 0;
+  padding: 0 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  height: 40px;
 }
 
 .modal-card-number {
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-muted);
-  font-family: monospace;
+  color: var(--yellow);
+  font-family: var(--mono);
   letter-spacing: 0.5px;
+  margin-right: auto; /* pushes buttons to the right */
 }
-
-.modal-close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  background: transparent;
-  color: var(--text-muted);
-  border: none;
-  font-size: 20px;
-  line-height: 1;
-  padding: 4px 8px;
-  cursor: pointer;
-}
-
-.modal-close:hover { color: var(--text); background: transparent; }
 
 /* ── Modal body region (rendered ↔ edit toggle) ─── */
 .modal-body-region {
-  min-height: 160px;
+  flex: 1;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  padding: 16px;
 }
 
 .modal-body-rendered {
@@ -603,77 +839,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   border: 1px solid transparent;
   transition: border-color 0.15s;
 }
-
 .modal-body-rendered:hover { border-color: var(--border); }
-
-.modal-body-placeholder {
-  color: var(--text-muted);
-  font-style: italic;
-  font-size: 14px;
-  margin: 0;
-}
-
-/* Rendered markdown inside the modal — full styling, not clamped. */
-.modal-markdown { font-size: 14px; line-height: 1.65; color: var(--text); }
-.modal-markdown h1 { font-size: 20px; font-weight: 700; margin: 0 0 8px; }
-.modal-markdown h2 { font-size: 17px; font-weight: 600; margin: 12px 0 6px; }
-.modal-markdown h3 { font-size: 15px; font-weight: 600; margin: 10px 0 4px; }
-.modal-markdown p  { margin: 0 0 8px; }
-.modal-markdown ul, .modal-markdown ol { margin: 0 0 8px; padding-left: 20px; }
-.modal-markdown li { margin-bottom: 2px; }
-.modal-markdown a  { color: var(--accent); text-decoration: underline; }
-.modal-markdown code {
-  background: var(--surface-2);
-  border-radius: 3px;
-  padding: 1px 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-}
-.modal-markdown pre {
-  background: var(--surface-2);
-  border-radius: var(--radius);
-  padding: 12px;
-  overflow-x: auto;
-}
-.modal-markdown pre code { background: none; padding: 0; }
-.modal-markdown blockquote {
-  border-left: 3px solid var(--border);
-  margin: 0 0 8px;
-  padding-left: 12px;
-  color: var(--text-muted);
-}
-
-.modal-body-textarea {
-  flex: 1;
-  min-height: 160px;
-  background: var(--surface-2);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 10px 12px;
-  resize: vertical;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.modal-body-textarea:focus { outline: none; border-color: var(--accent); }
-
-/* ── Modal footer: save status + actions ─────────── */
-.modal-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.save-status {
-  font-size: 12px;
-  color: var(--text-muted);
-  min-width: 70px;
-}
 
 .modal-actions {
   display: flex;
@@ -682,18 +848,46 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   align-items: center;
 }
 
-/* ── App watermark ───────────────────────────────── */
-.app-watermark {
+/* ── Confirm delete dialog ───────────────────────── */
+.confirm-backdrop {
   position: fixed;
-  bottom: 8px;
-  left: 10px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  color: #fff;
-  opacity: 0.5;
-  pointer-events: none;
-  user-select: none;
-  z-index: 1;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.confirm-dialog {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.confirm-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.confirm-body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 
 /* ── Loading / empty ─────────────────────────────── */
@@ -704,43 +898,32 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 /* ── Drag and drop ───────────────────────────────── */
 
-/* Column grip icon — drag handle for column reordering */
 .column-grip {
   cursor: grab;
   color: var(--text-muted);
   font-size: 14px;
+  font-family: var(--mono);
   padding: 0 4px;
   user-select: none;
   flex-shrink: 0;
 }
-.column-grip:active {
-  cursor: grabbing;
-}
+.column-grip:active { cursor: grabbing; }
 
-/* Card item gets a move cursor while it's draggable */
-.card-item[draggable="true"] {
-  cursor: grab;
-}
-.card-item[draggable="true"]:active {
-  cursor: grabbing;
-}
+/* Drag cursor only when card is in collapsed (draggable) state. */
+.card-item[draggable="true"] { cursor: grab; }
+.card-item[draggable="true"]:active { cursor: grabbing; }
 
-/* Highlight a column's card list when a card is actively dragged over it.
-   The class is toggled by on:dragover / on:dragleave / on:drop so the
-   outline only appears during an actual drag operation, not on normal hover. */
 .card-list.drag-over {
   outline: 2px dashed var(--border);
   outline-offset: -2px;
   border-radius: var(--radius);
 }
 
-/* Fills the remaining space below cards; acts as the "append to bottom" drop zone. */
 .card-list-end {
   flex: 1;
   min-height: 48px;
 }
 
-/* Ghost placeholder shown at the drop insertion point while dragging a card. */
 .card-ghost {
   min-height: 48px;
   border: 2px dashed var(--accent);
@@ -749,8 +932,4 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   pointer-events: none;
 }
 
-/* Dim the column being dragged so the user sees the original position */
-.column-view[draggable="true"]:active {
-  opacity: 0.5;
-}
-
+.column-view[draggable="true"]:active { opacity: 0.5; }

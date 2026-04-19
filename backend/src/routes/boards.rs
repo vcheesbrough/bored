@@ -69,23 +69,7 @@ pub async fn create_board(
 
     let board = board.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Seed the board with default columns (Todo, Done) so it's immediately usable.
-    for (name, position) in [("Todo", 0i32), ("Done", 1i32)] {
-        let col_id = ulid::Ulid::new().to_string().to_lowercase();
-        state
-            .db
-            .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position")
-            .bind(("id", col_id))
-            .bind(("board_id", id.clone()))
-            .bind(("name", name.to_string()))
-            .bind(("position", position))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
-
     let api_board = board.into_api();
-    // Fire-and-forget: if no SSE client is connected, the send returns Err
-    // (no receivers) — we intentionally ignore it.
     let _ = state.events.send(BroadcastEvent {
         board_id: api_board.id.clone(),
         event: BoardEvent::BoardCreated {

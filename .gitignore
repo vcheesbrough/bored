@@ -6,3 +6,4 @@
 lcov.info
 .claude/
 .playwright-mcp/
+/screenshots/
