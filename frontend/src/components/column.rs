@@ -58,9 +58,20 @@ pub fn ColumnView(
         let Some(event) = sse_event.get() else { return };
         match event {
             BoardSseEvent::CardCreated { card } if card.column_id == col_id_sse => {
-                // Append new card — it arrives at the end because the backend
-                // assigns `max_position + 1` on creation.
-                cards.update(|cs| cs.push(RwSignal::new(card)));
+                // Spawn outside the effect's reactive scope so the new signal
+                // is owned by the global arena (not the per-run effect scope).
+                // Without this, the signal would be disposed the next time the
+                // effect re-runs, causing get_untracked() panics in `retain`.
+                // Also guards against the on_card_created callback having
+                // already inserted this card (optimistic local update).
+                wasm_bindgen_futures::spawn_local(async move {
+                    cards.update(|cs| {
+                        if cs.iter().any(|s| s.get_untracked().id == card.id) {
+                            return;
+                        }
+                        cs.push(RwSignal::new(card));
+                    });
+                });
             }
             BoardSseEvent::CardUpdated { card } if card.column_id == col_id_sse => {
                 // Update the matching signal in-place so only that card re-renders.
@@ -95,11 +106,19 @@ pub fn ColumnView(
                     cards.update(|cs| cs.retain(|s| s.get_untracked().id != id));
                 } else if card.column_id == col_id_sse {
                     // This column is the destination — insert at the stated position.
+                    // Use spawn_local to create the signal outside the effect's
+                    // per-run reactive scope.  If created synchronously here the
+                    // signal would be disposed on the next SSE event, causing
+                    // get_untracked() panics in subsequent retain() calls.
                     let card = card.clone();
-                    cards.update(|cs| {
-                        // Clamp position to avoid panicking on out-of-range values.
-                        let pos = (card.position as usize).min(cs.len());
-                        cs.insert(pos, RwSignal::new(card));
+                    wasm_bindgen_futures::spawn_local(async move {
+                        cards.update(|cs| {
+                            if cs.iter().any(|s| s.get_untracked().id == card.id) {
+                                return;
+                            }
+                            let pos = (card.position as usize).min(cs.len());
+                            cs.insert(pos, RwSignal::new(card));
+                        });
                     });
                 }
             }
