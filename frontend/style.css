@@ -474,6 +474,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--yellow);
 }
 
 .add-card-btn {
