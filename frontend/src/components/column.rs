@@ -188,11 +188,10 @@ pub fn ColumnView(
         if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
             e.prevent_default();
             card_list_drag_over.set(true);
-            // Cards call stop_propagation on their own dragover, so this handler
-            // only fires when the cursor is over the card-list's own area (gaps,
-            // padding, empty space below cards).  Clear the per-card ghost target
-            // so the bottom ghost renders instead.
-            drag_over_card_id.set(None);
+            // Do NOT clear drag_over_card_id here: when the card-ghost has
+            // pointer-events:none, events over it bubble to this handler,
+            // causing a flicker loop (ghost hides → card repositions → card
+            // dragover fires → ghost shows → repeat).
         }
     };
 
@@ -387,15 +386,29 @@ pub fn ColumnView(
                         }
                     }
                 />
-                // Ghost at the bottom of the list: shown when hovering over empty
-                // column space (no card hovered) while a card drag is active.
-                <Show when=move || {
-                    drag_over_card_id.get().is_none()
-                        && card_list_drag_over.get()
-                        && matches!(drag_payload.get(), DragPayload::Card { .. })
-                }>
-                    <div class="card-ghost" />
-                </Show>
+                // End-zone: fills remaining column space and acts as the
+                // "append to bottom" drop target.  Its own dragover clears
+                // drag_over_card_id (making the ghost appear here) without
+                // touching card-level state — avoids the flicker loop that
+                // occurs when doing this in on_cardlist_dragover (which also
+                // fires while the cursor is over a card-ghost).
+                <div
+                    class="card-list-end"
+                    on:dragover=move |e: web_sys::DragEvent| {
+                        if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
+                            e.prevent_default();
+                            drag_over_card_id.set(None);
+                        }
+                    }
+                >
+                    <Show when=move || {
+                        drag_over_card_id.get().is_none()
+                            && card_list_drag_over.get()
+                            && matches!(drag_payload.get(), DragPayload::Card { .. })
+                    }>
+                        <div class="card-ghost" />
+                    </Show>
+                </div>
             </div>
 
             <CardModal
