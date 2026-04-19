@@ -586,21 +586,35 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   border-color: var(--accent) !important;
 }
 
-/* Toolbar row shown in expanded and editing states — buttons flush right, no gap. */
-.card-toolbar {
+/* Floating panel: number badge + Win11-style buttons, sits at the top-right
+   corner of the card absolutely so body content flows underneath it. */
+.card-float-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: flex;
-  gap: 0;
   align-items: center;
-  justify-content: flex-end;
-  margin-bottom: 8px;
+  gap: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  border-bottom-left-radius: var(--radius);
 }
 
-/* Win11-style titlebar buttons — square, borderless, icon-only. */
+/* Number badge inside the floating panel — inline rather than absolute. */
+.card-float-panel .card-number {
+  position: static;
+  padding: 0 6px 0 10px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Win11-style titlebar buttons — square, borderless, icon-only.
+   Font size is slightly larger (16 px vs 14 px) while button area is unchanged. */
 .card-toolbar-btn {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
   width: 46px;
   height: 32px;
   display: flex;

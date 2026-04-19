@@ -8,6 +8,12 @@ use crate::components::confirm_modal::ConfirmModal;
 use crate::components::markdown::MarkdownPreview;
 use crate::events::DragPayload;
 
+/// Newtype wrapping the board-level "which card is currently expanded" signal.
+/// Using a newtype avoids type collisions with other `RwSignal<Option<String>>`
+/// contexts (e.g. `drag_over_card_id` provided by `ColumnView`).
+#[derive(Clone, Copy)]
+pub struct ExpandedCardId(pub RwSignal<Option<String>>);
+
 /// Three-state interaction model for a card in the board column.
 ///
 /// `Collapsed` → click anywhere on card → `Expanded` (renders full markdown)
@@ -43,36 +49,29 @@ pub fn CardItem(
     on_delete: Callback<String>,
 ) -> impl IntoView {
     // ── Contexts ─────────────────────────────────────────────────────────
-    // All three are provided by `ColumnView`; accessed here without prop drilling.
     let drag_payload =
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
     let column_cards = use_context::<ColumnCards>().expect("column_cards context missing");
     let drag_over_card_id =
         use_context::<RwSignal<Option<String>>>().expect("drag_over_card_id context missing");
+    // Board-level exclusive-expand lock: at most one card open at a time.
+    let ExpandedCardId(expanded_card_id) =
+        use_context::<ExpandedCardId>().expect("ExpandedCardId context missing");
 
-    // Board ID from the URL — needed to build the maximise navigation URL.
     let params = use_params_map();
     let board_id = move || params.with(|p| p.get("id").unwrap_or_default());
-    // `NavigateFn` is not `Copy`, so wrap it in `StoredValue` (which IS Copy)
-    // so that `on_maximize_click` can be captured by the `view!` macro's `Fn`
-    // closure without making it `FnOnce`.
     let navigate = StoredValue::new(use_navigate());
 
-    // NodeRef used to programmatically focus the textarea when entering edit mode.
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
 
     // ── State machine ─────────────────────────────────────────────────────
     let card_state: RwSignal<CardState> = RwSignal::new(CardState::Collapsed);
 
-    // Local copy of the body — edited without reactively reading `card`,
-    // so saves don't cause the whole card to re-render mid-keystroke.
     let body: RwSignal<String> = RwSignal::new(card.get_untracked().body.clone());
-    // The last body value confirmed saved to the server, used for dirty detection.
     let saved_body: RwSignal<String> = RwSignal::new(card.get_untracked().body.clone());
     let save_status: RwSignal<SaveStatus> = RwSignal::new(SaveStatus::Idle);
 
-    // Sync local body from the card signal when an external SSE update arrives,
-    // but skip the sync while the user is actively typing to avoid clobbering edits.
+    // Sync local body from SSE updates while not actively editing.
     Effect::new(move |_| {
         let c = card.get();
         if card_state.get_untracked() != CardState::Editing {
@@ -81,7 +80,7 @@ pub fn CardItem(
         }
     });
 
-    // Focus the textarea whenever the card enters editing mode.
+    // Focus textarea whenever the card enters editing mode.
     Effect::new(move |_| {
         if card_state.get() == CardState::Editing {
             if let Some(el) = textarea_ref.get() {
@@ -91,14 +90,10 @@ pub fn CardItem(
     });
 
     let number = Signal::derive(move || card.get().number);
-    // Derive a read-only signal so MarkdownPreview only re-renders on body changes.
     let body_signal = Signal::derive(move || body.get());
 
     // ── Save helpers ──────────────────────────────────────────────────────
 
-    // Fires a PUT request with the given body and updates save state on completion.
-    // All captured values are `Copy` signals, so this closure is `Copy` and can be
-    // shared across multiple event handlers without explicit cloning.
     let do_save = move |card_id: String, current_body: String| {
         save_status.set(SaveStatus::Saving);
         wasm_bindgen_futures::spawn_local(async move {
@@ -111,8 +106,6 @@ pub fn CardItem(
                 Ok(updated) => {
                     saved_body.set(current_body);
                     save_status.set(SaveStatus::Saved);
-                    // Propagate the server-confirmed data back to the parent signal
-                    // so the column list stays in sync immediately (SSE also follows).
                     card.set(updated);
                 }
                 Err(e) => {
@@ -123,9 +116,6 @@ pub fn CardItem(
         });
     };
 
-    // Debounced auto-save: fires 500 ms after the user stops typing.
-    // Each keystroke schedules a future; the future bails out if the body
-    // changed again during the sleep (indicating more typing happened).
     let on_body_input = move |ev: leptos::ev::Event| {
         let new_body = event_target_value(&ev);
         body.set(new_body.clone());
@@ -135,7 +125,6 @@ pub fn CardItem(
         let card_id = card.get_untracked().id.clone();
         wasm_bindgen_futures::spawn_local(async move {
             TimeoutFuture::new(500).await;
-            // Only save if still in Editing state and no further edits occurred.
             if card_state.get_untracked() == CardState::Editing && body.get_untracked() == snapshot
             {
                 do_save(card_id, body.get_untracked());
@@ -143,8 +132,9 @@ pub fn CardItem(
         });
     };
 
-    // Flush any unsaved edit to the server and transition back to Expanded.
-    // Used on textarea blur and Escape keydown.
+    // ── Collapse helpers ──────────────────────────────────────────────────
+
+    // Flush any unsaved edit and go to Expanded (keeps the card open).
     let exit_editing = move || {
         let current = body.get_untracked();
         let last_saved = saved_body.get_untracked();
@@ -154,8 +144,9 @@ pub fn CardItem(
         card_state.set(CardState::Expanded);
     };
 
-    // Flush any unsaved edit and collapse the card back to preview mode.
-    let collapse = move || {
+    // Collapse without touching `expanded_card_id` — used when the reactive
+    // Effect below kicks in because another card claimed the expanded slot.
+    let collapse_silent = move || {
         let current = body.get_untracked();
         let last_saved = saved_body.get_untracked();
         if current != last_saved {
@@ -164,11 +155,26 @@ pub fn CardItem(
         card_state.set(CardState::Collapsed);
     };
 
+    // Full collapse: also clears the board-level expanded-card lock.
+    let collapse = move || {
+        collapse_silent();
+        expanded_card_id.set(None);
+    };
+
+    // When the board-level signal points to a different card, collapse this one.
+    Effect::new(move |_| {
+        let active = expanded_card_id.get();
+        let my_id = card.get_untracked().id.clone();
+        if active.as_deref() != Some(&my_id)
+            && card_state.get_untracked() != CardState::Collapsed
+        {
+            collapse_silent();
+        }
+    });
+
     // ── Delete / maximize ─────────────────────────────────────────────────
     let show_confirm = RwSignal::new(false);
 
-    // Clicking the ✕ button opens the confirmation modal rather than
-    // deleting immediately. The actual API call is in `on_confirmed`.
     let on_delete_click = move |e: leptos::ev::MouseEvent| {
         e.stop_propagation();
         show_confirm.set(true);
@@ -177,6 +183,7 @@ pub fn CardItem(
     let on_confirmed = Callback::new(move |_: ()| {
         let card_id = card.get_untracked().id.clone();
         let card_id_cb = card_id.clone();
+        expanded_card_id.set(None);
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::delete_card(&card_id).await {
                 Ok(()) => on_delete.run(card_id_cb),
@@ -199,16 +206,11 @@ pub fn CardItem(
     view! {
         <div
             class="card-item"
-            // CSS class drives styling for expanded/editing states.
             class:card-expanded=move || card_state.get() != CardState::Collapsed
             class:card-editing=move || card_state.get() == CardState::Editing
-            // Disable native drag-and-drop while the card is open, so the user
-            // can select text without accidentally dragging the card.
             draggable=move || if is_collapsed() { "true" } else { "false" }
 
-            // ── Drag-and-drop handlers (mirrors previous card.rs) ───────
             on:dragstart=move |_: web_sys::DragEvent| {
-                // Guard: only start a drag from collapsed state.
                 if card_state.get_untracked() != CardState::Collapsed {
                     return;
                 }
@@ -224,7 +226,6 @@ pub fn CardItem(
                     e.prevent_default();
                     e.stop_propagation();
                     let this_id = card.get_untracked().id;
-                    // Skip ghost for the card being dragged — no-op insertion.
                     if dragged_id != &this_id {
                         drag_over_card_id.set(Some(this_id));
                     }
@@ -232,18 +233,12 @@ pub fn CardItem(
             }
             on:drop=move |e: web_sys::DragEvent| {
                 e.prevent_default();
-                // Stop propagation so the card-list drop handler doesn't also
-                // fire and append the card to the bottom instead.
                 e.stop_propagation();
                 if let DragPayload::Card { card_id: dragged_id, .. } =
                     drag_payload.get_untracked()
                 {
                     let target = card.get_untracked();
                     let col_id = target.column_id.clone();
-                    // Compute the sibling-adjusted insertion index.  The target
-                    // card's visual index must be decremented when the dragged
-                    // card is in the same column and currently sits before it,
-                    // because removing it shifts all subsequent cards left by one.
                     let pos = column_cards.0.with_untracked(|cs| {
                         let target_idx = cs
                             .iter()
@@ -271,29 +266,29 @@ pub fn CardItem(
                 }
             }
 
-            // Outer click: advance Collapsed → Expanded.  Clicks within the
-            // expanded content stop propagation so they don't re-trigger this.
+            // Advance Collapsed → Expanded and claim the board-level lock.
             on:click=move |_| {
                 if card_state.get_untracked() == CardState::Collapsed {
+                    expanded_card_id.set(Some(card.get_untracked().id.clone()));
                     card_state.set(CardState::Expanded);
                 }
             }
         >
-            <span class="card-number">{move || format!("#{:03}", number.get())}</span>
-
-            // ── Collapsed: clamped preview with fade ──────────────────────
+            // ── Collapsed: absolute number badge + clamped preview ────────
             <Show when=is_collapsed>
+                <span class="card-number">{move || format!("#{:03}", number.get())}</span>
                 <MarkdownPreview body=body_signal class="card-preview" />
             </Show>
 
-            // ── Expanded or Editing ───────────────────────────────────────
+            // ── Expanded / Editing ────────────────────────────────────────
             <Show when=move || !is_collapsed()>
-                // Toolbar visible in both Expanded and Editing states.
-                // stop_propagation prevents the outer card click from firing.
+                // Floating panel: number + Win11-style buttons, absolutely
+                // positioned at the top-right so card content flows beneath.
                 <div
-                    class="card-toolbar"
+                    class="card-float-panel"
                     on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
                 >
+                    <span class="card-number">{move || format!("#{:03}", number.get())}</span>
                     <button
                         class="card-toolbar-btn"
                         title="Collapse"
@@ -314,13 +309,8 @@ pub fn CardItem(
                     >"✕"</button>
                 </div>
 
-                // Both elements live in the DOM simultaneously, stacked in a CSS
-                // grid cell. The wrapper height = max(rendered, textarea) so the
-                // card expands with content and never shifts between modes.
-                // Whichever is inactive is hidden via visibility so it still
-                // contributes to layout but doesn't intercept pointer events.
+                // Grid-stack body: rendered and textarea share one cell.
                 <div class="card-body-wrapper">
-                    // ── Expanded state (rendered markdown) ─────────────────
                     <div
                         class="card-body-rendered"
                         class:card-body-hidden=move || !is_expanded()
@@ -339,7 +329,6 @@ pub fn CardItem(
                         </Show>
                     </div>
 
-                    // ── Editing state (textarea) ────────────────────────────
                     <textarea
                         node_ref=textarea_ref
                         class="card-body-textarea"
@@ -356,7 +345,6 @@ pub fn CardItem(
                     />
                 </div>
 
-                // Always rendered so it doesn't shift layout when save fires.
                 <span class="card-save-status">
                     {move || match save_status.get() {
                         SaveStatus::Idle    => "",

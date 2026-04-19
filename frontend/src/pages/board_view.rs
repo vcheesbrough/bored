@@ -3,6 +3,7 @@ use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::prelude::*;
 
 use crate::components::board_chooser::BoardChooser;
+use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
 use crate::events::{BoardSseEvent, DragPayload};
@@ -28,10 +29,14 @@ pub fn BoardView() -> impl IntoView {
     // ── Context signals ────────────────────────────────────────────────────
     let sse_event: RwSignal<Option<BoardSseEvent>> = RwSignal::new(None);
     let drag_payload: RwSignal<DragPayload> = RwSignal::new(DragPayload::None);
+    // Tracks which card (if any) is currently expanded or editing across the
+    // whole board so that only one card can be open at a time.
+    let expanded_card_id: RwSignal<Option<String>> = RwSignal::new(None);
 
     provide_context(sse_event);
     provide_context(drag_payload);
     provide_context(columns);
+    provide_context(ExpandedCardId(expanded_card_id));
 
     // ── Maximised card overlay ─────────────────────────────────────────────
     // When the URL has `?card=<id>`, we fetch that card and show it in a
