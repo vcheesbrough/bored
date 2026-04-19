@@ -93,8 +93,8 @@ pub async fn sse_handler(
         .filter_map(|result| result.ok())
         // Serialize each event to JSON and wrap it in an SSE `Event`.
         .map(|event| {
-            let data = serde_json::to_string(&event)
-                .unwrap_or_else(|_| r#"{"type":"error"}"#.to_string());
+            let data =
+                serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"error"}"#.to_string());
             Ok::<Event, Infallible>(Event::default().data(data))
         });
 

@@ -153,9 +153,9 @@ pub async fn delete_column(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let _ = state.events.send(BoardEvent::ColumnDeleted {
-        column_id: col_id,
-    });
+    let _ = state
+        .events
+        .send(BoardEvent::ColumnDeleted { column_id: col_id });
 
     Ok(StatusCode::NO_CONTENT)
 }

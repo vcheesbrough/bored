@@ -995,5 +995,4 @@ mod tests {
         let event = rx.try_recv().expect("expected CardMoved event");
         assert!(matches!(event, events::BoardEvent::CardMoved { .. }));
     }
-
 }

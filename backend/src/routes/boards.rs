@@ -168,9 +168,7 @@ pub async fn delete_board(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let _ = state.events.send(BoardEvent::BoardDeleted {
-        board_id: id,
-    });
+    let _ = state.events.send(BoardEvent::BoardDeleted { board_id: id });
 
     Ok(StatusCode::NO_CONTENT)
 }
