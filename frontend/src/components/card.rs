@@ -74,14 +74,26 @@ pub fn CardItem(
                 {
                     let target = card.get_untracked();
                     let col_id = target.column_id.clone();
-                    // Look up this card's current index in the column at the
-                    // moment of the drop — avoids stale positional data from
-                    // the card signal itself (positions of other cards may have
-                    // shifted since the last SSE update).
+                    // Compute the insertion index for the backend's siblings list
+                    // (which excludes the dragged card).  The target card's visual
+                    // index must be adjusted by -1 when the dragged card is in the
+                    // same column AND currently sits before the target — removing it
+                    // shifts everything after it left by one slot.
                     let pos = column_cards.0.with_untracked(|cs| {
-                        cs.iter()
+                        let target_idx = cs
+                            .iter()
                             .position(|s| s.get_untracked().id == target.id)
-                            .unwrap_or(0) as i32
+                            .unwrap_or(0);
+                        let drag_before_target = cs
+                            .iter()
+                            .position(|s| s.get_untracked().id == dragged_id)
+                            .map(|di| di < target_idx)
+                            .unwrap_or(false);
+                        if drag_before_target {
+                            (target_idx - 1) as i32
+                        } else {
+                            target_idx as i32
+                        }
                     });
                     wasm_bindgen_futures::spawn_local(async move {
                         if let Err(err) =
