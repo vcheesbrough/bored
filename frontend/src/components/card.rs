@@ -22,9 +22,10 @@ pub fn CardItem(
     // can resolve our own current index at drop time without prop-drilling.
     let column_cards = use_context::<ColumnCards>().expect("column_cards context missing");
 
-    // Derive a reactive body signal so `MarkdownPreview` re-renders after
-    // the card is edited in the modal.
+    // Derive reactive signals so each derived view re-renders only when its
+    // specific field changes, not on every card update.
     let body = Signal::derive(move || card.get().body);
+    let number = Signal::derive(move || card.get().number);
 
     view! {
         <div
@@ -86,6 +87,7 @@ pub fn CardItem(
             }
             on:click=move |_| on_click.run(card.get_untracked())
         >
+            <span class="card-number">{move || format!("#{:03}", number.get())}</span>
             <MarkdownPreview body=body class="card-preview" />
         </div>
     }

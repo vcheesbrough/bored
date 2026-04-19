@@ -148,6 +148,11 @@ pub fn CardModal(
             <div class="modal-backdrop" on:click=move |_| flush_and_close()>
                 <div class="modal" on:click=|ev| ev.stop_propagation()>
                     <button class="modal-close" on:click=move |_| flush_and_close()>"×"</button>
+                    <div class="modal-header">
+                        <span class="modal-card-number">
+                            {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
+                        </span>
+                    </div>
 
                     // Body region: switches between rendered markdown and a raw textarea.
                     // Both occupy the same layout box so the modal doesn't jump.

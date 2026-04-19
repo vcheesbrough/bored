@@ -49,6 +49,7 @@ pub struct DbCard {
     pub column: Thing,
     pub body: String,
     pub position: i32,
+    pub number: i32,
     pub created_at: surrealdb::sql::Datetime,
     pub updated_at: surrealdb::sql::Datetime,
 }
@@ -60,8 +61,15 @@ impl DbCard {
             column_id: self.column.id.to_raw(),
             body: self.body,
             position: self.position,
+            number: self.number as u32,
             created_at: self.created_at.to_string(),
             updated_at: self.updated_at.to_string(),
         }
     }
+}
+
+/// Minimal projection used only when incrementing the card counter.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DbCardCounter {
+    pub count: i32,
 }

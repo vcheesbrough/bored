@@ -12,11 +12,6 @@
 //     `.serve()` directly without a separate impl block.
 
 use rmcp::{
-    // `ErrorData` is the MCP error envelope; we alias it for brevity.
-    ErrorData as McpError,
-    // `ServerHandler` is the trait we implement to wire the server into the
-    // MCP runtime; `tool_handler` is the macro that fills in the boilerplate.
-    ServerHandler,
     // `Parameters<T>` is a newtype wrapper used by the tool macro to
     // deserialise the incoming JSON params into a typed struct.
     handler::server::wrapper::Parameters,
@@ -24,7 +19,14 @@ use rmcp::{
     // protocol types; `ServerCapabilities` configures what the server exposes.
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     schemars,
-    tool, tool_handler, tool_router,
+    tool,
+    tool_handler,
+    tool_router,
+    // `ErrorData` is the MCP error envelope; we alias it for brevity.
+    ErrorData as McpError,
+    // `ServerHandler` is the trait we implement to wire the server into the
+    // MCP runtime; `tool_handler` is the macro that fills in the boilerplate.
+    ServerHandler,
 };
 use serde::Deserialize;
 
@@ -121,11 +123,7 @@ impl BoredMcp {
 // Convert any Display error into an MCP internal-error envelope.
 // JSON-RPC internal error code is -32603.
 fn mcp_err(e: impl std::fmt::Display) -> McpError {
-    McpError::new(
-        rmcp::model::ErrorCode(-32603),
-        e.to_string(),
-        None,
-    )
+    McpError::new(rmcp::model::ErrorCode(-32603), e.to_string(), None)
 }
 
 // Assert that the HTTP response is 2xx, otherwise surface the status and body
@@ -165,23 +163,33 @@ async fn json_text(resp: reqwest::Response) -> Result<CallToolResult, McpError> 
 impl BoredMcp {
     // ── Boards ────────────────────────────────────────────────────────────────
 
-    #[tool(description = "List all boards. Returns a JSON array of board objects with id, name, created_at, updated_at.")]
+    #[tool(
+        description = "List all boards. Returns a JSON array of board objects with id, name, created_at, updated_at."
+    )]
     async fn list_boards(&self) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(self.api("boards"))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
-    #[tool(description = "Create a new board with the given name. Returns the created board object including its id.")]
+    #[tool(
+        description = "Create a new board with the given name. Returns the created board object including its id."
+    )]
     async fn create_board(
         &self,
         Parameters(CreateBoardParams { name }): Parameters<CreateBoardParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.api("boards"))
             .json(&serde_json::json!({ "name": name }))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
@@ -190,37 +198,52 @@ impl BoredMcp {
         &self,
         Parameters(BoardIdParams { board_id }): Parameters<BoardIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .delete(self.api(&format!("boards/{board_id}")))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         require_ok(resp).await?;
-        Ok(CallToolResult::success(vec![Content::text("Board deleted.")]))
+        Ok(CallToolResult::success(vec![Content::text(
+            "Board deleted.",
+        )]))
     }
 
     // ── Columns ───────────────────────────────────────────────────────────────
 
-    #[tool(description = "List all columns in a board, ordered by position. Returns a JSON array with id, board_id, name, position.")]
+    #[tool(
+        description = "List all columns in a board, ordered by position. Returns a JSON array with id, board_id, name, position."
+    )]
     async fn list_columns(
         &self,
         Parameters(BoardIdParams { board_id }): Parameters<BoardIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(self.api(&format!("boards/{board_id}/columns")))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
-    #[tool(description = "Create a new column at the end of a board. Returns the created column object including its id.")]
+    #[tool(
+        description = "Create a new column at the end of a board. Returns the created column object including its id."
+    )]
     async fn create_column(
         &self,
         Parameters(CreateColumnParams { board_id, name }): Parameters<CreateColumnParams>,
     ) -> Result<CallToolResult, McpError> {
         // Use a large position so the new column always appends to the end
         // rather than requiring the caller to track current column count.
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.api(&format!("boards/{board_id}/columns")))
             .json(&serde_json::json!({ "name": name, "position": 99999 }))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
@@ -229,70 +252,104 @@ impl BoredMcp {
         &self,
         Parameters(ColumnIdParams { column_id }): Parameters<ColumnIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .delete(self.api(&format!("columns/{column_id}")))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         require_ok(resp).await?;
-        Ok(CallToolResult::success(vec![Content::text("Column deleted.")]))
+        Ok(CallToolResult::success(vec![Content::text(
+            "Column deleted.",
+        )]))
     }
 
     // ── Cards ─────────────────────────────────────────────────────────────────
 
-    #[tool(description = "List all cards in a column, ordered by position. Returns a JSON array with id, column_id, body, position.")]
+    #[tool(
+        description = "List all cards in a column, ordered by position. Returns a JSON array with id, column_id, body, position."
+    )]
     async fn list_cards(
         &self,
         Parameters(ColumnIdParams { column_id }): Parameters<ColumnIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(self.api(&format!("columns/{column_id}/cards")))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
-    #[tool(description = "Get the full details of a single card by id, including its complete markdown body.")]
+    #[tool(
+        description = "Get the full details of a single card by id, including its complete markdown body."
+    )]
     async fn get_card(
         &self,
         Parameters(CardIdParams { card_id }): Parameters<CardIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(self.api(&format!("cards/{card_id}")))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
-    #[tool(description = "Create a new card with a markdown body in a column. Returns the created card object including its id.")]
+    #[tool(
+        description = "Create a new card with a markdown body in a column. Returns the created card object including its id."
+    )]
     async fn create_card(
         &self,
         Parameters(CreateCardParams { column_id, body }): Parameters<CreateCardParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.api(&format!("columns/{column_id}/cards")))
             .json(&serde_json::json!({ "body": body }))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
-    #[tool(description = "Update the markdown body of an existing card. Returns the updated card object.")]
+    #[tool(
+        description = "Update the markdown body of an existing card. Returns the updated card object."
+    )]
     async fn update_card(
         &self,
         Parameters(UpdateCardParams { card_id, body }): Parameters<UpdateCardParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .put(self.api(&format!("cards/{card_id}")))
             .json(&serde_json::json!({ "body": body }))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
-    #[tool(description = "Move a card to a different column and/or position. Position is 0-based (0 = top of column). Returns the updated card.")]
+    #[tool(
+        description = "Move a card to a different column and/or position. Position is 0-based (0 = top of column). Returns the updated card."
+    )]
     async fn move_card(
         &self,
-        Parameters(MoveCardParams { card_id, column_id, position }): Parameters<MoveCardParams>,
+        Parameters(MoveCardParams {
+            card_id,
+            column_id,
+            position,
+        }): Parameters<MoveCardParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.api(&format!("cards/{card_id}/move")))
             .json(&serde_json::json!({ "column_id": column_id, "position": position }))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         json_text(require_ok(resp).await?).await
     }
 
@@ -301,11 +358,16 @@ impl BoredMcp {
         &self,
         Parameters(CardIdParams { card_id }): Parameters<CardIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self.client
+        let resp = self
+            .client
             .delete(self.api(&format!("cards/{card_id}")))
-            .send().await.map_err(mcp_err)?;
+            .send()
+            .await
+            .map_err(mcp_err)?;
         require_ok(resp).await?;
-        Ok(CallToolResult::success(vec![Content::text("Card deleted.")]))
+        Ok(CallToolResult::success(vec![Content::text(
+            "Card deleted.",
+        )]))
     }
 }
 

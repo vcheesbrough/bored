@@ -31,8 +31,8 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let base_url = std::env::var("BORED_API_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let base_url =
+        std::env::var("BORED_API_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
     tracing::info!(base_url, "bored MCP server starting");
 
