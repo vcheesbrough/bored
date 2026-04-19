@@ -25,10 +25,15 @@ pub fn ColumnView(
     // Drives the CSS `.drag-over` class so the outline only appears during an
     // actual drag, not on ordinary mouse hover.
     let card_list_drag_over = RwSignal::new(false);
+    // The card ID currently being hovered over during a drag.  `CardItem`
+    // children write to this so the column can render a ghost placeholder
+    // in the right position without any prop drilling.
+    let drag_over_card_id: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Expose this column's cards signal to `CardItem` children so they can
     // resolve their own index at drop time without needing it as a prop.
     provide_context(ColumnCards(cards));
+    provide_context(drag_over_card_id);
 
     // ── Context ────────────────────────────────────────────────────────────
     // These signals are provided by `BoardView` via `provide_context`.
@@ -188,17 +193,19 @@ pub fn ColumnView(
         }
     };
 
-    // Clear the outline when the drag leaves this card list without dropping.
+    // Clear the outline and ghost when the drag leaves this card list.
     let on_cardlist_dragleave = move |_: web_sys::DragEvent| {
         card_list_drag_over.set(false);
+        drag_over_card_id.set(None);
     };
 
     let on_cardlist_drop = {
         let col_id = col_id_card_drop.clone();
         move |e: web_sys::DragEvent| {
             e.prevent_default();
-            // Clear outline regardless of whether the payload is valid.
+            // Clear outline and ghost regardless of whether the payload is valid.
             card_list_drag_over.set(false);
+            drag_over_card_id.set(None);
             // Move is only valid when a card is in flight.
             if let DragPayload::Card {
                 card_id,
@@ -345,9 +352,32 @@ pub fn ColumnView(
                     key=|sig| sig.get_untracked().id.clone()
                     children={
                         let on_card_click = on_card_click.clone();
-                        move |sig| view! { <CardItem card=sig on_click=on_card_click.clone() /> }
+                        move |sig| {
+                            // Capture the card ID at render time for the reactive ghost check.
+                            let card_id = sig.get_untracked().id.clone();
+                            view! {
+                                // Ghost placeholder shown immediately before the card being
+                                // hovered over, giving a live preview of the drop position.
+                                <Show when=move || {
+                                    drag_over_card_id.get().as_deref() == Some(card_id.as_str())
+                                        && matches!(drag_payload.get(), DragPayload::Card { .. })
+                                }>
+                                    <div class="card-ghost" />
+                                </Show>
+                                <CardItem card=sig on_click=on_card_click.clone() />
+                            }
+                        }
                     }
                 />
+                // Ghost at the bottom of the list: shown when hovering over empty
+                // column space (no card hovered) while a card drag is active.
+                <Show when=move || {
+                    drag_over_card_id.get().is_none()
+                        && card_list_drag_over.get()
+                        && matches!(drag_payload.get(), DragPayload::Card { .. })
+                }>
+                    <div class="card-ghost" />
+                </Show>
             </div>
 
             <CardModal

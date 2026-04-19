@@ -3,10 +3,131 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use surrealdb::{engine::local::Db, Surreal};
 
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::AppState;
+
+/// Gap between adjacent card positions in the sparse ordering scheme.
+/// Large enough to allow ~10 bisections between any two cards before a rebalance
+/// is needed, while fitting comfortably within i32.
+const POSITION_GAP: i32 = 1024;
+
+/// Given the sorted card list for a column (with the moving card excluded),
+/// compute the sparse position value for inserting at `idx`.
+/// Uses sentinels: 0 at the top edge, last_pos + 2*GAP at the bottom edge.
+fn midpoint_position(col_cards: &[DbCard], idx: usize) -> i32 {
+    let left = if idx == 0 {
+        0
+    } else {
+        col_cards[idx - 1].position
+    };
+    let right = if idx >= col_cards.len() {
+        col_cards
+            .last()
+            .map(|c| c.position)
+            .unwrap_or(0)
+            + 2 * POSITION_GAP
+    } else {
+        col_cards[idx].position
+    };
+    (left + right) / 2
+}
+
+/// Returns true when the candidate position is not strictly between its
+/// left and right neighbours — meaning the gap is exhausted and we must
+/// rebalance before inserting.
+fn needs_rebalance(col_cards: &[DbCard], idx: usize, new_pos: i32) -> bool {
+    let left = if idx == 0 {
+        0
+    } else {
+        col_cards[idx - 1].position
+    };
+    // Bottom edge: any positive value above `left` is always valid.
+    let right = if idx >= col_cards.len() {
+        i32::MAX
+    } else {
+        col_cards[idx].position
+    };
+    new_pos <= left || new_pos >= right
+}
+
+/// Reassign every card in `col_id` to evenly-spaced positions (GAP, 2*GAP, …).
+/// Called only when the gap between two neighbouring cards drops to zero,
+/// which happens after ~10 consecutive insertions at the same slot.
+async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<(), surrealdb::Error> {
+    let cards: Vec<DbCard> = db
+        .query(
+            "SELECT * FROM cards \
+             WHERE column = type::thing('columns', $col_id) \
+             ORDER BY position ASC",
+        )
+        .bind(("col_id", col_id.to_string()))
+        .await?
+        .take(0)?;
+
+    for (i, card) in cards.iter().enumerate() {
+        // Start at GAP (not 0) so there is always room above the first card
+        // for a top insert without immediately triggering another rebalance.
+        db.query("UPDATE type::thing('cards', $id) SET position = $pos")
+            .bind(("id", card.id.id.to_raw()))
+            .bind(("pos", (i as i32 + 1) * POSITION_GAP))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Compute a single sparse position value for moving `card_id` to index
+/// `target_index` within `col_id`.  Only the moved card is ever written;
+/// no other cards are modified in the happy path.
+async fn compute_sparse_position(
+    db: &Surreal<Db>,
+    card_id: &str,
+    col_id: &str,
+    target_index: i32,
+) -> Result<i32, surrealdb::Error> {
+    // Fetch sibling cards (the moving card excluded) so we see the column
+    // as it will look after the move.
+    let col_cards: Vec<DbCard> = db
+        .query(
+            "SELECT * FROM cards \
+             WHERE column = type::thing('columns', $col_id) \
+               AND id != type::thing('cards', $card_id) \
+             ORDER BY position ASC",
+        )
+        .bind(("col_id", col_id.to_string()))
+        .bind(("card_id", card_id.to_string()))
+        .await?
+        .take(0)?;
+
+    let idx = (target_index as usize).min(col_cards.len());
+    let new_pos = midpoint_position(&col_cards, idx);
+
+    if needs_rebalance(&col_cards, idx, new_pos) {
+        // Gap exhausted — renumber the column then recompute.  After a
+        // rebalance every gap is exactly POSITION_GAP, so the second
+        // midpoint_position call is guaranteed to succeed.
+        rebalance_column(db, col_id).await?;
+
+        let col_cards: Vec<DbCard> = db
+            .query(
+                "SELECT * FROM cards \
+                 WHERE column = type::thing('columns', $col_id) \
+                   AND id != type::thing('cards', $card_id) \
+                 ORDER BY position ASC",
+            )
+            .bind(("col_id", col_id.to_string()))
+            .bind(("card_id", card_id.to_string()))
+            .await?
+            .take(0)?;
+
+        let idx = (target_index as usize).min(col_cards.len());
+        return Ok(midpoint_position(&col_cards, idx));
+    }
+
+    Ok(new_pos)
+}
 
 pub async fn list_cards(
     State(state): State<AppState>,
@@ -100,12 +221,13 @@ pub async fn create_card(
              column = type::thing('columns', $col_id), \
              body = $body, \
              number = $number, \
-             position = (array::max((SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id))) ?? -1) + 1",
+             position = (array::max((SELECT VALUE position FROM cards WHERE column = type::thing('columns', $col_id))) ?? 0) + $gap",
         )
         .bind(("id", id))
         .bind(("col_id", col_id))
         .bind(("body", payload.body))
         .bind(("number", card_number))
+        .bind(("gap", POSITION_GAP))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -318,12 +440,23 @@ pub async fn move_card(
         }
     }
 
+    // Compute a sparse position so only this one card needs to be written.
+    // Other cards in the column are unchanged in the happy path; a rebalance
+    // is triggered automatically when the gap between neighbours is exhausted.
+    let new_pos =
+        compute_sparse_position(&state.db, &card_id, &payload.column_id, payload.position)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let card: Option<DbCard> = state
         .db
-        .query("UPDATE type::thing('cards', $card_id) SET column = type::thing('columns', $col_id), position = $position")
-        .bind(("card_id", card_id))
-        .bind(("col_id", payload.column_id))
-        .bind(("position", payload.position))
+        .query(
+            "UPDATE type::thing('cards', $card_id) \
+             SET column = type::thing('columns', $col_id), position = $position",
+        )
+        .bind(("card_id", card_id.clone()))
+        .bind(("col_id", payload.column_id.clone()))
+        .bind(("position", new_pos))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)

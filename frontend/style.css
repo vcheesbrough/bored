@@ -734,6 +734,15 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   border-radius: var(--radius);
 }
 
+/* Ghost placeholder shown at the drop insertion point while dragging a card. */
+.card-ghost {
+  min-height: 48px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+}
+
 /* Dim the column being dragged so the user sees the original position */
 .column-view[draggable="true"]:active {
   opacity: 0.5;
