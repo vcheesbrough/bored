@@ -185,14 +185,16 @@ pub async fn reorder_columns(
     }
 
     // Update each column's position to its index in the supplied order.
-    // We do this sequentially to keep error handling simple; for large boards a
-    // batch query would be faster but this is unlikely to be a bottleneck.
+    // The WHERE clause scopes the update to this board, so a foreign column ID
+    // silently no-ops (matches zero rows) rather than mutating another board's
+    // state — preventing cross-board IDOR writes.
     for (index, col_id) in payload.order.iter().enumerate() {
         state
             .db
-            .query("UPDATE type::thing('columns', $id) SET position = $pos")
+            .query("UPDATE type::thing('columns', $id) SET position = $pos WHERE board = type::thing('boards', $board_id)")
             .bind(("id", col_id.clone()))
             .bind(("pos", index as i32))
+            .bind(("board_id", board_id.clone()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }

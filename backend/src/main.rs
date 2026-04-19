@@ -927,6 +927,70 @@ mod tests {
         assert_eq!(reordered[2].position, 2);
     }
 
+    // Verifies that reorder_columns ignores column IDs that belong to a
+    // different board, preventing cross-board IDOR position writes.
+    #[tokio::test]
+    async fn reorder_columns_rejects_foreign_column_ids() {
+        let server = test_app().await;
+
+        // Board A — we will try to tamper with its column from board B's endpoint.
+        let board_a: shared::Board = server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "Board A".to_string(),
+            })
+            .await
+            .json();
+
+        let cols_a: Vec<shared::Column> = server
+            .get(&format!("/api/boards/{}/columns", board_a.id))
+            .await
+            .json();
+        let col_a_todo = cols_a.iter().find(|c| c.name == "Todo").unwrap();
+        let original_position = col_a_todo.position;
+
+        // Board B — the attacker's board. Submit board A's column ID in the order.
+        let board_b: shared::Board = server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "Board B".to_string(),
+            })
+            .await
+            .json();
+
+        let cols_b: Vec<shared::Column> = server
+            .get(&format!("/api/boards/{}/columns", board_b.id))
+            .await
+            .json();
+        let col_b_todo = cols_b.iter().find(|c| c.name == "Todo").unwrap();
+        let col_b_done = cols_b.iter().find(|c| c.name == "Done").unwrap();
+
+        // Inject board A's column into board B's reorder request.
+        // The WHERE board = … clause should make this a no-op for col_a_todo.
+        let resp = server
+            .put(&format!("/api/boards/{}/columns/reorder", board_b.id))
+            .json(&shared::ColumnsReorderRequest {
+                order: vec![
+                    col_b_done.id.clone(),
+                    col_a_todo.id.clone(), // foreign — must be ignored
+                    col_b_todo.id.clone(),
+                ],
+            })
+            .await;
+        resp.assert_status_ok();
+
+        // Board A's column must still have its original position.
+        let cols_a_after: Vec<shared::Column> = server
+            .get(&format!("/api/boards/{}/columns", board_a.id))
+            .await
+            .json();
+        let col_a_todo_after = cols_a_after.iter().find(|c| c.name == "Todo").unwrap();
+        assert_eq!(
+            col_a_todo_after.position, original_position,
+            "foreign column position must be unchanged after cross-board reorder"
+        );
+    }
+
     // Verifies that mutation routes emit the expected SSE events. We subscribe
     // to the broadcast channel before performing a mutation and check that the
     // correct event arrives with the right payload.
