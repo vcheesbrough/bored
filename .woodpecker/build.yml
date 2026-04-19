@@ -19,7 +19,7 @@ steps:
     commands:
       - |
         REPORT=/srv/dev/playwright-reports/pipeline-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml up --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
         REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
