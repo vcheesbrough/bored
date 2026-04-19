@@ -5,10 +5,7 @@ use leptos::prelude::*;
 /// Set `show` to `true` to open it. `on_confirm` fires only if the user
 /// clicks "Delete"; clicking "Cancel" or the backdrop dismisses without action.
 #[component]
-pub fn ConfirmModal(
-    show: RwSignal<bool>,
-    on_confirm: Callback<()>,
-) -> impl IntoView {
+pub fn ConfirmModal(show: RwSignal<bool>, on_confirm: Callback<()>) -> impl IntoView {
     let cancel = move || show.set(false);
 
     view! {
