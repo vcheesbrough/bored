@@ -36,7 +36,7 @@ body {
 /* ── Navbar ─────────────────────────────────────── */
 .navbar {
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--yellow);
   padding: 0 24px;
   height: 48px;
   display: flex;
