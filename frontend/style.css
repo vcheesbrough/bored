@@ -505,12 +505,10 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 .card-list::-webkit-scrollbar { width: 4px; }
 .card-list::-webkit-scrollbar-track { background: transparent; }
-.card-list::-webkit-scrollbar-thumb { background: transparent; border-radius: 2px; }
-.column-view:hover .card-list::-webkit-scrollbar-thumb { background: var(--surface-3); }
+.card-list::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
 
 /* Firefox */
-.card-list { scrollbar-color: transparent transparent; }
-.column-view:hover .card-list { scrollbar-color: var(--surface-3) transparent; }
+.card-list { scrollbar-color: var(--surface-3) transparent; }
 
 .column-view:last-child { border-right: none; }
 
