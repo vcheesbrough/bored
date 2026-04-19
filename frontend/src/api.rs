@@ -104,10 +104,7 @@ pub async fn fetch_cards(column_id: &str) -> Result<Vec<shared::Card>, gloo_net:
         .await
 }
 
-pub async fn create_card(
-    column_id: &str,
-    body: String,
-) -> Result<shared::Card, gloo_net::Error> {
+pub async fn create_card(column_id: &str, body: String) -> Result<shared::Card, gloo_net::Error> {
     Request::post(&format!("/api/columns/{column_id}/cards"))
         .json(&shared::CreateCardRequest { body })?
         .send()
@@ -140,6 +137,23 @@ pub async fn delete_card(card_id: &str) -> Result<(), gloo_net::Error> {
             resp.status()
         )))
     }
+}
+
+/// `PUT /api/boards/:id/columns/reorder`
+///
+/// Sends the complete desired column order; the server reassigns every
+/// `position` field and returns the updated sorted list. The caller should
+/// apply the returned list to keep local state in sync.
+pub async fn reorder_columns(
+    board_id: &str,
+    order: Vec<String>,
+) -> Result<Vec<shared::Column>, gloo_net::Error> {
+    Request::put(&format!("/api/boards/{board_id}/columns/reorder"))
+        .json(&shared::ColumnsReorderRequest { order })?
+        .send()
+        .await?
+        .json::<Vec<shared::Column>>()
+        .await
 }
 
 pub async fn move_card(

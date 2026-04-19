@@ -6,9 +6,17 @@ when:
 
 steps:
   review:
-    image: registry.desync.link/claude-pr-agent:85d140f@sha256:2c65e71034001d344312b879f5218e0f6cd7a6af0a466ba93bf3deaef1948049
+    image: registry.desync.link/claude-pr-agent:4beb5aa@sha256:c738c93047bdb4f3903712f645ca928d06a97a1def06582fefb09804af7e3bb8
     pull: true
     environment:
+      # Git 2.35+ rejects directories owned by a different user than the
+      # running process. The clone step and review container run as different
+      # UIDs on the same shared workspace volume, triggering the check.
+      # These three vars configure git (via env) to trust any directory,
+      # bypassing the ownership check without touching ~/.gitconfig.
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
       CLAUDE_CODE_OAUTH_TOKEN:
         from_secret: claude_oauth_token
       PR_REVIEWER_GH_APP_ID:

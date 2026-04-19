@@ -544,11 +544,12 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "axum-server",
  "axum-test",
+ "futures-util",
  "rustls",
  "serde",
  "serde_json",
@@ -557,6 +558,7 @@ dependencies = [
  "surrealdb",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
@@ -1492,16 +1494,19 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
  "leptos",
  "leptos_router",
  "pulldown-cmark",
+ "serde",
  "serde_json",
  "shared",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -2811,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -4788,7 +4793,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]
@@ -5492,6 +5497,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
