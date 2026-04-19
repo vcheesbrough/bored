@@ -30,13 +30,17 @@ REMOVE FIELD IF EXISTS description ON TABLE cards;
 -- The single record card_counter:global holds the current high-water mark.
 DEFINE TABLE IF NOT EXISTS card_counter SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS count ON TABLE card_counter TYPE int DEFAULT 0;
--- Seed the counter record on first run; preserve existing count on re-runs.
--- `count ?? 0` returns 0 when the field is NONE (new record), existing value otherwise.
-UPSERT card_counter:global SET count = count ?? 0;
+-- Seed the counter only on first run; leave it untouched on restarts.
+-- SELECT returns an empty array when the record doesn't exist yet.
+LET $ctr_exists = (SELECT id FROM card_counter:global);
+IF array::len($ctr_exists) = 0 {
+    CREATE card_counter:global CONTENT { count: 0 };
+};
 
 -- Migration: assign sequential numbers (ordered by created_at) to any cards
--- that still have number = 0. Idempotent — numbered cards are skipped.
-FOR $card IN (SELECT id, created_at FROM cards WHERE number = 0 ORDER BY created_at ASC) {
+-- that have no number yet (NONE from before this field existed) or number = 0.
+-- Idempotent — cards with number > 0 are skipped.
+FOR $card IN (SELECT id, created_at FROM cards WHERE number IS NONE OR number = 0 ORDER BY created_at ASC) {
     LET $ctr = (UPDATE card_counter:global SET count += 1 RETURN AFTER)[0];
     UPDATE $card.id SET number = $ctr.count;
 };
