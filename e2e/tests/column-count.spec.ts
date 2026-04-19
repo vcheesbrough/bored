@@ -62,7 +62,7 @@ test.describe('column card count badge', () => {
 
   test('badge updates in second browser context via SSE', async ({ browser, request }) => {
     const board = await apiCreateBoard(request, `Count Badge SSE ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Col');
+    await apiCreateColumn(request, board.id, 'Col');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
     const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);

@@ -479,7 +479,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 .card-count-badge {
   flex-shrink: 0;
-  background: var(--bg-card);
+  background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--text-muted);
   font-size: 10px;
