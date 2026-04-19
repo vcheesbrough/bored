@@ -17,7 +17,7 @@ enum SaveStatus {
 ///   rendered view → click body → textarea (auto-save) → blur/Escape → rendered
 ///
 /// The toolbar mirrors the inline card toolbar:
-///   [#number]  [↓ Minimise]  [Delete]
+///   [#number]  [🗗 restore]  [Delete]
 ///
 /// `on_close` is called after flushing any pending edits so the caller can
 /// navigate away (e.g. remove the `?card=` query parameter from the URL).
@@ -170,7 +170,7 @@ pub fn CardModal(
                             class="card-toolbar-btn"
                             title="Return to board"
                             on:click=move |_| flush_and_close()
-                        >"↓ Minimise"</button>
+                        >"🗗"</button>
                         <button
                             class="card-toolbar-btn btn-danger"
                             on:click=on_delete_click

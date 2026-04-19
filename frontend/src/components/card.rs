@@ -285,7 +285,7 @@ pub fn CardItem(
                         class="card-toolbar-btn"
                         title="Maximise"
                         on:click=on_maximize_click
-                    >"⤢ Maximise"</button>
+                    >"🗖"</button>
                     <button
                         class="card-toolbar-btn card-toolbar-delete btn-danger"
                         on:click=on_delete_click
