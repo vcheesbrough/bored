@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 
+use crate::events::BoardEvent;
 use crate::models::{DbCard, DbColumn};
 use crate::routes::boards::AppState;
 
@@ -94,7 +95,13 @@ pub async fn create_card(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match card {
-        Some(c) => Ok((StatusCode::CREATED, Json(c.into_api()))),
+        Some(c) => {
+            let api_card = c.into_api();
+            let _ = state.events.send(BoardEvent::CardCreated {
+                card: api_card.clone(),
+            });
+            Ok((StatusCode::CREATED, Json(api_card)))
+        }
         None => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -190,7 +197,13 @@ pub async fn update_card(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match card {
-        Some(c) => Ok(Json(c.into_api())),
+        Some(c) => {
+            let api_card = c.into_api();
+            let _ = state.events.send(BoardEvent::CardUpdated {
+                card: api_card.clone(),
+            });
+            Ok(Json(api_card))
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -205,7 +218,12 @@ pub async fn delete_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        Some(_) => Ok(StatusCode::NO_CONTENT),
+        Some(_) => {
+            let _ = state.events.send(BoardEvent::CardDeleted {
+                card_id: card_id.clone(),
+            });
+            Ok(StatusCode::NO_CONTENT)
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -244,6 +262,10 @@ pub async fn move_card(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Capture the source column ID before the update so the event tells
+    // subscribers which column to remove the card from.
+    let from_column_id = existing.column.id.to_raw();
+
     if let Some(current_col) = current_col {
         if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -262,7 +284,14 @@ pub async fn move_card(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match card {
-        Some(c) => Ok(Json(c.into_api())),
+        Some(c) => {
+            let api_card = c.into_api();
+            let _ = state.events.send(BoardEvent::CardMoved {
+                card: api_card.clone(),
+                from_column_id,
+            });
+            Ok(Json(api_card))
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }

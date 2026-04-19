@@ -1,6 +1,7 @@
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
 // These are private by default; the route handlers are reached via `routes::boards::...`.
 mod db;
+mod events;
 mod models;
 mod observability;
 mod routes;
@@ -92,6 +93,8 @@ pub async fn app(state: AppState) -> Router {
     // Axum resolves routes in registration order for the same path+method pair,
     // but here each path+method combination is unique.
     let api = Router::new()
+        // SSE stream — clients subscribe here to receive real-time board events.
+        .route("/events", get(events::sse_handler))
         .route("/boards", get(routes::boards::list_boards))
         .route("/boards", post(routes::boards::create_board))
         .route("/boards/:id", get(routes::boards::get_board))
@@ -99,6 +102,11 @@ pub async fn app(state: AppState) -> Router {
         .route("/boards/:id", delete(routes::boards::delete_board))
         .route("/boards/:id/columns", get(routes::columns::list_columns))
         .route("/boards/:id/columns", post(routes::columns::create_column))
+        // Bulk reorder: PUT replaces the entire column order in one round-trip.
+        .route(
+            "/boards/:id/columns/reorder",
+            put(routes::columns::reorder_columns),
+        )
         .route("/columns/:id", put(routes::columns::update_column))
         .route("/columns/:id", delete(routes::columns::delete_column))
         .route("/columns/:id/cards", get(routes::cards::list_cards))
@@ -151,7 +159,7 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
-    let state = AppState { db };
+    let state = AppState::new(db);
 
     // Check for TLS certificate/key paths in environment variables.
     // If both are present, serve HTTPS on port 443.
@@ -215,7 +223,7 @@ mod tests {
     // Called at the start of each test that needs a server.
     async fn test_app() -> TestServer {
         let db = db::connect_mem().await.expect("failed to connect mem db");
-        let state = AppState { db };
+        let state = AppState::new(db);
         let router = app(state).await;
         TestServer::new(router).unwrap()
     }
@@ -865,4 +873,127 @@ mod tests {
         let resp = server.get("/api/nonexistent").await;
         resp.assert_status(StatusCode::NOT_FOUND);
     }
+
+    // Verifies that reorder_columns assigns positions matching the supplied order
+    // and returns the columns sorted by their new positions.
+    #[tokio::test]
+    async fn reorder_columns_assigns_positions() {
+        let server = test_app().await;
+
+        let board: shared::Board = server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "Reorder Board".to_string(),
+            })
+            .await
+            .json();
+
+        // Add a third column alongside the two default ones (Todo, Done).
+        let col_c: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.id))
+            .json(&shared::CreateColumnRequest {
+                name: "In Progress".to_string(),
+                position: 2,
+            })
+            .await
+            .json();
+
+        let cols: Vec<shared::Column> = server
+            .get(&format!("/api/boards/{}/columns", board.id))
+            .await
+            .json();
+
+        // Capture the auto-seeded column IDs.
+        let col_todo = cols.iter().find(|c| c.name == "Todo").unwrap().id.clone();
+        let col_done = cols.iter().find(|c| c.name == "Done").unwrap().id.clone();
+        let col_ip = col_c.id.clone();
+
+        // Reorder to: In Progress, Todo, Done.
+        let reorder_resp = server
+            .put(&format!("/api/boards/{}/columns/reorder", board.id))
+            .json(&shared::ColumnsReorderRequest {
+                order: vec![col_ip.clone(), col_todo.clone(), col_done.clone()],
+            })
+            .await;
+        reorder_resp.assert_status_ok();
+
+        let reordered: Vec<shared::Column> = reorder_resp.json();
+        assert_eq!(reordered.len(), 3);
+        assert_eq!(reordered[0].id, col_ip);
+        assert_eq!(reordered[0].position, 0);
+        assert_eq!(reordered[1].id, col_todo);
+        assert_eq!(reordered[1].position, 1);
+        assert_eq!(reordered[2].id, col_done);
+        assert_eq!(reordered[2].position, 2);
+    }
+
+    // Verifies that mutation routes emit the expected SSE events. We subscribe
+    // to the broadcast channel before performing a mutation and check that the
+    // correct event arrives with the right payload.
+    #[tokio::test]
+    async fn mutations_emit_sse_events() {
+        let db = db::connect_mem().await.expect("failed to connect mem db");
+        let state = AppState::new(db);
+        // Subscribe *before* making requests so we don't miss any events.
+        let mut rx = state.events.subscribe();
+
+        let server = TestServer::new(app(state).await).unwrap();
+
+        // CREATE board → BoardCreated
+        let board: shared::Board = server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "Event Board".to_string(),
+            })
+            .await
+            .json();
+
+        let event = rx.try_recv().expect("expected BoardCreated event");
+        assert!(matches!(event, events::BoardEvent::BoardCreated { .. }));
+
+        // CREATE column → ColumnCreated
+        let col: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.id))
+            .json(&shared::CreateColumnRequest {
+                name: "Col".to_string(),
+                position: 2,
+            })
+            .await
+            .json();
+
+        let event = rx.try_recv().expect("expected ColumnCreated event");
+        assert!(matches!(event, events::BoardEvent::ColumnCreated { .. }));
+
+        // CREATE card → CardCreated
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", col.id))
+            .json(&shared::CreateCardRequest {
+                body: "hello".to_string(),
+            })
+            .await
+            .json();
+
+        let event = rx.try_recv().expect("expected CardCreated event");
+        assert!(matches!(event, events::BoardEvent::CardCreated { .. }));
+
+        // MOVE card → CardMoved
+        let cols: Vec<shared::Column> = server
+            .get(&format!("/api/boards/{}/columns", board.id))
+            .await
+            .json();
+        let other_col = cols.iter().find(|c| c.id != col.id).unwrap();
+
+        server
+            .post(&format!("/api/cards/{}/move", card.id))
+            .json(&shared::MoveCardRequest {
+                column_id: other_col.id.clone(),
+                position: 0,
+            })
+            .await
+            .assert_status_ok();
+
+        let event = rx.try_recv().expect("expected CardMoved event");
+        assert!(matches!(event, events::BoardEvent::CardMoved { .. }));
+    }
+
 }

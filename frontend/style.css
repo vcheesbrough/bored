@@ -674,3 +674,38 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   font-size: 13px;
 }
 
+/* ── Drag and drop ───────────────────────────────── */
+
+/* Column grip icon — drag handle for column reordering */
+.column-grip {
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 0 4px;
+  user-select: none;
+  flex-shrink: 0;
+}
+.column-grip:active {
+  cursor: grabbing;
+}
+
+/* Card item gets a move cursor while it's draggable */
+.card-item[draggable="true"] {
+  cursor: grab;
+}
+.card-item[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Highlight a column's card list when a card is dragged over it */
+.card-list:hover {
+  outline: 2px dashed var(--border);
+  outline-offset: -2px;
+  border-radius: var(--radius);
+}
+
+/* Dim the column being dragged so the user sees the original position */
+.column-view[draggable="true"]:active {
+  opacity: 0.5;
+}
+

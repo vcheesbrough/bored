@@ -3,35 +3,46 @@ use leptos::prelude::*;
 use crate::components::add_card_modal::AddCardModal;
 use crate::components::card::CardItem;
 use crate::components::card_modal::CardModal;
+use crate::events::{BoardSseEvent, DragPayload};
 
 #[component]
 pub fn ColumnView(
-    // `RwSignal<shared::Column>` lets `BoardChooser` rename this column and have
-    // the new name appear here instantly — both components share the same signal.
+    // `RwSignal<shared::Column>` lets `BoardChooser` rename this column and
+    // have the updated name appear in the header instantly.
     column: RwSignal<shared::Column>,
 ) -> impl IntoView {
-    // Each card is also wrapped in an `RwSignal` so that saving edits in the
-    // modal updates the card title in the list without a full re-fetch.
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
-
-    // `None` means no card is open in the modal; `Some(card)` opens the modal for that card.
     let selected_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
-    let show_add = RwSignal::new(false); // controls whether the add-card modal is visible
+    let show_add = RwSignal::new(false);
 
-    // Read the column's initial data once, outside of any reactive context.
-    // `get_untracked` avoids subscribing — the column ID and name are stable.
+    // ── Context ────────────────────────────────────────────────────────────
+    // These signals are provided by `BoardView` via `provide_context`.
+    let sse_event = use_context::<RwSignal<Option<BoardSseEvent>>>()
+        .expect("sse_event context missing");
+    let drag_payload = use_context::<RwSignal<DragPayload>>()
+        .expect("drag_payload context missing");
+    let columns_ctx = use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>()
+        .expect("columns context missing");
+
+    // ── Static column metadata ─────────────────────────────────────────────
+    // Read once, untracked — the column ID and board ID don't change over the
+    // lifetime of this component instance.
     let initial = column.get_untracked();
     let col_id = initial.id.clone();
-    // Clone the ID a second time for the fetch closure — the first clone is moved
-    // into the effect, and the second is passed to `AddCardModal`.
-    let col_id_for_fetch = col_id.clone();
+    let board_id = initial.board_id.clone();
+    // Extra clones for closures that each need ownership of `col_id`.
+    let col_id_fetch = col_id.clone();
+    let col_id_sse = col_id.clone();
+    let col_id_card_drop = col_id.clone();
+    let col_id_col_drop = col_id.clone();
+    let col_id_dragstart = col_id.clone();
+    let col_id_for_modal = col_id.clone();
+
     let col_name_for_modal = initial.name.clone();
 
-    // Fetch this column's cards once on mount. The `|_|` effect argument is the
-    // previous run's return value; we ignore it here because this effect only
-    // runs once (none of the signals inside it are read, so no re-runs).
+    // ── Initial card fetch ─────────────────────────────────────────────────
     Effect::new(move |_| {
-        let id = col_id_for_fetch.clone();
+        let id = col_id_fetch.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::fetch_cards(&id).await {
                 Ok(fetched) => cards.set(fetched.into_iter().map(RwSignal::new).collect()),
@@ -40,41 +51,220 @@ pub fn ColumnView(
         });
     });
 
-    // `Callback<T>` is a wrapper around a closure that is `Copy` (cheaply cloneable).
-    // Unlike a plain `move` closure, a `Callback` can be stored in multiple places
-    // without needing separate clones for each event handler.
-    let on_card_click = Callback::new(move |card: shared::Card| {
-        selected_card.set(Some(card)); // open the modal with this card
+    // ── SSE card events ────────────────────────────────────────────────────
+    // This effect re-runs every time `sse_event` changes. We filter for events
+    // that affect this column and ignore the rest.
+    Effect::new(move |_| {
+        let Some(event) = sse_event.get() else { return };
+        match event {
+            BoardSseEvent::CardCreated { card } if card.column_id == col_id_sse => {
+                // Append new card — it arrives at the end because the backend
+                // assigns `max_position + 1` on creation.
+                cards.update(|cs| cs.push(RwSignal::new(card)));
+            }
+            BoardSseEvent::CardUpdated { card } if card.column_id == col_id_sse => {
+                // Update the matching signal in-place so only that card re-renders.
+                cards.with_untracked(|cs| {
+                    if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == card.id) {
+                        sig.set(card);
+                    }
+                });
+            }
+            BoardSseEvent::CardDeleted { card_id } => {
+                // We don't know the column from the event; check if the card is ours.
+                let owned = cards.with_untracked(|cs| {
+                    cs.iter().any(|s| s.get_untracked().id == card_id)
+                });
+                if owned {
+                    cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
+                    // Close modal if the deleted card was open.
+                    if selected_card
+                        .with_untracked(|sc| sc.as_ref().map(|c| c.id == card_id).unwrap_or(false))
+                    {
+                        selected_card.set(None);
+                    }
+                }
+            }
+            BoardSseEvent::CardMoved {
+                ref card,
+                ref from_column_id,
+            } => {
+                if *from_column_id == col_id_sse {
+                    // This column is the source — remove the card.
+                    let id = card.id.clone();
+                    cards.update(|cs| cs.retain(|s| s.get_untracked().id != id));
+                } else if card.column_id == col_id_sse {
+                    // This column is the destination — insert at the stated position.
+                    let card = card.clone();
+                    cards.update(|cs| {
+                        // Clamp position to avoid panicking on out-of-range values.
+                        let pos = (card.position as usize).min(cs.len());
+                        cs.insert(pos, RwSignal::new(card));
+                    });
+                }
+            }
+            _ => {}
+        }
     });
 
-    // Called by `CardModal` after a successful save — updates the card in the list.
+    // ── Manual card callbacks (from modal) ─────────────────────────────────
+    let on_card_click = Callback::new(move |card: shared::Card| {
+        selected_card.set(Some(card));
+    });
+
     let on_card_updated = Callback::new(move |updated: shared::Card| {
-        // `with_untracked` reads the signal without subscribing.
-        // We iterate to find the matching signal and update it in place.
         cards.with_untracked(|cs| {
             if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == updated.id) {
-                sig.set(updated); // updating this inner signal re-renders just that card
+                sig.set(updated);
             }
         });
     });
 
-    // Called by `CardModal` after a successful delete — removes the card from the list.
     let on_card_delete = Callback::new(move |card_id: String| {
-        // `.retain(|s| ...)` keeps only elements for which the closure returns `true`.
         cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
-        selected_card.set(None); // close the modal
+        selected_card.set(None);
     });
 
-    // Called by `AddCardModal` after a successful create — appends the new card.
     let on_card_created = Callback::new(move |card: shared::Card| {
         cards.update(|cs| cs.push(RwSignal::new(card)));
     });
 
+    // ── Drag-and-drop: card drop onto this column ──────────────────────────
+    // When a card is dragged over this card list, prevent the browser's default
+    // "no-drop" behavior so the drop event can fire.
+    let on_cardlist_dragover = move |e: web_sys::DragEvent| {
+        if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
+            // `prevent_default()` on dragover is required to enable dropping.
+            e.prevent_default();
+        }
+    };
+
+    let on_cardlist_drop = {
+        let col_id = col_id_card_drop.clone();
+        move |e: web_sys::DragEvent| {
+            e.prevent_default();
+            // Move is only valid when a card is in flight.
+            if let DragPayload::Card {
+                card_id,
+                from_column_id: _,
+            } = drag_payload.get_untracked()
+            {
+                // Append to the bottom of the column (position = current length).
+                let target_col = col_id.clone();
+                let position = cards.with_untracked(|cs| cs.len() as i32);
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(err) =
+                        crate::api::move_card(&card_id, target_col, position).await
+                    {
+                        leptos::logging::error!("move_card failed: {err}");
+                    }
+                    // The SSE CardMoved event updates the UI for all clients.
+                });
+                drag_payload.set(DragPayload::None);
+            }
+        }
+    };
+
+    // ── Drag-and-drop: column reorder via drop onto column ─────────────────
+    let on_col_dragover = move |e: web_sys::DragEvent| {
+        if matches!(drag_payload.get_untracked(), DragPayload::Column { .. }) {
+            e.prevent_default();
+        }
+    };
+
+    let on_col_drop = {
+        let target_id = col_id_col_drop.clone();
+        let board_id = board_id.clone();
+        move |e: web_sys::DragEvent| {
+            e.prevent_default();
+            if let DragPayload::Column {
+                column_id: dragged_id,
+            } = drag_payload.get_untracked()
+            {
+                // Dropping a column onto itself is a no-op.
+                if dragged_id == target_id {
+                    drag_payload.set(DragPayload::None);
+                    return;
+                }
+
+                // Compute new order: move `dragged_id` to just before `target_id`.
+                let new_order: Vec<String> = columns_ctx.with_untracked(|cs| {
+                    let mut ids: Vec<String> =
+                        cs.iter().map(|s| s.get_untracked().id.clone()).collect();
+                    if let Some(drag_idx) = ids.iter().position(|id| *id == dragged_id) {
+                        if let Some(tgt_idx) = ids.iter().position(|id| *id == target_id) {
+                            ids.remove(drag_idx);
+                            // After removal, the target may have shifted left by 1.
+                            let insert_at = if drag_idx < tgt_idx {
+                                tgt_idx - 1
+                            } else {
+                                tgt_idx
+                            };
+                            ids.insert(insert_at, dragged_id.clone());
+                        }
+                    }
+                    ids
+                });
+
+                // Optimistically reorder the local signals so the UI updates
+                // immediately, before the round-trip and SSE event arrive.
+                columns_ctx.update(|cs| {
+                    if let Some(drag_idx) =
+                        cs.iter().position(|s| s.get_untracked().id == dragged_id)
+                    {
+                        if let Some(tgt_idx) =
+                            cs.iter().position(|s| s.get_untracked().id == target_id)
+                        {
+                            let removed = cs.remove(drag_idx);
+                            let insert_at =
+                                if drag_idx < tgt_idx { tgt_idx - 1 } else { tgt_idx };
+                            cs.insert(insert_at, removed);
+                        }
+                    }
+                });
+
+                let bid = board_id.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(err) = crate::api::reorder_columns(&bid, new_order).await {
+                        leptos::logging::error!("reorder_columns failed: {err}");
+                    }
+                    // The SSE ColumnsReordered event will sync any other clients.
+                });
+                drag_payload.set(DragPayload::None);
+            }
+        }
+    };
+
     view! {
-        <div class="column-view">
+        // The outer div handles column-level drops (for column reordering).
+        <div
+            class="column-view"
+            on:dragover=on_col_dragover
+            on:drop=on_col_drop
+        >
             <div class="column-header">
-                // `move || column.get().name.clone()` reads `column` reactively —
-                // if the chooser renames the column, this text updates automatically.
+                // Grip icon — draggable to trigger column reordering.
+                // Only the grip is draggable, not the whole header, so that
+                // clicking the column name or the add-card button still works.
+                <span
+                    class="column-grip"
+                    title="Drag to reorder"
+                    draggable="true"
+                    on:dragstart=move |_: web_sys::DragEvent| {
+                        drag_payload.set(DragPayload::Column {
+                            column_id: col_id_dragstart.clone(),
+                        });
+                    }
+                    // Stop propagation so the column-level dragover doesn't
+                    // fire while the user is initiating a column drag.
+                    on:dragend=move |_: web_sys::DragEvent| {
+                        // Reset drag state if the user drops outside a valid target.
+                        if drag_payload.get_untracked() != DragPayload::None {
+                            drag_payload.set(DragPayload::None);
+                        }
+                    }
+                >"⠿"</span>
+
                 <span class="column-name">{move || column.get().name.clone()}</span>
                 <button
                     class="add-card-btn"
@@ -83,9 +273,12 @@ pub fn ColumnView(
                 >"+"</button>
             </div>
 
-            <div class="card-list">
-                // Keyed list — each card is identified by its ID so Leptos can
-                // add/remove/reorder individual cards efficiently.
+            // Card list — accepts card drops from any column.
+            <div
+                class="card-list"
+                on:dragover=on_cardlist_dragover
+                on:drop=on_cardlist_drop
+            >
                 <For
                     each=move || cards.get()
                     key=|sig| sig.get_untracked().id.clone()
@@ -96,11 +289,13 @@ pub fn ColumnView(
                 />
             </div>
 
-            // Both modals are always mounted but hidden when not in use.
-            // `CardModal` watches `selected_card` and shows itself when it's `Some`.
-            <CardModal card=selected_card on_updated=on_card_updated on_delete=on_card_delete />
+            <CardModal
+                card=selected_card
+                on_updated=on_card_updated
+                on_delete=on_card_delete
+            />
             <AddCardModal
-                column_id=col_id
+                column_id=col_id_for_modal
                 column_name=col_name_for_modal
                 show=show_add
                 on_created=on_card_created

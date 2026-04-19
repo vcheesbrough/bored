@@ -73,3 +73,13 @@ pub struct AppInfo {
     pub version: String,
     pub env: String,
 }
+
+/// Body of `PUT /api/boards/:id/columns/reorder`.
+/// The server assigns `position = index` for each column ID in the list,
+/// allowing the client to express a complete ordering in one round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnsReorderRequest {
+    /// Full ordered list of column IDs for the board. Every column must be
+    /// present; missing IDs are silently skipped (no partial reorder).
+    pub order: Vec<String>,
+}

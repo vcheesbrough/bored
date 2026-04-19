@@ -1,7 +1,8 @@
-// Declare the three submodules that make up the frontend crate.
+// Declare the submodules that make up the frontend crate.
 // Rust looks for each in `src/<name>/mod.rs` or `src/<name>.rs`.
 mod api;        // HTTP fetch wrappers (one function per backend endpoint)
 mod components; // Reusable UI components (column, card, modals, chooser)
+mod events;     // SSE event types + drag-and-drop payload enum
 mod pages;      // Top-level page components (Home, BoardView)
 
 use leptos::prelude::*;
