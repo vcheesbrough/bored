@@ -179,13 +179,21 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
 
     // ── Drag-and-drop: card drop onto this column ──────────────────────────
     let on_cardlist_dragover = move |e: web_sys::DragEvent| {
-        if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
-            e.prevent_default();
-            card_list_drag_over.set(true);
-            // Do NOT clear drag_over_card_id here: when the card-ghost has
-            // pointer-events:none, events over it bubble to this handler,
-            // causing a flicker loop (ghost hides → card repositions → card
-            // dragover fires → ghost shows → repeat).
+        match drag_payload.get_untracked() {
+            DragPayload::Card { .. } => {
+                e.prevent_default();
+                card_list_drag_over.set(true);
+                // Do NOT clear drag_over_card_id here: when the card-ghost has
+                // pointer-events:none, events over it bubble to this handler,
+                // causing a flicker loop (ghost hides → card repositions → card
+                // dragover fires → ghost shows → repeat).
+            }
+            DragPayload::Column { .. } => {
+                // Accept the drag so the full column area is a valid drop zone;
+                // the drop event bubbles up to .column-view which handles the reorder.
+                e.prevent_default();
+            }
+            DragPayload::None => {}
         }
     };
 

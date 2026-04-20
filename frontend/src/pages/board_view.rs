@@ -268,12 +268,30 @@ pub fn BoardView() -> impl IntoView {
                         let col_id = sig.get_untracked().id.clone();
                         view! {
                             // Ghost placeholder shown before the hovered column while
-                            // a column drag is in progress.
+                            // a column drag is in progress.  Shows the dragged column's
+                            // name so the user knows what they are repositioning.
                             <Show when=move || {
                                 drag_over_col_id.get().as_deref() == Some(col_id.as_str())
                                     && matches!(drag_payload.get(), DragPayload::Column { .. })
                             }>
-                                <div class="column-ghost" />
+                                <div class="column-ghost">
+                                    <span class="column-ghost-name">
+                                        {move || {
+                                            if let DragPayload::Column { column_id: ref id } =
+                                                drag_payload.get()
+                                            {
+                                                columns
+                                                    .get()
+                                                    .iter()
+                                                    .find(|s| s.get_untracked().id == *id)
+                                                    .map(|s| s.get_untracked().name.clone())
+                                                    .unwrap_or_default()
+                                            } else {
+                                                String::new()
+                                            }
+                                        }}
+                                    </span>
+                                </div>
                             </Show>
                             <ColumnView column=sig />
                         }
