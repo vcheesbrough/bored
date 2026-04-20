@@ -153,8 +153,17 @@ pub fn BoardView() -> impl IntoView {
                     if is_reconnect {
                         // Reconnected after a drop — reload if version changed.
                         let stored = iv.borrow().clone();
-                        if stored.map(|v| v != info.version).unwrap_or(false) {
-                            let _ = leptos::prelude::window().location().reload();
+                        match stored {
+                            // Baseline was never stored (initial fetch failed); log
+                            // so the silent miss is visible in production diagnostics.
+                            None => leptos::logging::warn!(
+                                "auto-reload: baseline version unknown (initial fetch failed); \
+                                 skipping reload check"
+                            ),
+                            Some(baseline) if baseline != info.version => {
+                                let _ = leptos::prelude::window().location().reload();
+                            }
+                            Some(_) => {}
                         }
                     } else {
                         // First open — record baseline version.

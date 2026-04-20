@@ -26,7 +26,7 @@ test.describe('Drag-over outline cleanup', () => {
   test('no drag-over outline remains after cross-column card drop', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `Ghost Cleanup Board ${Date.now()}`);
     const col1 = await apiCreateColumn(request, board.id, 'Source', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Target', 1);
+    await apiCreateColumn(request, board.id, 'Target', 1);
     await apiCreateCard(request, col1.id, 'Drag me');
     await gotoBoardView(page, board.id);
 
@@ -128,8 +128,13 @@ test.describe('Auto-reload on deployment', () => {
 
     await gotoBoardView(page, board.id);
 
-    // Wait for initial onopen to fire and store the baseline version.
-    await page.waitForTimeout(1000);
+    // Wait until the EventSource is OPEN (readyState 1), then give the
+    // spawn_local fetch_app_info task a tick to store the baseline version.
+    await page.waitForFunction(
+      () => (window as any).__esInstances?.[0]?.readyState === 1,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(200);
 
     // From here, /api/info returns a different version (simulating a new deploy).
     await page.route('/api/info', (route) =>
@@ -173,7 +178,13 @@ test.describe('Auto-reload on deployment', () => {
     });
 
     await gotoBoardView(page, board.id);
-    await page.waitForTimeout(1000);
+
+    // Wait until the EventSource is OPEN, then give the baseline fetch a tick.
+    await page.waitForFunction(
+      () => (window as any).__esInstances?.[0]?.readyState === 1,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(200);
 
     // /api/info continues to return the SAME version — no reload expected.
     let navigated = false;
