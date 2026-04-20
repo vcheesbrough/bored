@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 
 use crate::components::card::CardItem;
-use crate::events::{BoardSseEvent, DragPayload};
+use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -36,6 +36,12 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
     let columns_ctx =
         use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>().expect("columns context missing");
+    // Tracks which column a dragged column is hovering over (drives ghost).
+    // DragOverColId wrapper avoids colliding with the bare RwSignal<Option<String>>
+    // that ColumnView itself provides as drag_over_card_id context.
+    let drag_over_col_id = use_context::<DragOverColId>()
+        .expect("drag_over_col_id context missing")
+        .0;
 
     // ── Static column metadata ─────────────────────────────────────────────
     let initial = column.get_untracked();
@@ -47,6 +53,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let col_id_col_drop = col_id.clone();
     let col_id_dragstart = col_id.clone();
     let col_id_for_modal = col_id.clone();
+    let col_id_dragover = col_id.clone();
 
     // ── Initial card fetch ─────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -172,13 +179,21 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
 
     // ── Drag-and-drop: card drop onto this column ──────────────────────────
     let on_cardlist_dragover = move |e: web_sys::DragEvent| {
-        if matches!(drag_payload.get_untracked(), DragPayload::Card { .. }) {
-            e.prevent_default();
-            card_list_drag_over.set(true);
-            // Do NOT clear drag_over_card_id here: when the card-ghost has
-            // pointer-events:none, events over it bubble to this handler,
-            // causing a flicker loop (ghost hides → card repositions → card
-            // dragover fires → ghost shows → repeat).
+        match drag_payload.get_untracked() {
+            DragPayload::Card { .. } => {
+                e.prevent_default();
+                card_list_drag_over.set(true);
+                // Do NOT clear drag_over_card_id here: when the card-ghost has
+                // pointer-events:none, events over it bubble to this handler,
+                // causing a flicker loop (ghost hides → card repositions → card
+                // dragover fires → ghost shows → repeat).
+            }
+            DragPayload::Column { .. } => {
+                // Accept the drag so the full column area is a valid drop zone;
+                // the drop event bubbles up to .column-view which handles the reorder.
+                e.prevent_default();
+            }
+            DragPayload::None => {}
         }
     };
 
@@ -251,6 +266,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let on_col_dragover = move |e: web_sys::DragEvent| {
         if matches!(drag_payload.get_untracked(), DragPayload::Column { .. }) {
             e.prevent_default();
+            // Track which column the dragged column is hovering over so the
+            // ghost placeholder can appear before it.
+            drag_over_col_id.set(Some(col_id_dragover.clone()));
         }
     };
 
@@ -307,6 +325,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                     }
                 });
                 drag_payload.set(DragPayload::None);
+                drag_over_col_id.set(None);
             }
         }
     };
@@ -331,6 +350,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                         if drag_payload.get_untracked() != DragPayload::None {
                             drag_payload.set(DragPayload::None);
                         }
+                        drag_over_col_id.set(None);
                     }
                 >"⠿"</span>
                 <span class="column-name">{move || column.get().name.clone()}</span>
@@ -360,7 +380,11 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
 
             <div
                 class="card-list"
-                class:drag-over=move || card_list_drag_over.get()
+                class:drag-over=move || {
+                    // Only show outline while a drag is actually active; clears
+                    // automatically when drag_payload returns to None (dragend).
+                    card_list_drag_over.get() && drag_payload.get() != DragPayload::None
+                }
                 on:dragover=on_cardlist_dragover
                 on:dragleave=on_cardlist_dragleave
                 on:drop=on_cardlist_drop
