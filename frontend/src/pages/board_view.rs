@@ -6,7 +6,7 @@ use crate::components::board_chooser::BoardChooser;
 use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
-use crate::events::{BoardSseEvent, DragPayload};
+use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
 #[component]
 pub fn BoardView() -> impl IntoView {
@@ -40,7 +40,9 @@ pub fn BoardView() -> impl IntoView {
     provide_context(drag_payload);
     provide_context(columns);
     provide_context(ExpandedCardId(expanded_card_id));
-    provide_context(drag_over_col_id);
+    // Wrapped in DragOverColId so use_context in ColumnView retrieves the
+    // correct signal even after ColumnView provides its own RwSignal<Option<String>>.
+    provide_context(DragOverColId(drag_over_col_id));
 
     // ── Maximised card overlay ─────────────────────────────────────────────
     // When the URL has `?card=<id>`, we fetch that card and show it in a

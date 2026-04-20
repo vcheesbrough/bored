@@ -7,6 +7,7 @@
 // `DragPayload` is stored in a context `RwSignal` so any component in the
 // tree can read the drag state without passing it down through props.
 
+use leptos::prelude::RwSignal;
 use serde::Deserialize;
 
 /// A typed representation of every JSON event the backend pushes over SSE.
@@ -67,6 +68,13 @@ pub enum BoardSseEvent {
         board_id: String,
     },
 }
+
+/// Newtype wrapper for the column-drag hover signal so it cannot be confused
+/// with `RwSignal<Option<String>>` signals like `drag_over_card_id`.
+/// Provided by `BoardView`, consumed by `ColumnView` drag handlers and by the
+/// column-ghost `Show` condition in `board_view.rs`.
+#[derive(Clone, Copy)]
+pub struct DragOverColId(pub RwSignal<Option<String>>);
 
 /// What is currently being dragged — stored in a context `RwSignal` provided
 /// by `BoardView` so every component in the tree can read it without prop

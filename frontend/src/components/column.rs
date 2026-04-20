@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 
 use crate::components::card::CardItem;
-use crate::events::{BoardSseEvent, DragPayload};
+use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -37,8 +37,11 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let columns_ctx =
         use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>().expect("columns context missing");
     // Tracks which column a dragged column is hovering over (drives ghost).
-    let drag_over_col_id =
-        use_context::<RwSignal<Option<String>>>().expect("drag_over_col_id context missing");
+    // DragOverColId wrapper avoids colliding with the bare RwSignal<Option<String>>
+    // that ColumnView itself provides as drag_over_card_id context.
+    let drag_over_col_id = use_context::<DragOverColId>()
+        .expect("drag_over_col_id context missing")
+        .0;
 
     // ── Static column metadata ─────────────────────────────────────────────
     let initial = column.get_untracked();
