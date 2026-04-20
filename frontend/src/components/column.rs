@@ -36,6 +36,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
     let columns_ctx =
         use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>().expect("columns context missing");
+    // Tracks which column a dragged column is hovering over (drives ghost).
+    let drag_over_col_id =
+        use_context::<RwSignal<Option<String>>>().expect("drag_over_col_id context missing");
 
     // ── Static column metadata ─────────────────────────────────────────────
     let initial = column.get_untracked();
@@ -47,6 +50,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let col_id_col_drop = col_id.clone();
     let col_id_dragstart = col_id.clone();
     let col_id_for_modal = col_id.clone();
+    let col_id_dragover = col_id.clone();
 
     // ── Initial card fetch ─────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -251,6 +255,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let on_col_dragover = move |e: web_sys::DragEvent| {
         if matches!(drag_payload.get_untracked(), DragPayload::Column { .. }) {
             e.prevent_default();
+            // Track which column the dragged column is hovering over so the
+            // ghost placeholder can appear before it.
+            drag_over_col_id.set(Some(col_id_dragover.clone()));
         }
     };
 
@@ -307,6 +314,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                     }
                 });
                 drag_payload.set(DragPayload::None);
+                drag_over_col_id.set(None);
             }
         }
     };
@@ -331,6 +339,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                         if drag_payload.get_untracked() != DragPayload::None {
                             drag_payload.set(DragPayload::None);
                         }
+                        drag_over_col_id.set(None);
                     }
                 >"⠿"</span>
                 <span class="column-name">{move || column.get().name.clone()}</span>
@@ -360,7 +369,11 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
 
             <div
                 class="card-list"
-                class:drag-over=move || card_list_drag_over.get()
+                class:drag-over=move || {
+                    // Only show outline while a drag is actually active; clears
+                    // automatically when drag_payload returns to None (dragend).
+                    card_list_drag_over.get() && drag_payload.get() != DragPayload::None
+                }
                 on:dragover=on_cardlist_dragover
                 on:dragleave=on_cardlist_dragleave
                 on:drop=on_cardlist_drop

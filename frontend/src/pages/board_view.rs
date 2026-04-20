@@ -32,11 +32,15 @@ pub fn BoardView() -> impl IntoView {
     // Tracks which card (if any) is currently expanded or editing across the
     // whole board so that only one card can be open at a time.
     let expanded_card_id: RwSignal<Option<String>> = RwSignal::new(None);
+    // Tracks which column ID (if any) a dragged column is currently hovering
+    // over, driving the narrow ghost placeholder shown before that column.
+    let drag_over_col_id: RwSignal<Option<String>> = RwSignal::new(None);
 
     provide_context(sse_event);
     provide_context(drag_payload);
     provide_context(columns);
     provide_context(ExpandedCardId(expanded_card_id));
+    provide_context(drag_over_col_id);
 
     // ── Maximised card overlay ─────────────────────────────────────────────
     // When the URL has `?card=<id>`, we fetch that card and show it in a
@@ -123,6 +127,51 @@ pub fn BoardView() -> impl IntoView {
             });
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+
+        // ── Deployment-triggered reload via SSE reconnect ─────────────────
+        // Store the version seen on first connection. On every reconnect
+        // (onerror → onopen) we re-fetch /api/info; if the version has
+        // changed the server was redeployed and we hard-reload to pick up
+        // new frontend assets.
+        let initial_version: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let had_error: std::rc::Rc<std::cell::Cell<bool>> =
+            std::rc::Rc::new(std::cell::Cell::new(false));
+
+        // onopen: on first open capture the version; on reconnect after an
+        // error check whether the version changed.
+        let initial_version_open = initial_version.clone();
+        let had_error_open = had_error.clone();
+        let onopen_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
+            let is_reconnect = had_error_open.get();
+            had_error_open.set(false);
+            let iv = initial_version_open.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(info) = crate::api::fetch_app_info().await {
+                    if is_reconnect {
+                        // Reconnected after a drop — reload if version changed.
+                        let stored = iv.borrow().clone();
+                        if stored.map(|v| v != info.version).unwrap_or(false) {
+                            let _ = leptos::prelude::window().location().reload();
+                        }
+                    } else {
+                        // First open — record baseline version.
+                        *iv.borrow_mut() = Some(info.version);
+                    }
+                }
+            });
+        });
+        es.set_onopen(Some(onopen_cb.as_ref().unchecked_ref()));
+        onopen_cb.forget();
+
+        // onerror: mark that the connection dropped so the next onopen knows
+        // it is a reconnect rather than the initial open.
+        let had_error_err = had_error.clone();
+        let onerror_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
+            had_error_err.set(true);
+        });
+        es.set_onerror(Some(onerror_cb.as_ref().unchecked_ref()));
+        onerror_cb.forget();
 
         on_cleanup(move || es_for_cleanup.close());
     });
@@ -213,7 +262,20 @@ pub fn BoardView() -> impl IntoView {
                 <For
                     each=move || columns.get()
                     key=|sig| sig.get_untracked().id.clone()
-                    children=move |sig| view! { <ColumnView column=sig /> }
+                    children=move |sig| {
+                        let col_id = sig.get_untracked().id.clone();
+                        view! {
+                            // Ghost placeholder shown before the hovered column while
+                            // a column drag is in progress.
+                            <Show when=move || {
+                                drag_over_col_id.get().as_deref() == Some(col_id.as_str())
+                                    && matches!(drag_payload.get(), DragPayload::Column { .. })
+                            }>
+                                <div class="column-ghost" />
+                            </Show>
+                            <ColumnView column=sig />
+                        }
+                    }
                 />
             </div>
         </div>

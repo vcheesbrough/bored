@@ -311,7 +311,7 @@ pub fn CardItem(
         >
             // ── Collapsed: absolute number badge + clamped preview ────────
             <Show when=is_collapsed>
-                <span class="card-number">{move || format!("#{:03}", number.get())}</span>
+                <span class="card-number">{move || format!("#{}", number.get())}</span>
                 <MarkdownPreview body=body_signal class="card-preview" />
             </Show>
 
@@ -332,7 +332,7 @@ pub fn CardItem(
                             SaveStatus::Failed  => "!",
                         }}
                     </span>
-                    <span class="card-number">{move || format!("#{:03}", number.get())}</span>
+                    <span class="card-number">{move || format!("#{}", number.get())}</span>
                     <button
                         class="card-toolbar-btn"
                         title="Collapse"
