@@ -947,13 +947,13 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 }
 
 .column-ghost {
-  width: 6px;
+  flex: 1;
+  min-width: var(--col-min-width);
   align-self: stretch;
   border: 2px dashed var(--accent);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   pointer-events: none;
-  flex-shrink: 0;
 }
 
 .column-view[draggable="true"]:active { opacity: 0.5; }
