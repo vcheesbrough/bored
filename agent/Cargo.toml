@@ -1,0 +1,29 @@
+[package]
+name = "agent"
+version.workspace = true
+edition.workspace = true
+
+# The binary is named separately from the crate so it's clear what you're
+# running: `cargo run -p agent --bin bored-agent-poc`.
+[[bin]]
+name = "bored-agent-poc"
+path = "src/main.rs"
+
+[dependencies]
+# Shared API types (Card, Column) so we don't duplicate the struct definitions.
+shared = { path = "../shared" }
+# Async runtime — "full" enables the multi-thread scheduler, timers, and macros.
+tokio = { version = "1", features = ["full"] }
+# HTTP client. "json" adds automatic serde serialization; "stream" adds the
+# bytes_stream() method we need to read the SSE response incrementally.
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# fmt feature gives us the subscriber that writes structured logs to stderr.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Ergonomic error handling: anyhow::Error carries any std::error::Error and
+# lets us use the ? operator across heterogeneous error types.
+anyhow = "1"
+# StreamExt trait for the .next() combinator on the SSE byte stream.
+futures-util = "0.3"
