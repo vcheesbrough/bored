@@ -13,9 +13,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Model to use for annotation. claude-sonnet-4-6 gives a good balance of
-/// speed and quality for this kind of short-form writing task.
-const MODEL: &str = "claude-sonnet-4-6";
+/// Model to use for annotation. Haiku is fast and cheap on the Claude Max
+/// token budget — appending a one-line blockquote doesn't need Sonnet.
+const MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// System prompt that sets the agent's role and writing constraints.
 /// Kept as a constant so it's easy to tune without hunting through the code.
