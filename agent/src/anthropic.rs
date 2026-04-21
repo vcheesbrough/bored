@@ -127,7 +127,6 @@ impl AnthropicClient {
                           Return the entire card body including all original \
                           content plus the newly appended blockquote."
                 .to_string(),
-            // JSON Schema: the tool accepts a single required string field.
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -149,27 +148,55 @@ impl AnthropicClient {
                 content: user_message,
             }],
             tools: vec![update_card_tool],
-            // Force Claude to call update_card rather than replying with text.
             tool_choice: json!({ "type": "tool", "name": "update_card" }),
         };
 
+        // Retry with exponential backoff on 429 (rate limit). Claude Max
+        // subscriptions have per-minute token limits; brief moves can burst
+        // past them. Three attempts covers most transient limits.
+        let mut delay_secs = 10u64;
+        for attempt in 1..=3u32 {
+            let result = self.try_call(&request_body).await;
+            match result {
+                Ok(body) => return Ok(body),
+                Err(e) if e.to_string().contains("429") => {
+                    if attempt == 3 {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        attempt,
+                        delay_secs,
+                        "Rate limited by Anthropic API, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                    delay_secs *= 2;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
+    /// Single attempt at the Anthropic messages API. Returns the `body` string
+    /// from the forced `update_card` tool call, or an error.
+    async fn try_call(&self, request_body: &MessagesRequest<'_>) -> Result<String> {
         // The Anthropic API uses x-api-key for auth. This accepts both
-        // standard API keys (sk-ant-api03-...) and Claude OAuth access tokens
-        // (sk-ant-oat01-...) from ~/.claude/.credentials.json.
+        // standard API keys (sk-ant-api03-…) and Claude OAuth access tokens
+        // (sk-ant-oat01-…) from ~/.claude/.credentials.json.
         let response = self
             .client
             .post("https://api.anthropic.com/v1/messages")
             .header("anthropic-version", "2023-06-01")
             .header("x-api-key", &self.api_key)
-            .json(&request_body)
+            .json(request_body)
             .send()
             .await
             .context("Failed to send request to Anthropic API")?;
 
         let status = response.status();
 
-        // Capture the body text before consuming the response so we can
-        // include it in the error message if deserialization fails.
+        // Capture body text before consuming the response so we can include
+        // it in the error message if deserialization fails.
         let body_text = response
             .text()
             .await
@@ -190,11 +217,9 @@ impl AnthropicClient {
             bail!("Expected stop_reason=tool_use, got: {}", parsed.stop_reason);
         }
 
-        // Find the tool_use block (should always be present given tool_choice).
         for block in parsed.content {
             if let ContentBlock::ToolUse { name, input } = block {
                 if name == "update_card" {
-                    // Extract the `body` string from the tool input JSON.
                     let body = input["body"]
                         .as_str()
                         .context("update_card tool input missing 'body' string field")?
