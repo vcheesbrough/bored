@@ -22,7 +22,8 @@ use tracing::info;
 pub struct Config {
     /// Base URL of the bored API, e.g. "https://bored.desync.link" (no trailing slash).
     pub bored_api_url: String,
-    /// Anthropic API key used to authenticate calls to the messages endpoint.
+    /// Claude OAuth access token, sent as `x-api-key` to the Anthropic API.
+    /// Works with Claude Max subscriptions (no separate API plan needed).
     pub anthropic_api_key: String,
     /// The bored board ID the agent should watch. Only events for this board
     /// are processed; events for other boards are ignored by the SSE filter.
@@ -30,18 +31,52 @@ pub struct Config {
 }
 
 impl Config {
-    /// Read configuration from the environment, returning an error if any
-    /// required variable is missing or empty.
+    /// Read configuration from the environment.
+    ///
+    /// Token resolution order for the Anthropic credential:
+    ///   1. `CLAUDE_CODE_OAUTH_TOKEN` — matches the convention used by the
+    ///      Woodpecker PR-review agent and CI containers in this project.
+    ///   2. `~/.claude/.credentials.json` — auto-read when running locally so
+    ///      no env var is needed at all; the token is kept fresh by Claude Code.
     fn from_env() -> Result<Self> {
         Ok(Config {
             bored_api_url: std::env::var("BORED_API_URL")
                 .context("BORED_API_URL must be set (e.g. https://bored.desync.link)")?,
-            anthropic_api_key: std::env::var("ANTHROPIC_API_KEY")
-                .context("ANTHROPIC_API_KEY must be set")?,
+            anthropic_api_key: resolve_oauth_token()
+                .context("Could not find a Claude OAuth token. Set CLAUDE_CODE_OAUTH_TOKEN or log in with `claude auth login`.")?,
             board_id: std::env::var("BOARD_ID")
                 .context("BOARD_ID must be set to the bored board ID to watch")?,
         })
     }
+}
+
+/// Resolve the Claude OAuth access token used for Anthropic API calls.
+///
+/// The token is passed as `x-api-key` — the Anthropic API accepts OAuth tokens
+/// (sk-ant-oat01-…) through the same header as regular API keys, making Claude
+/// Max subscriptions work without a separate paid API plan.
+fn resolve_oauth_token() -> Option<String> {
+    // 1. Explicit env var — used in CI containers and Docker deployments.
+    if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+
+    // 2. Local credentials file written by `claude auth login`.
+    //    Path: ~/.claude/.credentials.json → .claudeAiOauth.accessToken
+    let home = std::env::var("HOME").ok()?;
+    let creds_path = std::path::Path::new(&home)
+        .join(".claude")
+        .join(".credentials.json");
+
+    let bytes = std::fs::read(&creds_path).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let token = json["claudeAiOauth"]["accessToken"].as_str()?.to_string();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
 }
 
 #[tokio::main]

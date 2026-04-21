@@ -153,10 +153,12 @@ impl AnthropicClient {
             tool_choice: json!({ "type": "tool", "name": "update_card" }),
         };
 
+        // The Anthropic API uses x-api-key for auth. This accepts both
+        // standard API keys (sk-ant-api03-...) and Claude OAuth access tokens
+        // (sk-ant-oat01-...) from ~/.claude/.credentials.json.
         let response = self
             .client
             .post("https://api.anthropic.com/v1/messages")
-            // The API version header is required on every request.
             .header("anthropic-version", "2023-06-01")
             .header("x-api-key", &self.api_key)
             .json(&request_body)
