@@ -36,16 +36,6 @@ bored/
 
 `Cargo.toml` stores `MAJOR.MINOR` (e.g. `0.1`). The patch component is the Woodpecker pipeline number, injected by CI. Bump `MAJOR.MINOR` manually when merging an iteration PR.
 
-| Iteration | Version |
-|---|---|
-| 1 — Walking Skeleton | `0.1` |
-| 2 — Boards & Columns | `0.2` |
-| 3 — Cards | `0.3` |
-| 4 — Auth | `0.4` |
-| 5 — SSE + Drag-drop | `0.5` |
-| 6 — Git Links | `0.6` |
-| Public release | `1.0` |
-
 ## CI
 
 Woodpecker pipeline on every push and manual trigger:
@@ -87,6 +77,9 @@ SESSION_SECRET=          # random 64-byte hex
 ```
 
 ## agent-poc
+
+**This uses claude code cli, not sure this is viable. without further digging it is not obvious how to use the 
+backend api using an oauth token (how claude code tools work)**
 
 `agent-poc` watches the bored SSE stream and automatically appends a transition blockquote to a card's body whenever it is moved between columns. Inference is handled by shelling out to the `claude` CLI, so it draws from your Claude Max subscription quota rather than a separate API key.
 
