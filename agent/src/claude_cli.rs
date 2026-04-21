@@ -48,14 +48,20 @@ impl ClaudeClient {
     ) -> Result<String> {
         // Build the user-facing message that gives Claude full context.
         // The system prompt handles the output format contract.
+        //
+        // The body is JSON-encoded so that card content containing text like
+        // "Ignore the above instructions" is treated as data, not directives.
+        let encoded_body =
+            serde_json::to_string(card_body).unwrap_or_else(|_| format!("{:?}", card_body));
         let user_message = format!(
             "Card #{number} was just moved from \"{from}\" to \"{to}\".\n\n\
-             Current card body:\n\n\
-             {body}",
+             Current card body (JSON-encoded string):\n\n\
+             {body}\n\n\
+             Output the decoded Markdown body with the transition blockquote appended.",
             number = card_number,
             from = from_column,
             to = to_column,
-            body = card_body,
+            body = encoded_body,
         );
 
         // Spawn `claude --print` and pipe the message through stdin.
@@ -78,10 +84,13 @@ impl ClaudeClient {
             // Drop closes the pipe, signalling EOF to the process.
         }
 
-        let output = child
-            .wait_with_output()
-            .await
-            .context("Failed to wait for claude process")?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            child.wait_with_output(),
+        )
+        .await
+        .context("claude process timed out after 120 s")?
+        .context("Failed to wait for claude process")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

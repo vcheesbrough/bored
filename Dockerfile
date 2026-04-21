@@ -34,7 +34,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend-builder /app/target/release/backend ./backend
-COPY --from=backend-builder /app/target/release/agent-poc ./agent-poc
+# agent-poc is built above for CI validation but not copied here — it requires
+# the claude CLI on PATH and is deployed/run separately outside this image.
 COPY --from=frontend-builder /app/frontend/dist ./dist
 RUN openssl req -x509 -newkey rsa:4096 \
         -keyout /app/key.pem \

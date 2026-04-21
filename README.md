@@ -101,6 +101,7 @@ SESSION_SECRET=          # random 64-byte hex
 |---|---|
 | `BORED_API_URL` | Base URL of the bored API, e.g. `https://bored.desync.link` (no trailing slash) |
 | `BOARD_ID` | ULID of the board to watch |
+| `BORED_API_TOKEN` | Optional Bearer token for auth-gated deployments (matches the MCP server convention) |
 | `RUST_LOG` | Log level — `info` is a good default |
 
 ### Running locally

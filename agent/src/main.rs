@@ -29,6 +29,10 @@ pub struct Config {
     /// The bored board ID the agent should watch. Only events for this board
     /// are processed; events for other boards are ignored by the SSE filter.
     pub board_id: String,
+    /// Optional Bearer token sent as `Authorization: Bearer <token>` on every
+    /// bored API request. Matches the BORED_API_TOKEN convention used by the
+    /// MCP server. Not required if the bored instance has no auth enabled.
+    pub api_token: Option<String>,
 }
 
 impl Config {
@@ -38,6 +42,7 @@ impl Config {
                 .context("BORED_API_URL must be set (e.g. https://bored.desync.link)")?,
             board_id: std::env::var("BOARD_ID")
                 .context("BOARD_ID must be set to the bored board ID to watch")?,
+            api_token: std::env::var("BORED_API_TOKEN").ok(),
         })
     }
 }
@@ -60,7 +65,20 @@ async fn main() -> Result<()> {
     // A single reqwest::Client manages an internal connection pool and can be
     // shared freely across async tasks. We create one here and pass references
     // down to avoid re-creating it on every reconnect.
-    let http_client = reqwest::Client::new();
+    //
+    // If BORED_API_TOKEN is set we attach it as a default Authorization header
+    // so every request (column fetch, SSE stream, card update) is authenticated
+    // without threading the token through each call site.
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = &config.api_token {
+        let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+            .context("BORED_API_TOKEN contains invalid header characters")?;
+        default_headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    let http_client = reqwest::Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .context("Failed to build HTTP client")?;
     let claude = claude_cli::ClaudeClient::new();
 
     info!(board_id = %config.board_id, "agent-poc starting");
@@ -122,6 +140,7 @@ async fn run_sse_loop(
 
     let response = http_client
         .get(&url)
+        .header("Accept", "text/event-stream")
         .send()
         .await
         .context("Failed to connect to SSE stream")?;
@@ -151,7 +170,10 @@ async fn run_sse_loop(
                 if let Some(data) = pending_data.take() {
                     handle_event(config, http_client, claude, column_cache, &data).await;
                 }
-            } else if let Some(data) = line.strip_prefix("data: ") {
+            } else if let Some(data) = line.strip_prefix("data:") {
+                // RFC 8895 permits both `data:value` and `data: value`; strip
+                // the optional leading space so both forms are handled.
+                let data = data.strip_prefix(' ').unwrap_or(data);
                 match pending_data.as_mut() {
                     Some(existing) => {
                         existing.push('\n');
