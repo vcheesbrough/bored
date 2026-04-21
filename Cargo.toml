@@ -1,8 +1,8 @@
 [workspace]
-members = ["shared", "backend", "frontend", "mcp"]
+members = ["shared", "backend", "frontend", "mcp", "agent"]
 default-members = ["shared", "backend"]
 resolver = "2"
 
 [workspace.package]
-version = "1.16.0"
+version = "1.17.0"
 edition = "2021"
