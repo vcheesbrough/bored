@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "1.16.0"
+version = "1.17.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "1.16.0"
+version = "1.17.0"
 dependencies = [
  "axum",
  "axum-server",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "1.16.0"
+version = "1.17.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -2831,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "1.16.0"
+version = "1.17.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -4808,7 +4808,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.16.0"
+version = "1.17.0"
 dependencies = [
  "serde",
 ]

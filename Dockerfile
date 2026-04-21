@@ -25,7 +25,7 @@ RUN mkdir -p frontend/src && touch frontend/src/lib.rs \
  && mkdir -p mcp/src && touch mcp/src/main.rs
 RUN cargo fmt -p backend -p shared -p agent --check
 RUN cargo clippy -p backend -p shared -p agent -- -D warnings
-RUN cargo test -p backend -p shared --lib
+RUN cargo test -p backend -p shared -p agent --lib
 RUN cargo build --release -p backend -p agent
 
 FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
