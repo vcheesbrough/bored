@@ -7,12 +7,16 @@
 //      resolve column IDs to human-readable names quickly.
 //   3. Open the SSE stream for the board and process events forever, reconnecting
 //      after any transient network failure.
-//   4. On each `card_moved` event: look up the from/to column names, call
-//      Claude via the Anthropic messages API, and execute the returned
-//      `update_card` tool call against the bored REST API.
+//   4. On each `card_moved` event: look up the from/to column names, shell out
+//      to `claude --print` for the annotation, and write the result back via
+//      PUT /api/cards/:id.
+//
+// Inference is routed through the Claude Code CLI rather than the raw Anthropic
+// API so it draws from the user's Claude Max subscription quota instead of a
+// separate, tightly-throttled OAuth API bucket.
 
-mod anthropic;
 mod bored;
+mod claude_cli;
 
 use anyhow::{Context, Result};
 use tracing::info;
@@ -22,61 +26,20 @@ use tracing::info;
 pub struct Config {
     /// Base URL of the bored API, e.g. "https://bored.desync.link" (no trailing slash).
     pub bored_api_url: String,
-    /// Claude OAuth access token, sent as `x-api-key` to the Anthropic API.
-    /// Works with Claude Max subscriptions (no separate API plan needed).
-    pub anthropic_api_key: String,
     /// The bored board ID the agent should watch. Only events for this board
     /// are processed; events for other boards are ignored by the SSE filter.
     pub board_id: String,
 }
 
 impl Config {
-    /// Read configuration from the environment.
-    ///
-    /// Token resolution order for the Anthropic credential:
-    ///   1. `CLAUDE_CODE_OAUTH_TOKEN` — matches the convention used by the
-    ///      Woodpecker PR-review agent and CI containers in this project.
-    ///   2. `~/.claude/.credentials.json` — auto-read when running locally so
-    ///      no env var is needed at all; the token is kept fresh by Claude Code.
     fn from_env() -> Result<Self> {
         Ok(Config {
             bored_api_url: std::env::var("BORED_API_URL")
                 .context("BORED_API_URL must be set (e.g. https://bored.desync.link)")?,
-            anthropic_api_key: resolve_oauth_token()
-                .context("Could not find a Claude OAuth token. Set CLAUDE_CODE_OAUTH_TOKEN or log in with `claude auth login`.")?,
             board_id: std::env::var("BOARD_ID")
                 .context("BOARD_ID must be set to the bored board ID to watch")?,
         })
     }
-}
-
-/// Resolve the Claude OAuth access token used for Anthropic API calls.
-///
-/// The token is passed as `x-api-key` — the Anthropic API accepts OAuth tokens
-/// (sk-ant-oat01-…) through the same header as regular API keys, making Claude
-/// Max subscriptions work without a separate paid API plan.
-fn resolve_oauth_token() -> Option<String> {
-    // 1. Explicit env var — used in CI containers and Docker deployments.
-    if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-
-    // 2. Local credentials file written by `claude auth login`.
-    //    Path: ~/.claude/.credentials.json → .claudeAiOauth.accessToken
-    let home = std::env::var("HOME").ok()?;
-    let creds_path = std::path::Path::new(&home)
-        .join(".claude")
-        .join(".credentials.json");
-
-    let bytes = std::fs::read(&creds_path).ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let token = json["claudeAiOauth"]["accessToken"].as_str()?.to_string();
-    if token.is_empty() {
-        return None;
-    }
-    Some(token)
 }
 
 #[tokio::main]
@@ -98,6 +61,7 @@ async fn main() -> Result<()> {
     // shared freely across async tasks. We create one here and pass references
     // down to avoid re-creating it on every reconnect.
     let http_client = reqwest::Client::new();
+    let claude = claude_cli::ClaudeClient::new();
 
     info!(board_id = %config.board_id, "bored-agent-poc starting");
 
@@ -116,9 +80,8 @@ async fn main() -> Result<()> {
     // stateless between connections — the column cache is refreshed on every
     // reconnect so it stays current.
     loop {
-        match run_sse_loop(&config, &http_client, &mut column_cache).await {
+        match run_sse_loop(&config, &http_client, &claude, &mut column_cache).await {
             Ok(()) => {
-                // The server closed the stream cleanly (unusual but handled).
                 info!("SSE stream ended, reconnecting in 2 seconds");
             }
             Err(e) => {
@@ -142,10 +105,10 @@ async fn main() -> Result<()> {
 ///   - Lines starting with `data:` carry the event JSON payload.
 ///   - Lines starting with `:` are comments (keep-alive pings) — ignored.
 ///   - An empty line marks the end of one logical event.
-///   - Fields other than `data` (id, event, retry) are not used by bored.
 async fn run_sse_loop(
     config: &Config,
     http_client: &reqwest::Client,
+    claude: &claude_cli::ClaudeClient,
     column_cache: &mut bored::ColumnCache,
 ) -> Result<()> {
     use futures_util::StreamExt;
@@ -157,16 +120,12 @@ async fn run_sse_loop(
 
     info!(url = %url, "Connecting to SSE stream");
 
-    // We keep the connection open for as long as events arrive. reqwest's
-    // bytes_stream() gives us a Stream<Item = Result<Bytes>> so we receive
-    // data as the server flushes it rather than buffering the entire response.
     let response = http_client
         .get(&url)
         .send()
         .await
         .context("Failed to connect to SSE stream")?;
 
-    // Bail early if the server returned an error status (e.g. 401, 503).
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("SSE endpoint returned {}", status);
@@ -174,41 +133,25 @@ async fn run_sse_loop(
 
     info!("Connected to SSE stream");
 
-    // `pending_data` accumulates the `data:` line(s) for the current logical
-    // event. In bored's case each event is a single `data:` line, but the SSE
-    // spec allows multi-line data (subsequent `data:` lines are newline-joined).
     let mut pending_data: Option<String> = None;
-    // `line_buf` holds bytes that arrived in the current chunk but have not yet
-    // been terminated by a `\n`. The next chunk will complete them.
     let mut line_buf = String::new();
-
     let mut byte_stream = response.bytes_stream();
 
     while let Some(chunk_result) = byte_stream.next().await {
         let chunk = chunk_result.context("Error reading SSE chunk")?;
 
-        // Decode the bytes as UTF-8. Invalid sequences are replaced with the
-        // Unicode replacement character — acceptable for a logging/annotation
-        // agent since we'd just log a parse error on the next step.
         let text = String::from_utf8_lossy(&chunk);
         line_buf.push_str(&text);
 
-        // Process every complete line (terminated by \n) in the buffer.
-        // We leave any trailing incomplete line in `line_buf` for the next chunk.
         while let Some(newline_pos) = line_buf.find('\n') {
-            // Trim the optional carriage-return before the newline (CRLF streams).
             let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
-            // Consume this line from the buffer.
             line_buf = line_buf[newline_pos + 1..].to_string();
 
             if line.is_empty() {
-                // An empty line signals the end of a logical SSE event.
-                // Dispatch whatever `data:` content we collected.
                 if let Some(data) = pending_data.take() {
-                    handle_event(config, http_client, column_cache, &data).await;
+                    handle_event(config, http_client, claude, column_cache, &data).await;
                 }
             } else if let Some(data) = line.strip_prefix("data: ") {
-                // Append to pending data, joining multiple `data:` lines with \n.
                 match pending_data.as_mut() {
                     Some(existing) => {
                         existing.push('\n');
@@ -217,8 +160,6 @@ async fn run_sse_loop(
                     None => pending_data = Some(data.to_string()),
                 }
             }
-            // Lines starting with ':' (keep-alive pings) and other field names
-            // (event:, id:, retry:) are intentionally ignored.
         }
     }
 
@@ -226,16 +167,14 @@ async fn run_sse_loop(
 }
 
 /// Parse one SSE data payload and, if it is a `card_moved` event, invoke the
-/// annotation pipeline. Errors are logged rather than propagated so a single
-/// bad event does not kill the connection.
+/// annotation pipeline.
 async fn handle_event(
     config: &Config,
     http_client: &reqwest::Client,
+    claude: &claude_cli::ClaudeClient,
     column_cache: &mut bored::ColumnCache,
     data: &str,
 ) {
-    // Deserialize the JSON. Any unknown event types are silently skipped via
-    // the `#[serde(other)]` fallback variant in BoardEvent.
     let event: bored::BoardEvent = match serde_json::from_str(data) {
         Ok(e) => e,
         Err(e) => {
@@ -244,8 +183,6 @@ async fn handle_event(
         }
     };
 
-    // All other event types (CardCreated, CardUpdated, ColumnCreated, …)
-    // are ignored — the agent only reacts to column transitions.
     if let bored::BoardEvent::CardMoved {
         card,
         from_column_id,
@@ -259,8 +196,15 @@ async fn handle_event(
             "CardMoved event received"
         );
 
-        if let Err(e) =
-            annotate_card(config, http_client, column_cache, card, &from_column_id).await
+        if let Err(e) = annotate_card(
+            config,
+            http_client,
+            claude,
+            column_cache,
+            card,
+            &from_column_id,
+        )
+        .await
         {
             tracing::error!(error = %e, "Failed to annotate card");
         }
@@ -269,17 +213,16 @@ async fn handle_event(
 
 /// Core annotation pipeline:
 ///   1. Resolve from/to column names (refresh cache on miss).
-///   2. Call Claude with the card body and column context.
-///   3. Execute the returned `update_card` tool call.
+///   2. Shell out to `claude --print` for the updated card body.
+///   3. Write the result back via PUT /api/cards/:id.
 async fn annotate_card(
     config: &Config,
     http_client: &reqwest::Client,
+    claude: &claude_cli::ClaudeClient,
     column_cache: &mut bored::ColumnCache,
     card: shared::Card,
     from_column_id: &str,
 ) -> Result<()> {
-    // Resolve column names, refreshing the cache if either ID is unknown.
-    // This handles columns created after the agent started.
     let from_name = column_cache
         .resolve(http_client, config, from_column_id)
         .await
@@ -294,29 +237,12 @@ async fn annotate_card(
         card_number = card.number,
         from_column = %from_name,
         to_column = %to_name,
-        "Calling Claude to annotate card"
+        "Calling claude CLI to annotate card"
     );
 
-    // Build the user-visible message that gives Claude full context.
-    let user_message = format!(
-        "Card #{number} was just moved from column \"{from}\" to column \"{to}\".\n\n\
-         Here is the current card body:\n\n\
-         ---\n\
-         {body}\n\
-         ---\n\n\
-         Please append a single brief blockquote (using > Markdown syntax) that \
-         notes the column transition and any observation about the card's current \
-         state or readiness. Do not rewrite or remove any existing content — only \
-         append. Return the complete updated card body via the update_card tool.",
-        number = card.number,
-        from = from_name,
-        to = to_name,
-        body = card.body,
-    );
-
-    // Call the Anthropic messages API and get back the new body from the tool call.
-    let anthropic = anthropic::AnthropicClient::new(http_client.clone(), &config.anthropic_api_key);
-    let new_body = anthropic.call_update_card(&user_message).await?;
+    let new_body = claude
+        .append_transition_note(card.number, &card.body, &from_name, &to_name)
+        .await?;
 
     info!(
         card_number = card.number,
@@ -324,7 +250,6 @@ async fn annotate_card(
         "Claude returned updated body, writing to bored API"
     );
 
-    // Persist the annotated body via PUT /api/cards/:id.
     bored::update_card(http_client, config, &card.id, &new_body).await?;
 
     info!(card_number = card.number, "Card annotated successfully");
