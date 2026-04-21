@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "bored-agent-poc (dev)",
+      "cargo": {
+        "args": ["build", "--package", "agent", "--bin", "bored-agent-poc"],
+        "filter": { "name": "bored-agent-poc", "kind": "bin" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "BORED_API_URL": "https://bored-dev.desync.link",
+        "BOARD_ID": "01kpkhdkhyg8psz1qdcp67cwpc",
+        "RUST_LOG": "info"
+      }
+    }
+  ]
+}
