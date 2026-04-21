@@ -1,4 +1,4 @@
-// bored-agent-poc — a standalone binary that watches the bored SSE stream and
+// agent-poc — a standalone binary that watches the bored SSE stream and
 // automatically annotates cards when they are moved between columns.
 //
 // High-level flow:
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     let http_client = reqwest::Client::new();
     let claude = claude_cli::ClaudeClient::new();
 
-    info!(board_id = %config.board_id, "bored-agent-poc starting");
+    info!(board_id = %config.board_id, "agent-poc starting");
 
     // Prime the column cache before entering the event loop so the first
     // CardMoved event can resolve column names immediately.

@@ -1,7 +1,7 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="Run Agent (dev)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
     <option name="buildProfileId" value="dev" />
-    <option name="command" value="run -p agent --bin bored-agent-poc" />
+    <option name="command" value="run -p agent --bin agent-poc" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs>
       <env name="BORED_API_URL" value="https://bored-dev.desync.link" />

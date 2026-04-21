@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 # The binary is named separately from the crate so it's clear what you're
-# running: `cargo run -p agent --bin bored-agent-poc`.
+# running: `cargo run -p agent --bin agent-poc`.
 [[bin]]
-name = "bored-agent-poc"
+name = "agent-poc"
 path = "src/main.rs"
 
 [dependencies]
