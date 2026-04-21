@@ -18,10 +18,12 @@ A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, SurrealD
 
 ```
 bored/
-├── Cargo.toml          # workspace: [shared, backend, frontend]
+├── Cargo.toml          # workspace: [shared, backend, frontend, mcp, agent]
 ├── backend/            # Axum API server
 ├── frontend/           # Leptos WASM SPA
 ├── shared/             # request/response types (serde)
+├── mcp/                # MCP server exposing the bored API as tools
+├── agent/              # agent-poc: autonomous card annotation agent
 ├── deploy/
 │   └── docker-compose.yml
 ├── Dockerfile
@@ -83,6 +85,41 @@ OIDC_CLIENT_SECRET=
 OIDC_REDIRECT_URI=       # https://bored.desync.link/auth/callback
 SESSION_SECRET=          # random 64-byte hex
 ```
+
+## agent-poc
+
+`agent-poc` watches the bored SSE stream and automatically appends a transition blockquote to a card's body whenever it is moved between columns. Inference is handled by shelling out to the `claude` CLI, so it draws from your Claude Max subscription quota rather than a separate API key.
+
+### Prerequisites
+
+- The `claude` CLI installed and authenticated (`claude --version` should work).
+- A running bored instance (local or remote).
+
+### Environment variables
+
+| Variable | Description |
+|---|---|
+| `BORED_API_URL` | Base URL of the bored API, e.g. `https://bored.desync.link` (no trailing slash) |
+| `BOARD_ID` | ULID of the board to watch |
+| `RUST_LOG` | Log level — `info` is a good default |
+
+### Running locally
+
+```bash
+BORED_API_URL=https://bored-dev.desync.link \
+BOARD_ID=<your-board-id> \
+RUST_LOG=info \
+cargo run -p agent --bin agent-poc
+```
+
+A RustRover run configuration is provided in `.run/Run Agent (dev).run.xml` pre-filled for the dev instance.
+
+### How it works
+
+1. On startup the agent fetches all columns for the board into an in-memory cache so column IDs can be resolved to names quickly.
+2. It opens the SSE event stream at `/api/events?board_id=<id>` and processes events forever, reconnecting automatically after any network failure.
+3. On each `card_moved` event it calls `claude --print` with the card body and column transition as context. Claude returns the original body with a single blockquote appended.
+4. The updated body is written back via `PUT /api/cards/:id`.
 
 ## Local development
 
