@@ -1,19 +1,22 @@
+use std::sync::Arc;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use surrealdb::{engine::local::Db, Surreal};
 use tokio::sync::broadcast;
 
+use crate::auth::{AuthConfig, Claims, JwksCache};
 use crate::events::{BoardEvent, BroadcastEvent, BROADCAST_CAPACITY};
 use crate::models::DbBoard;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 ///
-/// `Clone` is required by Axum — it clones the state per-request. Both fields
-/// are cheap to clone: `Surreal<Db>` is an `Arc`-backed handle and
-/// `broadcast::Sender<T>` is also backed by an `Arc` internally.
+/// `Clone` is required by Axum — it clones the state per-request. All fields
+/// are cheap to clone: `Surreal<Db>` is an `Arc`-backed handle, the broadcast
+/// `Sender<T>` is also `Arc`-backed, and the auth/JWKS handles are explicit Arcs.
 #[derive(Clone)]
 pub struct AppState {
     /// SurrealDB embedded database handle. Every operation on this handle is
@@ -27,17 +30,46 @@ pub struct AppState {
     /// Each message is a `BroadcastEvent` that bundles the event with the board ID
     /// it originated from, so SSE clients can filter to their own board's stream.
     pub events: broadcast::Sender<BroadcastEvent>,
+    /// OIDC configuration. `None` when `OIDC_ISSUER_URL` is unset — in that
+    /// case the auth middleware injects a synthetic `anonymous` claim so local
+    /// dev without an IdP keeps working unchanged. Production always sets this.
+    pub auth: Option<Arc<AuthConfig>>,
+    /// Cached JWKS public keys for the configured issuer. Always present
+    /// alongside `auth` (created together at startup); kept as a separate
+    /// field so handlers that only need verification don't pull in the secret.
+    pub jwks_cache: Option<Arc<JwksCache>>,
 }
 
 impl AppState {
     /// Create a new `AppState` with a fresh broadcast channel.
+    /// Auth defaults to disabled — `with_auth()` enables it.
     pub fn new(db: Surreal<Db>) -> Self {
         // `broadcast::channel` returns (Sender, Receiver). We keep the Sender
         // in AppState and drop the initial Receiver — new receivers are created
         // by calling `sender.subscribe()` in the SSE handler.
         let (tx, _rx) = broadcast::channel::<BroadcastEvent>(BROADCAST_CAPACITY);
-        Self { db, events: tx }
+        Self {
+            db,
+            events: tx,
+            auth: None,
+            jwks_cache: None,
+        }
     }
+
+    /// Builder-style attach of OIDC configuration + JWKS cache. Called once
+    /// from `main.rs` if the OIDC env vars are present.
+    pub fn with_auth(mut self, auth: Arc<AuthConfig>, jwks_cache: Arc<JwksCache>) -> Self {
+        self.auth = Some(auth);
+        self.jwks_cache = Some(jwks_cache);
+        self
+    }
+}
+
+/// Helper used by mutation handlers to populate `last_edited_by` on writes.
+/// Pulled into one place so behaviour stays consistent — every mutation path
+/// stamps the `sub` claim as the editor identity.
+pub(crate) fn editor_sub(claims: &Extension<Claims>) -> String {
+    claims.sub.clone()
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -56,14 +88,16 @@ pub async fn list_boards(
 
 pub async fn create_board(
     State(state): State<AppState>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::CreateBoardRequest>,
 ) -> Result<(StatusCode, Json<shared::Board>), StatusCode> {
     let id = ulid::Ulid::new().to_string().to_lowercase();
+    let editor = editor_sub(&claims);
 
     let board: Option<DbBoard> = state
         .db
         .create(("boards", &id))
-        .content(serde_json::json!({ "name": payload.name }))
+        .content(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -99,6 +133,7 @@ pub async fn get_board(
 pub async fn update_board(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateBoardRequest>,
 ) -> Result<Json<shared::Board>, StatusCode> {
     // Check board exists first so we can return 404 rather than a silent no-op.
@@ -112,10 +147,11 @@ pub async fn update_board(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    let editor = editor_sub(&claims);
     let board: Option<DbBoard> = state
         .db
         .update(("boards", &id))
-        .merge(serde_json::json!({ "name": payload.name }))
+        .merge(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

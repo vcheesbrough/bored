@@ -4,3 +4,4 @@ pub mod card_modal;
 pub mod column;
 pub mod confirm_modal;
 pub mod markdown;
+pub mod user_badge;

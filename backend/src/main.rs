@@ -1,12 +1,16 @@
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
 // These are private by default; the route handlers are reached via `routes::boards::...`.
+mod auth;
 mod db;
 mod events;
 mod models;
 mod observability;
 mod routes;
 
+use std::sync::Arc;
+
 use axum::{
+    middleware,
     routing::{delete, get, post, put}, // HTTP method helpers for the router
     Router,
 };
@@ -14,6 +18,8 @@ use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rus
 use routes::boards::AppState;
 use std::net::SocketAddr;
 use tower_http::{services::ServeDir, trace::TraceLayer}; // Middleware: static files + request tracing
+
+use crate::auth::{auth_middleware, AuthConfig, JwksCache};
 
 // Wraps ServeDir and replaces any 404 response with index.html so that SPA
 // deep-links (e.g. /boards/123) survive a browser reload.
@@ -88,13 +94,26 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
 // `app` is extracted from `main` so integration tests can call it directly
 // without spinning up a real TCP listener. Tests construct `AppState` with an
 // in-memory DB, call `app(state).await`, and pass the router to `TestServer`.
+//
+// Routing layout:
+//   Public (no auth required):
+//     /health, /api/info, /auth/login, /auth/callback, /auth/logout
+//   Protected (auth middleware enforced — `auth` cookie or `Bearer` header):
+//     /api/me, /api/boards/*, /api/columns/*, /api/cards/*, /api/events
+//
+// When the server is started without OIDC env vars (i.e. local dev or tests),
+// the middleware short-circuits and injects a synthetic `anonymous` claim so
+// existing flows keep working unchanged.
 pub async fn app(state: AppState) -> Router {
-    // Build the `/api/*` sub-router. All routes share `state` via `.with_state()`.
-    // Axum resolves routes in registration order for the same path+method pair,
-    // but here each path+method combination is unique.
-    let api = Router::new()
+    // Build the protected `/api/*` sub-router. Every route here gets the auth
+    // middleware applied below; handlers can extract `Extension<Claims>` to
+    // get the validated identity. The middleware needs access to AppState
+    // (for the JWKS cache + auth config), so we pass state via `from_fn_with_state`.
+    let protected_api = Router::new()
         // SSE stream — clients subscribe here to receive real-time board events.
         .route("/events", get(events::sse_handler))
+        // Identity endpoint for the SPA navbar.
+        .route("/me", get(routes::auth::me))
         .route("/boards", get(routes::boards::list_boards))
         .route("/boards", post(routes::boards::create_board))
         .route("/boards/:id", get(routes::boards::get_board))
@@ -115,6 +134,22 @@ pub async fn app(state: AppState) -> Router {
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
         .route("/cards/:id/move", post(routes::cards::move_card))
+        // Apply the auth middleware to every route in this sub-router. The
+        // middleware reads from request extensions injected by `with_state`,
+        // so the layer must come AFTER the routes are mounted but BEFORE
+        // `.with_state()` is called (axum resolves layers in reverse order
+        // and `with_state` finalises the router).
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .with_state(state.clone());
+
+    // Public auth flow routes — no middleware, no auth required to use them.
+    let auth_routes = Router::new()
+        .route("/login", get(routes::auth::login))
+        .route("/callback", get(routes::auth::callback))
+        .route("/logout", get(routes::auth::logout))
         .with_state(state);
 
     // `STATIC_DIR` lets the Docker image override where the compiled WASM frontend
@@ -127,9 +162,11 @@ pub async fn app(state: AppState) -> Router {
         // unauthenticated on every page load to populate the version watermark.
         // It must stay outside any auth-gated sub-router.
         .route("/api/info", get(info))
-        // `.nest("/api", api)` mounts the api sub-router under `/api`, so
-        // `/api/boards` maps to the `list_boards` handler above.
-        .nest("/api", api)
+        // Browser-facing OAuth2 flow endpoints.
+        .nest("/auth", auth_routes)
+        // Protected API — every route under here requires a valid token (or
+        // runs in synthetic-anonymous mode if OIDC env vars are unset).
+        .nest("/api", protected_api)
         // `SpaSvc` serves static files from the dist directory and falls back to
         // index.html for any path that isn't a real file on disk, enabling
         // Leptos client-side routing to handle deep-links (e.g. /boards/123).
@@ -159,7 +196,26 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
-    let state = AppState::new(db);
+    // Initialise OIDC config from env vars if present. When `OIDC_ISSUER_URL`
+    // is unset the server runs in auth-disabled mode — useful for local
+    // hacking without a live IdP and for unit tests. Production sets all of
+    // OIDC_ISSUER_URL / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URI
+    // / REQUIRED_SCOPE; missing any of those when issuer is set is fatal.
+    let state = if let Some(auth) = AuthConfig::from_env() {
+        let jwks_url = auth.jwks_url();
+        tracing::info!(
+            issuer = %auth.issuer_url,
+            client_id = %auth.client_id,
+            required_scope = %auth.required_scope,
+            jwks_url = %jwks_url,
+            "OIDC auth enabled"
+        );
+        let cache = Arc::new(JwksCache::new(jwks_url));
+        AppState::new(db).with_auth(Arc::new(auth), cache)
+    } else {
+        tracing::warn!("OIDC_ISSUER_URL not set — auth middleware will inject anonymous claim");
+        AppState::new(db)
+    };
 
     // Check for TLS certificate/key paths in environment variables.
     // If both are present, serve HTTPS on port 443.

@@ -75,6 +75,46 @@ body {
   flex-shrink: 0;
 }
 
+/* User identity widget — sits at the far right of the navbar */
+.navbar-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.user-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface);
+  display: block;
+}
+
+.user-name {
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.user-logout {
+  color: var(--text-muted);
+  text-decoration: none;
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.user-logout:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+.user-loading {
+  color: var(--text-muted);
+  opacity: 0.4;
+}
+
 /* ── Board chooser ───────────────────────────────── */
 .board-chooser-wrap {
   position: relative;

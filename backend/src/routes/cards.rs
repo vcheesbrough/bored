@@ -1,13 +1,14 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use surrealdb::{engine::local::Db, Surreal};
 
+use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
-use crate::routes::boards::AppState;
+use crate::routes::boards::{editor_sub, AppState};
 
 /// Gap between adjacent card positions in the sparse ordering scheme.
 /// Large enough to allow ~10 bisections between any two cards before a rebalance
@@ -213,6 +214,7 @@ pub async fn get_card(
 pub async fn create_card(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardRequest>,
 ) -> Result<(StatusCode, Json<shared::Card>), StatusCode> {
     let column: Option<DbColumn> = state
@@ -229,6 +231,7 @@ pub async fn create_card(
     let board_id = column.board.id.to_raw();
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
+    let editor = editor_sub(&claims);
 
     // Claim the next card number by atomically incrementing the global counter.
     // SurrealDB record-level mutations are atomic, so concurrent creates cannot
@@ -257,13 +260,15 @@ pub async fn create_card(
              column = type::thing('columns', $col_id), \
              body = $body, \
              number = $number, \
-             position = $position",
+             position = $position, \
+             last_edited_by = $editor",
         )
         .bind(("id", id))
         .bind(("col_id", col_id))
         .bind(("body", payload.body))
         .bind(("number", card_number))
         .bind(("position", top_pos))
+        .bind(("editor", editor))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -287,6 +292,7 @@ pub async fn create_card(
 pub async fn update_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateCardRequest>,
 ) -> Result<Json<shared::Card>, StatusCode> {
     let existing: Option<DbCard> = state
@@ -349,12 +355,19 @@ pub async fn update_card(
         return Ok(Json(existing.into_api()));
     }
 
+    // Always stamp the editor — every successful mutation records who did it.
+    set_parts.push("last_edited_by = $editor".to_string());
+
     let query_str = format!(
         "UPDATE type::thing('cards', $card_id) SET {}",
         set_parts.join(", ")
     );
 
-    let mut q = state.db.query(query_str).bind(("card_id", card_id));
+    let mut q = state
+        .db
+        .query(query_str)
+        .bind(("card_id", card_id))
+        .bind(("editor", editor_sub(&claims)));
     if let Some(body) = payload.body {
         q = q.bind(("body", body));
     }
@@ -424,6 +437,7 @@ pub async fn delete_card(
 pub async fn move_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::MoveCardRequest>,
 ) -> Result<Json<shared::Card>, StatusCode> {
     let existing: Option<DbCard> = state
@@ -480,11 +494,12 @@ pub async fn move_card(
         .db
         .query(
             "UPDATE type::thing('cards', $card_id) \
-             SET column = type::thing('columns', $col_id), position = $position",
+             SET column = type::thing('columns', $col_id), position = $position, last_edited_by = $editor",
         )
         .bind(("card_id", card_id.clone()))
         .bind(("col_id", payload.column_id.clone()))
         .bind(("position", new_pos))
+        .bind(("editor", editor_sub(&claims)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
