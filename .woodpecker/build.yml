@@ -136,4 +136,6 @@ steps:
         OIDC_REDIRECT_URI=https://bored.desync.link/auth/callback \
         REQUIRED_SCOPE=bored:prod:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-prod/end-session/ \
+        OIDC_MCP_ISSUER_URL=https://auth.desync.link/application/o/bored-mcp/ \
+        OIDC_MCP_CLIENT_ID=bored-mcp-prod \
         docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
