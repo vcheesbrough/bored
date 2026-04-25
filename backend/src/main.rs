@@ -201,16 +201,17 @@ async fn main() {
     // hacking without a live IdP and for unit tests. Production sets all of
     // OIDC_ISSUER_URL / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URI
     // / REQUIRED_SCOPE; missing any of those when issuer is set is fatal.
-    let state = if let Some(auth) = AuthConfig::from_env() {
-        let jwks_url = auth.jwks_url();
+    let state = if let Some(auth) = AuthConfig::load().await {
         tracing::info!(
             issuer = %auth.issuer_url,
             client_id = %auth.client_id,
             required_scope = %auth.required_scope,
-            jwks_url = %jwks_url,
+            jwks_uri = %auth.jwks_uri,
+            authorize_endpoint = %auth.authorize_endpoint,
+            token_endpoint = %auth.token_endpoint,
             "OIDC auth enabled"
         );
-        let cache = Arc::new(JwksCache::new(jwks_url));
+        let cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
         AppState::new(db).with_auth(Arc::new(auth), cache)
     } else {
         tracing::warn!("OIDC_ISSUER_URL not set — auth middleware will inject anonymous claim");

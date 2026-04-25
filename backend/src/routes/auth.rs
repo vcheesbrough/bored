@@ -68,7 +68,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     // scopes plus the env-specific access scope so the issued token will
     // pass the middleware's scope check on subsequent requests.
     let authorize = url::Url::parse_with_params(
-        &auth.authorize_url(),
+        auth.authorize_url(),
         &[
             ("response_type", "code"),
             ("client_id", auth.client_id.as_str()),

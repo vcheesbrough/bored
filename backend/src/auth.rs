@@ -71,14 +71,33 @@ pub struct AuthConfig {
     /// End-session URL. Optional because some providers omit RP-initiated
     /// logout; if absent, `/auth/logout` just clears the cookie and returns to /.
     pub end_session_url: Option<String>,
+    /// Authorization endpoint resolved via OIDC discovery. Authentik places this
+    /// at `{base}/application/o/authorize/` (no per-app slug) while
+    /// mock-oauth2-server uses `{issuer}/authorize` — discovery reconciles both.
+    pub authorize_endpoint: String,
+    /// Token endpoint resolved via OIDC discovery.
+    pub token_endpoint: String,
+    /// JWKS endpoint resolved via OIDC discovery.
+    pub jwks_uri: String,
+}
+
+/// Subset of the OIDC discovery document we care about. Fields not listed
+/// (e.g. `userinfo_endpoint`, `response_types_supported`) are ignored.
+#[derive(Deserialize)]
+struct DiscoveryDoc {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
 }
 
 impl AuthConfig {
-    /// Read the auth configuration from environment variables.
+    /// Read the auth configuration from environment variables and resolve
+    /// provider endpoints via OIDC discovery (`/.well-known/openid-configuration`).
     /// Returns `None` if `OIDC_ISSUER_URL` is unset, allowing the server to
     /// run in "auth-disabled" mode for local development without IdP setup.
-    /// All other required vars become hard errors when issuer is set.
-    pub fn from_env() -> Option<Self> {
+    /// All other required vars — and a reachable discovery document — become
+    /// hard errors when issuer is set.
+    pub async fn load() -> Option<Self> {
         let issuer_url = std::env::var("OIDC_ISSUER_URL").ok()?;
         let client_id = std::env::var("OIDC_CLIENT_ID")
             .expect("OIDC_CLIENT_ID required when OIDC_ISSUER_URL is set");
@@ -89,6 +108,11 @@ impl AuthConfig {
         let required_scope = std::env::var("REQUIRED_SCOPE")
             .expect("REQUIRED_SCOPE required when OIDC_ISSUER_URL is set");
         let end_session_url = std::env::var("OIDC_END_SESSION_URL").ok();
+
+        let discovery = Self::discover(&issuer_url)
+            .await
+            .expect("OIDC discovery failed for OIDC_ISSUER_URL");
+
         Some(Self {
             issuer_url,
             client_id,
@@ -96,28 +120,54 @@ impl AuthConfig {
             redirect_uri,
             required_scope,
             end_session_url,
+            authorize_endpoint: discovery.authorization_endpoint,
+            token_endpoint: discovery.token_endpoint,
+            jwks_uri: discovery.jwks_uri,
         })
     }
 
-    /// The JWKS endpoint derived from the issuer URL.
-    /// Both Authentik (`{issuer}/jwks/`, redirects from `/jwks`) and
-    /// mock-oauth2-server (`{issuer}/jwks`) respond on the unsuffixed form,
-    /// so we use that as the lowest common denominator.
-    pub fn jwks_url(&self) -> String {
-        let base = self.issuer_url.trim_end_matches('/');
-        format!("{base}/jwks")
+    /// Fetch the issuer's `/.well-known/openid-configuration` document and
+    /// extract the endpoints we need. Per RFC 8414 the well-known URL is the
+    /// issuer plus that suffix; we trim a trailing slash so the join is clean
+    /// regardless of whether the issuer URL was stored with one.
+    ///
+    /// Retries with a short backoff: in containerised setups (e2e, dev) the
+    /// IdP may not yet be listening when bored boots, so a single attempt is
+    /// flaky. Total wait is bounded so genuine misconfiguration still fails
+    /// the process quickly rather than hanging.
+    async fn discover(issuer_url: &str) -> Result<DiscoveryDoc, String> {
+        let base = issuer_url.trim_end_matches('/');
+        let url = format!("{base}/.well-known/openid-configuration");
+        let mut last_err = String::new();
+        for attempt in 1..=10 {
+            match reqwest::get(&url).await {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(resp) => match resp.json::<DiscoveryDoc>().await {
+                        Ok(doc) => return Ok(doc),
+                        Err(e) => last_err = format!("parsing JSON: {e}"),
+                    },
+                    Err(e) => last_err = format!("non-success status: {e}"),
+                },
+                Err(e) => last_err = format!("fetch failed: {e}"),
+            }
+            tracing::warn!(url = %url, attempt, error = %last_err, "OIDC discovery attempt failed; retrying");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        Err(format!(
+            "OIDC discovery {url} failed after retries: {last_err}"
+        ))
     }
 
-    /// Authorize endpoint.
-    pub fn authorize_url(&self) -> String {
-        let base = self.issuer_url.trim_end_matches('/');
-        format!("{base}/authorize")
+    pub fn jwks_url(&self) -> &str {
+        &self.jwks_uri
     }
 
-    /// Token endpoint used during the authorization-code exchange.
-    pub fn token_url(&self) -> String {
-        let base = self.issuer_url.trim_end_matches('/');
-        format!("{base}/token")
+    pub fn authorize_url(&self) -> &str {
+        &self.authorize_endpoint
+    }
+
+    pub fn token_url(&self) -> &str {
+        &self.token_endpoint
     }
 }
 
