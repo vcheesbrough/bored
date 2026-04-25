@@ -37,6 +37,52 @@ fn to_html(md: &str) -> String {
     html_output
 }
 
+#[cfg(test)]
+mod tests {
+    use super::to_html;
+
+    #[test]
+    fn dangerous_link_is_stripped_entirely() {
+        // The <a> start and its matching end must both be suppressed — no
+        // stray </a> that would capture following text.
+        let out = to_html("[click me](javascript:alert(1))");
+        assert!(!out.contains("<a"), "should produce no opening <a>");
+        assert!(!out.contains("</a>"), "should produce no stray </a>");
+        // The link text itself is still rendered as plain text.
+        assert!(out.contains("click me"));
+    }
+
+    #[test]
+    fn safe_link_round_trips() {
+        let out = to_html("[Google](https://www.google.com) after");
+        assert!(out.contains(r#"href="https://www.google.com""#));
+        assert!(out.contains("</a>"), "closing tag must be present");
+        // Text following the link must not be inside the <a>.
+        let a_close = out.find("</a>").unwrap();
+        let after_pos = out.find("after").unwrap();
+        assert!(after_pos > a_close, "\"after\" must appear after </a>");
+    }
+
+    #[test]
+    fn consecutive_links_one_filtered_one_safe() {
+        // The filtered link's End must not suppress the safe link's End.
+        let out = to_html("[bad](javascript:evil()) [good](https://example.com)");
+        assert!(
+            !out.contains("javascript:"),
+            "dangerous scheme must not appear in output"
+        );
+        assert!(
+            out.contains(r#"href="https://example.com""#),
+            "safe link must survive"
+        );
+        assert_eq!(
+            out.matches("</a>").count(),
+            1,
+            "exactly one </a> for the one safe link"
+        );
+    }
+}
+
 /// Renders a markdown string as HTML inside a `<div>`.
 ///
 /// `inner_html` is Leptos 0.7's built-in special attribute that calls
