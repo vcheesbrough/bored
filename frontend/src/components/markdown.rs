@@ -3,9 +3,11 @@ use pulldown_cmark::{html, Event, Parser, TagEnd};
 
 fn to_html(md: &str) -> String {
     // Strip raw HTML and dangerous URI schemes to prevent stored XSS via `inner_html`.
-    // `skip_end` tracks whether the most recent link/image Start was filtered out;
-    // we only drop the matching End in that case (pulldown_cmark never nests links).
-    let mut skip_end = false;
+    // `skip_depth` counts how many nested dangerous link/image Starts are open; we
+    // suppress each End only while the counter is non-zero. A counter (not a bool) is
+    // needed because images can nest inside links — e.g. [![alt](js:src)](js:href)
+    // produces two Start events before the first End.
+    let mut skip_depth: u32 = 0;
     let parser = Parser::new(md).filter(|event| match event {
         // Raw HTML blocks and inline HTML inject verbatim into the DOM.
         Event::Html(_) | Event::InlineHtml(_) => false,
@@ -16,15 +18,14 @@ fn to_html(md: &str) -> String {
             let allowed = !lower.starts_with("javascript:")
                 && !lower.starts_with("vbscript:")
                 && !lower.starts_with("data:");
-            // Remember whether this Start was dropped so we can drop its End too,
-            // preventing a stray </a> or </img> in the output.
-            skip_end = !allowed;
+            if !allowed {
+                skip_depth += 1;
+            }
             allowed
         }
         Event::End(TagEnd::Link | TagEnd::Image) => {
-            // Only suppress the End if its Start was filtered out.
-            if skip_end {
-                skip_end = false;
+            if skip_depth > 0 {
+                skip_depth -= 1;
                 false
             } else {
                 true
@@ -61,6 +62,18 @@ mod tests {
         let a_close = out.find("</a>").unwrap();
         let after_pos = out.find("after").unwrap();
         assert!(after_pos > a_close, "\"after\" must appear after </a>");
+    }
+
+    #[test]
+    fn dangerous_image_nested_inside_dangerous_link_no_stray_close() {
+        // [![alt](javascript:src)](javascript:href) — two filtered Starts before any End.
+        // The bool-based implementation would reset on the image End and leak a </a>.
+        let out = to_html("[![alt](javascript:img)](javascript:href)");
+        assert!(!out.contains("<a"), "no opening <a>");
+        assert!(
+            !out.contains("</a>"),
+            "no stray </a> from the outer link End"
+        );
     }
 
     #[test]
