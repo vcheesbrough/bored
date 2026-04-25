@@ -80,6 +80,14 @@ pub struct AuthConfig {
     pub token_endpoint: String,
     /// JWKS endpoint resolved via OIDC discovery.
     pub jwks_uri: String,
+    /// Optional issuer URL for the MCP service-account provider (a separate
+    /// Authentik application that issues `client_credentials` tokens). When set,
+    /// the JWT validator accepts tokens from either this issuer or `issuer_url`.
+    /// Both providers share the same signing key so a single JWKS cache suffices.
+    pub mcp_issuer_url: Option<String>,
+    /// OAuth2 `client_id` for the MCP service-account provider. Tokens from
+    /// that provider carry this value in their `aud` claim instead of `client_id`.
+    pub mcp_client_id: Option<String>,
 }
 
 /// Manual `Debug` so accidental `{:?}` formatting (panic messages, tracing
@@ -97,6 +105,8 @@ impl std::fmt::Debug for AuthConfig {
             .field("authorize_endpoint", &self.authorize_endpoint)
             .field("token_endpoint", &self.token_endpoint)
             .field("jwks_uri", &self.jwks_uri)
+            .field("mcp_issuer_url", &self.mcp_issuer_url)
+            .field("mcp_client_id", &self.mcp_client_id)
             .finish()
     }
 }
@@ -136,6 +146,13 @@ impl AuthConfig {
             .ok()
             .filter(|s| !s.is_empty());
 
+        let mcp_issuer_url = std::env::var("OIDC_MCP_ISSUER_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mcp_client_id = std::env::var("OIDC_MCP_CLIENT_ID")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         let discovery = Self::discover(&issuer_url)
             .await
             .expect("OIDC discovery failed for OIDC_ISSUER_URL");
@@ -150,6 +167,8 @@ impl AuthConfig {
             authorize_endpoint: discovery.authorization_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
+            mcp_issuer_url,
+            mcp_client_id,
         })
     }
 
@@ -365,8 +384,19 @@ pub async fn validate_jwt(
         return Err("unsupported JWT algorithm");
     }
     validation.algorithms = allowed_algs.to_vec();
-    validation.set_audience(&[&config.client_id]);
-    validation.set_issuer(&[&config.issuer_url]);
+    // Accept tokens from either the browser provider or the MCP service-account
+    // provider. Both live on the same Authentik instance and share a signing key,
+    // so the existing JWKS cache covers both without an extra fetch.
+    let mut audiences = vec![config.client_id.as_str()];
+    if let Some(mcp_cid) = config.mcp_client_id.as_deref() {
+        audiences.push(mcp_cid);
+    }
+    validation.set_audience(&audiences);
+    let mut issuers = vec![config.issuer_url.as_str()];
+    if let Some(mcp_iss) = config.mcp_issuer_url.as_deref() {
+        issuers.push(mcp_iss);
+    }
+    validation.set_issuer(&issuers);
     // Default leeway is 60s; that's fine for clock skew on the mini server.
     let data = decode::<Claims>(token, &key, &validation).map_err(|e| {
         // Don't leak internal jsonwebtoken error variants to clients.
