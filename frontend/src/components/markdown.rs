@@ -3,21 +3,33 @@ use pulldown_cmark::{html, Event, Parser, TagEnd};
 
 fn to_html(md: &str) -> String {
     // Strip raw HTML and dangerous URI schemes to prevent stored XSS via `inner_html`.
+    // `skip_end` tracks whether the most recent link/image Start was filtered out;
+    // we only drop the matching End in that case (pulldown_cmark never nests links).
+    let mut skip_end = false;
     let parser = Parser::new(md).filter(|event| match event {
         // Raw HTML blocks and inline HTML inject verbatim into the DOM.
         Event::Html(_) | Event::InlineHtml(_) => false,
         // Block dangerous URI schemes in link/image destinations.
-        // Also drop the matching End events so push_html doesn't emit stray
-        // </a> or </img> closing tags for every filtered Start — safe because
-        // Markdown doesn't allow nested links or images.
         Event::Start(pulldown_cmark::Tag::Link { dest_url, .. })
         | Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
             let lower = dest_url.to_lowercase();
-            !lower.starts_with("javascript:")
+            let allowed = !lower.starts_with("javascript:")
                 && !lower.starts_with("vbscript:")
-                && !lower.starts_with("data:")
+                && !lower.starts_with("data:");
+            // Remember whether this Start was dropped so we can drop its End too,
+            // preventing a stray </a> or </img> in the output.
+            skip_end = !allowed;
+            allowed
         }
-        Event::End(TagEnd::Link | TagEnd::Image) => false,
+        Event::End(TagEnd::Link | TagEnd::Image) => {
+            // Only suppress the End if its Start was filtered out.
+            if skip_end {
+                skip_end = false;
+                false
+            } else {
+                true
+            }
+        }
         _ => true,
     });
     let mut html_output = String::new();

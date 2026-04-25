@@ -757,7 +757,12 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .card-markdown ul, .card-markdown ol,
 .modal-markdown ul, .modal-markdown ol { margin: 0 0 8px; padding-left: 20px; }
 .card-markdown li, .modal-markdown li { margin-bottom: 2px; }
-.card-markdown a,  .modal-markdown a  { color: var(--accent); text-decoration: underline; }
+.card-preview a,
+.card-markdown a,
+.modal-markdown a  { color: var(--yellow); text-decoration: underline; text-underline-offset: 2px; border-radius: 2px; padding: 0 2px; }
+.card-preview a:hover,
+.card-markdown a:hover,
+.modal-markdown a:hover { color: #1a1a1a; background: var(--yellow); text-decoration: none; }
 .card-markdown code, .modal-markdown code {
   background: var(--surface-2);
   border-radius: 3px;
