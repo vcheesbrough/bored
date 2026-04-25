@@ -50,8 +50,9 @@ pub const STATE_COOKIE: &str = "auth_state";
 /// Configuration sourced from environment variables at startup.
 ///
 /// Cloned cheaply via `Arc<AuthConfig>` and shared into every request via
-/// `AppState`. `client_secret` is sensitive and must never be logged.
-#[derive(Debug, Clone)]
+/// `AppState`. `client_secret` is sensitive and must never be logged — see
+/// the manual `Debug` impl below which redacts it.
+#[derive(Clone)]
 pub struct AuthConfig {
     /// The OIDC issuer URL — e.g. `https://auth.desync.link/application/o/bored-dev/`.
     /// Used to construct the JWKS URL, validated against the `iss` claim, and
@@ -79,6 +80,25 @@ pub struct AuthConfig {
     pub token_endpoint: String,
     /// JWKS endpoint resolved via OIDC discovery.
     pub jwks_uri: String,
+}
+
+/// Manual `Debug` so accidental `{:?}` formatting (panic messages, tracing
+/// events, error chains) cannot leak `client_secret`. Auto-derive would print
+/// the secret verbatim, contradicting the safety comment on the struct.
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("required_scope", &self.required_scope)
+            .field("end_session_url", &self.end_session_url)
+            .field("authorize_endpoint", &self.authorize_endpoint)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("jwks_uri", &self.jwks_uri)
+            .finish()
+    }
 }
 
 /// Subset of the OIDC discovery document we care about. Fields not listed
@@ -404,7 +424,7 @@ pub async fn auth_middleware(
             next.run(req).await
         }
         Err(reason) => {
-            tracing::debug!(reason, "auth middleware rejected request");
+            tracing::warn!(reason, "auth middleware rejected request");
             (StatusCode::UNAUTHORIZED, reason).into_response()
         }
     }

@@ -111,7 +111,9 @@ pub struct MoveCardParams {
 // to know when to refresh.
 
 /// Configuration for the client_credentials flow. Read once from env vars.
-#[derive(Debug, Clone)]
+/// Manual `Debug` impl below redacts `client_secret` so accidental `{:?}`
+/// formatting cannot leak the credential to logs or panic messages.
+#[derive(Clone)]
 pub struct ClientCredentialsConfig {
     /// Full URL of the OIDC token endpoint (e.g.
     /// `https://auth.desync.link/application/o/token/`).
@@ -124,6 +126,17 @@ pub struct ClientCredentialsConfig {
     /// scope set associated with the provider (which already includes the
     /// per-env access scope).
     pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for ClientCredentialsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCredentialsConfig")
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 impl ClientCredentialsConfig {
@@ -147,7 +160,9 @@ impl ClientCredentialsConfig {
 }
 
 /// Cached token plus its expiry deadline (from the JWT's `exp` claim).
-#[derive(Debug, Clone)]
+/// No `Debug` derive — `access_token` is a live bearer credential and any
+/// `{:?}` formatting would leak it.
+#[derive(Clone)]
 struct TokenState {
     access_token: String,
     /// Refresh ~60s before this. Computed once at fetch time so there's no

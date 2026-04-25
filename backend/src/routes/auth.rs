@@ -21,8 +21,6 @@
 // the redirect from Authentik to attach the cookie on a top-level GET, which
 // is the only flow we use here. Strict would break the callback.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -97,8 +95,12 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
 /// Query params delivered by Authentik on the callback redirect.
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
-    /// Authorization code to exchange for tokens.
-    code: String,
+    /// Authorization code to exchange for tokens. Optional because per
+    /// RFC 6749 §4.1.2.1 the provider omits `code` and instead returns
+    /// `error` on the failure path; making it required here would cause
+    /// Axum's `Query` extractor to 422 the request before our `error`
+    /// guard below ever runs.
+    code: Option<String>,
     /// State nonce we generated at /auth/login. Must match the cookie value.
     state: String,
     /// Authentik returns `error` instead of `code` if the user denies consent
@@ -145,6 +147,12 @@ pub async fn callback(
         return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
     }
 
+    // `code` is `Option` to keep the error-path deserialise-able; on the
+    // success path it must be present, so reject the callback otherwise.
+    let Some(code) = params.code else {
+        return (StatusCode::BAD_REQUEST, "missing code").into_response();
+    };
+
     // Exchange the code for an access token via the token endpoint. Authentik
     // expects `application/x-www-form-urlencoded` here per RFC 6749.
     let http = reqwest::Client::new();
@@ -152,7 +160,7 @@ pub async fn callback(
         .post(auth.token_url())
         .form(&[
             ("grant_type", "authorization_code"),
-            ("code", &params.code),
+            ("code", &code),
             ("redirect_uri", &auth.redirect_uri),
             ("client_id", &auth.client_id),
             ("client_secret", &auth.client_secret),
@@ -231,14 +239,4 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
 /// data endpoints; the navbar uses it to populate username + avatar.
 pub async fn me(claims: Extension<Claims>) -> Json<shared::UserInfo> {
     Json(claims.to_user_info())
-}
-
-/// Helper exposed for use by tests that want to construct a deterministic
-/// timestamp without pulling in the chrono dependency. Not used in prod.
-#[allow(dead_code)]
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
