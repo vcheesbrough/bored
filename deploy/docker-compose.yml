@@ -18,6 +18,10 @@ services:
       - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
       - REQUIRED_SCOPE=${REQUIRED_SCOPE:-}
       - OIDC_END_SESSION_URL=${OIDC_END_SESSION_URL:-}
+      # MCP service-account provider (client_credentials). Both vars must be set
+      # together; omitting either disables the extra-issuer acceptance path.
+      - OIDC_MCP_ISSUER_URL=${OIDC_MCP_ISSUER_URL:-}
+      - OIDC_MCP_CLIENT_ID=${OIDC_MCP_CLIENT_ID:-}
     volumes:
       - bored-db:/data
     networks:
