@@ -20,3 +20,7 @@ tracing = "0.1"
 # Log to stderr so it doesn't corrupt the stdio MCP transport on stdout.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
+# Used to peek at the JWT `exp` claim for proactive refresh.
+# We don't verify signatures here — the bored backend is the verifier;
+# we just base64-decode the payload to read the expiry.
+base64 = "0.22"

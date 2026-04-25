@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct Board {
     pub id: String,
     pub name: String,
+    pub last_edited_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -14,6 +15,7 @@ pub struct Column {
     pub board_id: String,
     pub name: String,
     pub position: i32,
+    pub last_edited_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -47,6 +49,7 @@ pub struct Card {
     pub body: String,
     pub position: i32,
     pub number: u32,
+    pub last_edited_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -73,6 +76,18 @@ pub struct MoveCardRequest {
 pub struct AppInfo {
     pub version: String,
     pub env: String,
+}
+
+/// Public-facing user identity returned by `GET /api/me`.
+/// Trimmed projection of the JWT claims — the navbar only needs these three fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+    /// Display name (from the `preferred_username` claim).
+    pub name: String,
+    /// Email address (from the `email` claim) — used for Gravatar fallback.
+    pub email: Option<String>,
+    /// Avatar URL (from the `picture` claim) when the IdP provides one.
+    pub picture: Option<String>,
 }
 
 /// Body of `PUT /api/boards/:id/columns/reorder`.

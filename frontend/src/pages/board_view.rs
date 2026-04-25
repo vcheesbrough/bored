@@ -6,6 +6,7 @@ use crate::components::board_chooser::BoardChooser;
 use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
+use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
 #[component]
@@ -262,6 +263,7 @@ pub fn BoardView() -> impl IntoView {
             <span class="navbar-sep">"/"</span>
             <BoardChooser board_name=board_name columns=columns />
             <span class="navbar-watermark">{move || watermark.get()}</span>
+            <UserBadge />
         </nav>
 
         <div class="page board-view">

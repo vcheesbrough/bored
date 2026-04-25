@@ -88,11 +88,27 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     image: *docker-image
     volumes: *docker-socket
-    environment: *registry-creds
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      OIDC_CLIENT_SECRET:
+        from_secret: bored_dev_oidc_client_secret
     commands:
       - *docker-login
       - docker volume create bored-dev-db
-      - BORED_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+      - |
+        BORED_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) \
+        APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
+        BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
+        OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-dev/ \
+        OIDC_CLIENT_ID=bored-browser-dev \
+        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
+        OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
+        REQUIRED_SCOPE=bored:dev:access \
+        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
+        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
 
   deploy-prod:
     when:
@@ -100,8 +116,24 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     image: *docker-image
     volumes: *docker-socket
-    environment: *registry-creds
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      OIDC_CLIENT_SECRET:
+        from_secret: bored_prod_oidc_client_secret
     commands:
       - *docker-login
       - docker volume create bored-prod-db
-      - BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) APP_ENV=production BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
+      - |
+        BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) \
+        APP_ENV=production BORED_HOST=bored.desync.link \
+        BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db \
+        OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-prod/ \
+        OIDC_CLIENT_ID=bored-browser-prod \
+        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
+        OIDC_REDIRECT_URI=https://bored.desync.link/auth/callback \
+        REQUIRED_SCOPE=bored:prod:access \
+        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-prod/end-session/ \
+        docker compose -p bored -f deploy/docker-compose.yml up -d --pull always

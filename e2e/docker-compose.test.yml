@@ -1,4 +1,44 @@
 services:
+  # Mock OIDC provider — issues JWTs signed with its own JWKS so the bored
+  # backend can validate them via the same flow as production. Test setup
+  # asks this server for a client_credentials token and seeds it into the
+  # browser session cookie before tests run.
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10@sha256:65d4ed47ce094cc3849e41e03499bfb32372d69c726ec22b3d5a19eba9bc787e
+    environment:
+      SERVER_PORT: 8080
+      # JSON_CONFIG overrides the default token claims for the `default` issuer.
+      # mock-oauth2-server's stock client_credentials token sets `aud` to the
+      # requested scope and omits `scope` entirely — neither matches what our
+      # backend expects (aud == client_id, scope contains REQUIRED_SCOPE), so
+      # we customise the callback to issue tokens shaped like a real Authentik
+      # response.
+      JSON_CONFIG: |
+        {
+          "interactiveLogin": false,
+          "tokenCallbacks": [
+            {
+              "issuerId": "default",
+              "tokenExpiry": 3600,
+              "requestMappings": [
+                {
+                  "requestParam": "client_id",
+                  "match": "bored-test",
+                  "claims": {
+                    "sub": "bored-test-service-account",
+                    "aud": ["bored-test"],
+                    "scope": "openid profile email bored:test:access",
+                    "preferred_username": "test-user",
+                    "email": "test@example.com"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+    networks:
+      - e2e-net
+
   app:
     image: ${TEST_IMAGE:?TEST_IMAGE must be set}
     environment:
@@ -6,6 +46,16 @@ services:
       APP_ENV: test
       APP_VERSION: test
       LOG_LEVEL: warn
+      # OIDC configured against the mock. The /default issuer is built in
+      # to mock-oauth2-server and accepts tokens for any client_id.
+      OIDC_ISSUER_URL: http://mock-oidc:8080/default
+      OIDC_CLIENT_ID: bored-test
+      OIDC_CLIENT_SECRET: test-secret
+      OIDC_REDIRECT_URI: https://app/auth/callback
+      REQUIRED_SCOPE: bored:test:access
+      OIDC_END_SESSION_URL: http://mock-oidc:8080/default/end-session
+    depends_on:
+      - mock-oidc
     networks:
       - e2e-net
 
@@ -21,10 +71,16 @@ services:
         CMD ["npx", "playwright", "test"]
     environment:
       BASE_URL: https://app:443
+      # Used by global-setup to fetch a token before the suite runs.
+      OIDC_TOKEN_URL: http://mock-oidc:8080/default/token
+      OIDC_CLIENT_ID: bored-test
+      OIDC_CLIENT_SECRET: test-secret
+      REQUIRED_SCOPE: bored:test:access
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
       - app
+      - mock-oidc
     networks:
       - e2e-net
 

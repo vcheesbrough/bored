@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate; // `use_navigate` returns a function you can call to redirect
 
+use crate::components::user_badge::UserBadge;
+
 #[component]
 pub fn Home() -> impl IntoView {
     // `use_navigate()` returns a closure that triggers client-side navigation.
@@ -65,6 +67,7 @@ pub fn Home() -> impl IntoView {
     view! {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
+            <UserBadge />
         </nav>
         <div class="page">
             // Show "Loading…" while the boards fetch is in flight.

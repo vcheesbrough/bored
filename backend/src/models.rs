@@ -5,6 +5,7 @@ use surrealdb::sql::Thing;
 pub struct DbBoard {
     pub id: Thing,
     pub name: String,
+    pub last_edited_by: Option<String>,
     pub created_at: surrealdb::sql::Datetime,
     pub updated_at: surrealdb::sql::Datetime,
 }
@@ -14,6 +15,7 @@ impl DbBoard {
         shared::Board {
             id: self.id.id.to_raw(),
             name: self.name,
+            last_edited_by: self.last_edited_by,
             created_at: self.created_at.to_string(),
             updated_at: self.updated_at.to_string(),
         }
@@ -26,6 +28,7 @@ pub struct DbColumn {
     pub board: Thing,
     pub name: String,
     pub position: i32,
+    pub last_edited_by: Option<String>,
     pub created_at: surrealdb::sql::Datetime,
     pub updated_at: surrealdb::sql::Datetime,
 }
@@ -37,6 +40,7 @@ impl DbColumn {
             board_id: self.board.id.to_raw(),
             name: self.name,
             position: self.position,
+            last_edited_by: self.last_edited_by,
             created_at: self.created_at.to_string(),
             updated_at: self.updated_at.to_string(),
         }
@@ -50,6 +54,7 @@ pub struct DbCard {
     pub body: String,
     pub position: i32,
     pub number: Option<i32>,
+    pub last_edited_by: Option<String>,
     pub created_at: surrealdb::sql::Datetime,
     pub updated_at: surrealdb::sql::Datetime,
 }
@@ -62,6 +67,7 @@ impl DbCard {
             body: self.body,
             position: self.position,
             number: self.number.unwrap_or(0) as u32,
+            last_edited_by: self.last_edited_by,
             created_at: self.created_at.to_string(),
             updated_at: self.updated_at.to_string(),
         }

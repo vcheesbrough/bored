@@ -1,12 +1,13 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 
+use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbBoard, DbColumn};
-use crate::routes::boards::AppState;
+use crate::routes::boards::{editor_sub, AppState};
 
 pub async fn list_columns(
     State(state): State<AppState>,
@@ -41,6 +42,7 @@ pub async fn list_columns(
 pub async fn create_column(
     State(state): State<AppState>,
     Path(board_id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::CreateColumnRequest>,
 ) -> Result<(StatusCode, Json<shared::Column>), StatusCode> {
     let board: Option<DbBoard> = state
@@ -54,14 +56,16 @@ pub async fn create_column(
     }
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
+    let editor = editor_sub(&claims);
 
     let column: Option<DbColumn> = state
         .db
-        .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position")
+        .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position, last_edited_by = $editor")
         .bind(("id", id))
         .bind(("board_id", board_id.clone()))
         .bind(("name", payload.name))
         .bind(("position", payload.position))
+        .bind(("editor", editor))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -85,6 +89,7 @@ pub async fn create_column(
 pub async fn update_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateColumnRequest>,
 ) -> Result<Json<shared::Column>, StatusCode> {
     let existing: Option<DbColumn> = state
@@ -111,6 +116,13 @@ pub async fn update_column(
             serde_json::Value::Number(position.into()),
         );
     }
+    if patch.is_empty() {
+        return Ok(Json(existing.into_api()));
+    }
+    patch.insert(
+        "last_edited_by".to_string(),
+        serde_json::Value::String(editor_sub(&claims)),
+    );
 
     let column: Option<DbColumn> = state
         .db
@@ -184,6 +196,7 @@ pub async fn delete_column(
 pub async fn reorder_columns(
     State(state): State<AppState>,
     Path(board_id): Path<String>,
+    claims: Extension<Claims>,
     Json(payload): Json<shared::ColumnsReorderRequest>,
 ) -> Result<Json<Vec<shared::Column>>, StatusCode> {
     // Verify the board exists before touching any columns.
@@ -197,6 +210,7 @@ pub async fn reorder_columns(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    let editor = editor_sub(&claims);
     // Update each column's position to its index in the supplied order.
     // The WHERE clause scopes the update to this board, so a foreign column ID
     // silently no-ops (matches zero rows) rather than mutating another board's
@@ -204,10 +218,11 @@ pub async fn reorder_columns(
     for (index, col_id) in payload.order.iter().enumerate() {
         state
             .db
-            .query("UPDATE type::thing('columns', $id) SET position = $pos WHERE board = type::thing('boards', $board_id)")
+            .query("UPDATE type::thing('columns', $id) SET position = $pos, last_edited_by = $editor WHERE board = type::thing('boards', $board_id)")
             .bind(("id", col_id.clone()))
             .bind(("pos", index as i32))
             .bind(("board_id", board_id.clone()))
+            .bind(("editor", editor.clone()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
