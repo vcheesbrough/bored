@@ -216,8 +216,15 @@ pub async fn callback(
         .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(AUTH_COOKIE_MAX_AGE_SECS))
         .build();
+    // Mirror the security attributes from the original Set-Cookie so the
+    // deletion is treated identically by RFC 6265bis-conformant browsers.
+    // Mainstream browsers clear by (name, path) alone, but matching attrs
+    // is the spec-blessed form.
     let clear_state = Cookie::build((STATE_COOKIE, ""))
         .path("/auth")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::ZERO)
         .build();
     let jar = jar.add(session).add(clear_state);
@@ -230,6 +237,9 @@ pub async fn callback(
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
     let clear = Cookie::build((AUTH_COOKIE, ""))
         .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::ZERO)
         .build();
     let jar = jar.add(clear);

@@ -116,6 +116,9 @@ pub async fn update_column(
             serde_json::Value::Number(position.into()),
         );
     }
+    if patch.is_empty() {
+        return Ok(Json(existing.into_api()));
+    }
     patch.insert(
         "last_edited_by".to_string(),
         serde_json::Value::String(editor_sub(&claims)),
