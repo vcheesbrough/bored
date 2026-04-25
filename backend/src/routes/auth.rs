@@ -65,7 +65,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     // Build the authorize URL. We request the standard openid+profile+email
     // scopes plus the env-specific access scope so the issued token will
     // pass the middleware's scope check on subsequent requests.
-    let authorize = url::Url::parse_with_params(
+    let authorize = match url::Url::parse_with_params(
         auth.authorize_url(),
         &[
             ("response_type", "code"),
@@ -77,8 +77,17 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
             ),
             ("state", &nonce),
         ],
-    )
-    .expect("authorize URL must be valid");
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            // The base URL came from the IdP's discovery document at startup,
+            // so this should be unreachable in practice. Return 500 instead
+            // of panicking — handler panics are caught by Axum but pollute
+            // logs and obscure the real cause.
+            tracing::error!(error = %e, "IdP authorization_endpoint URL is invalid");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "invalid IdP URL").into_response();
+        }
+    };
 
     let state_cookie = Cookie::build((STATE_COOKIE, nonce))
         .path("/auth")

@@ -113,12 +113,17 @@ struct DiscoveryDoc {
 impl AuthConfig {
     /// Read the auth configuration from environment variables and resolve
     /// provider endpoints via OIDC discovery (`/.well-known/openid-configuration`).
-    /// Returns `None` if `OIDC_ISSUER_URL` is unset, allowing the server to
-    /// run in "auth-disabled" mode for local development without IdP setup.
+    /// Returns `None` if `OIDC_ISSUER_URL` is unset *or empty*, allowing the
+    /// server to run in "auth-disabled" mode for local development without
+    /// IdP setup. The empty-string case matters because `deploy/docker-compose.yml`
+    /// uses `${OIDC_ISSUER_URL:-}` to forward the host env, which sets the
+    /// var to "" rather than leaving it unset when the host has no OIDC config.
     /// All other required vars — and a reachable discovery document — become
     /// hard errors when issuer is set.
     pub async fn load() -> Option<Self> {
-        let issuer_url = std::env::var("OIDC_ISSUER_URL").ok()?;
+        let issuer_url = std::env::var("OIDC_ISSUER_URL")
+            .ok()
+            .filter(|s| !s.is_empty())?;
         let client_id = std::env::var("OIDC_CLIENT_ID")
             .expect("OIDC_CLIENT_ID required when OIDC_ISSUER_URL is set");
         let client_secret = std::env::var("OIDC_CLIENT_SECRET")
@@ -127,7 +132,9 @@ impl AuthConfig {
             .expect("OIDC_REDIRECT_URI required when OIDC_ISSUER_URL is set");
         let required_scope = std::env::var("REQUIRED_SCOPE")
             .expect("REQUIRED_SCOPE required when OIDC_ISSUER_URL is set");
-        let end_session_url = std::env::var("OIDC_END_SESSION_URL").ok();
+        let end_session_url = std::env::var("OIDC_END_SESSION_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let discovery = Self::discover(&issuer_url)
             .await
