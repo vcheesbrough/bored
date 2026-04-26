@@ -304,6 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_board_starts_empty() {
+        // New boards have no default columns — the user creates them manually.
         let server = test_app().await;
 
         let create_resp = server
@@ -340,6 +341,7 @@ mod tests {
         let list_resp = server.get("/api/boards").await;
         list_resp.assert_status_ok();
         let boards: Vec<shared::Board> = list_resp.json();
+        // `.any(...)` returns true if at least one element satisfies the predicate.
         assert!(boards.iter().any(|b| b.id == board.id));
     }
 
@@ -511,7 +513,8 @@ mod tests {
         update_resp.assert_status(StatusCode::NOT_FOUND);
     }
 
-    // Shared helper used by several card tests.
+    // Shared helper used by several card tests. Creates a board and then adds
+    // a fresh column named "Col".
     async fn setup_board_and_column(server: &TestServer) -> (shared::Board, shared::Column) {
         let board: shared::Board = server
             .post("/api/boards")
@@ -950,6 +953,8 @@ mod tests {
         resp.assert_status(StatusCode::NOT_FOUND);
     }
 
+    // Verifies that reorder_columns assigns positions matching the supplied order
+    // and returns the columns sorted by their new positions.
     #[tokio::test]
     async fn reorder_columns_assigns_positions() {
         let server = test_app().await;
@@ -962,6 +967,7 @@ mod tests {
             .await
             .json();
 
+        // Create three columns explicitly (no default columns since iteration 13).
         let col_a: shared::Column = server
             .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
@@ -991,6 +997,7 @@ mod tests {
         let col_done = col_b.id.clone();
         let col_ip = col_c.id.clone();
 
+        // Reorder to: In Progress, Todo, Done.
         let reorder_resp = server
             .put(&format!("/api/boards/{}/columns/reorder", board.name))
             .json(&shared::ColumnsReorderRequest {
@@ -1009,10 +1016,13 @@ mod tests {
         assert_eq!(reordered[2].position, 2);
     }
 
+    // Verifies that reorder_columns ignores column IDs that belong to a
+    // different board, preventing cross-board IDOR position writes.
     #[tokio::test]
     async fn reorder_columns_rejects_foreign_column_ids() {
         let server = test_app().await;
 
+        // Board A — we will try to tamper with its column from board B's endpoint.
         let board_a: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
@@ -1021,6 +1031,7 @@ mod tests {
             .await
             .json();
 
+        // Create a column on board A explicitly (no default columns since iteration 13).
         let col_a_todo: shared::Column = server
             .post(&format!("/api/boards/{}/columns", board_a.name))
             .json(&shared::CreateColumnRequest {
@@ -1031,6 +1042,7 @@ mod tests {
             .json();
         let original_position = col_a_todo.position;
 
+        // Board B — the attacker's board. Submit board A's column ID in the order.
         let board_b: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
@@ -1039,6 +1051,7 @@ mod tests {
             .await
             .json();
 
+        // Create two columns on board B explicitly.
         let col_b_todo: shared::Column = server
             .post(&format!("/api/boards/{}/columns", board_b.name))
             .json(&shared::CreateColumnRequest {
@@ -1056,6 +1069,8 @@ mod tests {
             .await
             .json();
 
+        // Inject board A's column into board B's reorder request.
+        // The WHERE board = … clause should make this a no-op for col_a_todo.
         let resp = server
             .put(&format!("/api/boards/{}/columns/reorder", board_b.name))
             .json(&shared::ColumnsReorderRequest {
@@ -1068,6 +1083,7 @@ mod tests {
             .await;
         resp.assert_status_ok();
 
+        // Board A's column must still have its original position.
         let cols_a_after: Vec<shared::Column> = server
             .get(&format!("/api/boards/{}/columns", board_a.name))
             .await
@@ -1100,6 +1116,11 @@ mod tests {
             .await
             .json();
 
+        // Use a bounded async wait instead of try_recv so the test doesn't race
+        // the handler. The send always happens before the HTTP response returns,
+        // but relying on try_recv returning Ok rather than Empty is fragile under
+        // a busy executor. 1 s is generous — in practice the channel is ready
+        // in microseconds.
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
             .expect("BoardCreated event timed out")
@@ -1128,6 +1149,7 @@ mod tests {
             events::BoardEvent::ColumnCreated { .. }
         ));
 
+        // Create a second column so there is somewhere to move the card to.
         let other_col: shared::Column = server
             .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {

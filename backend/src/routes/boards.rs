@@ -44,6 +44,9 @@ impl AppState {
     /// Create a new `AppState` with a fresh broadcast channel.
     /// Auth defaults to disabled — `with_auth()` enables it.
     pub fn new(db: Surreal<Db>) -> Self {
+        // `broadcast::channel` returns (Sender, Receiver). We keep the Sender
+        // in AppState and drop the initial Receiver — new receivers are created
+        // by calling `sender.subscribe()` in the SSE handler.
         let (tx, _rx) = broadcast::channel::<BroadcastEvent>(BROADCAST_CAPACITY);
         Self {
             db,
@@ -63,6 +66,8 @@ impl AppState {
 }
 
 /// Helper used by mutation handlers to populate `last_edited_by` on writes.
+/// Pulled into one place so behaviour stays consistent — every mutation path
+/// stamps the `sub` claim as the editor identity.
 pub(crate) fn editor_sub(claims: &Extension<Claims>) -> String {
     claims.sub.clone()
 }

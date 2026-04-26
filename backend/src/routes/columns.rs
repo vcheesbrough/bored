@@ -88,12 +88,14 @@ pub async fn update_column(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
         Some(c) => c,
         None => return Err(StatusCode::NOT_FOUND),
     };
     let board_id = existing.board.id.to_raw();
 
+    // Build a partial update map from whichever fields were supplied.
     let mut patch = serde_json::Map::new();
     if let Some(name) = payload.name {
         patch.insert("name".to_string(), serde_json::Value::String(name));
@@ -144,12 +146,14 @@ pub async fn delete_column(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
         Some(c) => c,
         None => return Err(StatusCode::NOT_FOUND),
     };
     let board_id = existing.board.id.to_raw();
 
+    // Cascade: delete all cards in this column before deleting the column itself.
     state
         .db
         .query("DELETE cards WHERE column = type::thing('columns', $id)")
@@ -173,8 +177,12 @@ pub async fn delete_column(
 
 /// `PUT /api/boards/:slug/columns/reorder`
 ///
-/// Accepts a complete ordered list of column IDs and assigns `position = index`
-/// to each. The board is looked up by slug; the ULID is used for the DB query
+/// Accepts a complete ordered list of column IDs (`{ order: ["id1","id2",…] }`)
+/// and assigns `position = index` to each. This is a bulk operation — the client
+/// sends the full desired order and the server rewrites every position in one
+/// pass. Column IDs not present in the list are skipped (their position is
+/// unchanged), so the caller must include every column to guarantee a consistent
+/// result. The board is looked up by slug; the ULID is used for the DB query
 /// guard that prevents cross-board IDOR writes.
 pub async fn reorder_columns(
     State(state): State<AppState>,
@@ -189,6 +197,10 @@ pub async fn reorder_columns(
     let board_ulid = board.id.id.to_raw();
 
     let editor = editor_sub(&claims);
+    // Update each column's position to its index in the supplied order.
+    // The WHERE clause scopes the update to this board, so a foreign column ID
+    // silently no-ops (matches zero rows) rather than mutating another board's
+    // state — preventing cross-board IDOR writes.
     for (index, col_id) in payload.order.iter().enumerate() {
         state
             .db
@@ -201,6 +213,7 @@ pub async fn reorder_columns(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
+    // Re-fetch the full ordered list so we can return it and broadcast it.
     let columns: Vec<DbColumn> = state
         .db
         .query(
