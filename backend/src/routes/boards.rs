@@ -44,9 +44,6 @@ impl AppState {
     /// Create a new `AppState` with a fresh broadcast channel.
     /// Auth defaults to disabled — `with_auth()` enables it.
     pub fn new(db: Surreal<Db>) -> Self {
-        // `broadcast::channel` returns (Sender, Receiver). We keep the Sender
-        // in AppState and drop the initial Receiver — new receivers are created
-        // by calling `sender.subscribe()` in the SSE handler.
         let (tx, _rx) = broadcast::channel::<BroadcastEvent>(BROADCAST_CAPACITY);
         Self {
             db,
@@ -66,10 +63,39 @@ impl AppState {
 }
 
 /// Helper used by mutation handlers to populate `last_edited_by` on writes.
-/// Pulled into one place so behaviour stays consistent — every mutation path
-/// stamps the `sub` claim as the editor identity.
 pub(crate) fn editor_sub(claims: &Extension<Claims>) -> String {
     claims.sub.clone()
+}
+
+/// Return `true` when `name` is a valid board slug:
+/// 1–63 lowercase ASCII alphanumerics and hyphens, no leading or trailing hyphen.
+pub(crate) fn is_valid_board_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 63 {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
+        return false;
+    }
+    name.bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Look up a board by its name (slug). Returns `None` when no board has that name.
+/// The name is now the stable URL identifier; the internal ULID primary key is
+/// only used for DB record operations.
+pub(crate) async fn find_board_by_slug(
+    db: &Surreal<Db>,
+    slug: &str,
+) -> Result<Option<DbBoard>, StatusCode> {
+    // Bind an owned String so the value outlives the async query chain
+    // (SurrealDB's bind requires 'static, which &str does not satisfy).
+    db.query("SELECT * FROM boards WHERE name = $slug LIMIT 1")
+        .bind(("slug", slug.to_owned()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -91,6 +117,19 @@ pub async fn create_board(
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateBoardRequest>,
 ) -> Result<(StatusCode, Json<shared::Board>), StatusCode> {
+    if !is_valid_board_name(&payload.name) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // Check uniqueness before inserting so we can return 409 rather than a
+    // generic DB error. The unique index enforces this at the DB level too.
+    if find_board_by_slug(&state.db, &payload.name)
+        .await?
+        .is_some()
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
 
@@ -105,6 +144,8 @@ pub async fn create_board(
 
     let api_board = board.into_api();
     let _ = state.events.send(BroadcastEvent {
+        // SSE filtering uses the internal ULID so card/column events can use
+        // it too without needing to look up the board name.
         board_id: api_board.id.clone(),
         event: BoardEvent::BoardCreated {
             board: api_board.clone(),
@@ -116,15 +157,9 @@ pub async fn create_board(
 
 pub async fn get_board(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(slug): Path<String>,
 ) -> Result<Json<shared::Board>, StatusCode> {
-    let board: Option<DbBoard> = state
-        .db
-        .select(("boards", &id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match board {
+    match find_board_by_slug(&state.db, &slug).await? {
         Some(b) => Ok(Json(b.into_api())),
         None => Err(StatusCode::NOT_FOUND),
     }
@@ -132,25 +167,34 @@ pub async fn get_board(
 
 pub async fn update_board(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(slug): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateBoardRequest>,
 ) -> Result<Json<shared::Board>, StatusCode> {
-    // Check board exists first so we can return 404 rather than a silent no-op.
-    let existing: Option<DbBoard> = state
-        .db
-        .select(("boards", &id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if existing.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+    if !is_valid_board_name(&payload.name) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    let existing = match find_board_by_slug(&state.db, &slug).await? {
+        Some(b) => b,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // If the name is changing, verify the new slug is not already taken.
+    if payload.name != existing.name
+        && find_board_by_slug(&state.db, &payload.name)
+            .await?
+            .is_some()
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let board_ulid = existing.id.id.to_raw();
     let editor = editor_sub(&claims);
+
     let board: Option<DbBoard> = state
         .db
-        .update(("boards", &id))
+        .update(("boards", &board_ulid))
         .merge(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -172,11 +216,17 @@ pub async fn update_board(
 
 pub async fn delete_board(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(slug): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    // Cascade delete: remove all cards first, then columns, then the board.
-    // SurrealDB doesn't enforce FK-style cascades automatically, so we do it
-    // explicitly in the correct dependency order.
+    let board = match find_board_by_slug(&state.db, &slug).await? {
+        Some(b) => b,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    // Resolve the internal ULID for cascade queries and DB deletion.
+    let id = board.id.id.to_raw();
+
+    // Cascade delete: cards first, then columns, then the board itself.
+    // SurrealDB does not enforce FK-style cascades automatically.
     state
         .db
         .query("DELETE cards WHERE column.board = type::thing('boards', $id)")

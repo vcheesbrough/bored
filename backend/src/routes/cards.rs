@@ -197,12 +197,33 @@ pub async fn get_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> Result<Json<shared::Card>, StatusCode> {
-    // Direct lookup by primary key — SurrealDB returns None if the record
-    // doesn't exist, which we surface as 404 rather than an internal error.
     let card: Option<DbCard> = state
         .db
         .select(("cards", &card_id))
         .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match card {
+        Some(c) => Ok(Json(c.into_api())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// `GET /api/cards/by-number/:number` — fetch a card by its human-readable
+/// sequential number. Card numbers are globally unique (single counter), so no
+/// board scoping is needed. Used by the frontend when the URL carries
+/// `?card=<number>` instead of the internal ULID.
+pub async fn get_card_by_number(
+    State(state): State<AppState>,
+    Path(number): Path<u32>,
+) -> Result<Json<shared::Card>, StatusCode> {
+    let card: Option<DbCard> = state
+        .db
+        .query("SELECT * FROM cards WHERE number = $number LIMIT 1")
+        .bind(("number", number as i64))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match card {

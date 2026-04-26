@@ -15,71 +15,60 @@ pub fn BoardView() -> impl IntoView {
     let query = use_query_map();
     let navigate = use_navigate();
 
-    // Board ID from the route path parameter.
-    let board_id = move || params.with(|p| p.get("id").unwrap_or_default());
-    // Optional card ID from the `?card=` query parameter; drives the maximised overlay.
-    let maximised_card_id = move || query.with(|q| q.get("card"));
+    // Board slug (name) from the route path parameter `:slug`.
+    let board_slug = move || params.with(|p| p.get("slug").unwrap_or_default());
+    // The board's internal ULID, resolved after the initial fetch. SSE
+    // filtering and column comparisons use this rather than the slug because
+    // all server-side events carry the ULID.
+    let board_ulid: RwSignal<String> = RwSignal::new(String::new());
+
+    // Optional card number from `?card=<number>` — drives the maximised overlay.
+    // Card numbers are globally unique (single counter), so no board scope is needed.
+    let maximised_card_number =
+        move || query.with(|q| q.get("card").and_then(|v| v.parse::<u32>().ok()));
 
     let board_name = RwSignal::new(String::new());
     let columns: RwSignal<Vec<RwSignal<shared::Column>>> = RwSignal::new(Vec::new());
     let loading = RwSignal::new(true);
 
-    // Watermark: version + environment fetched once from the backend.
     let watermark = RwSignal::new(format!("v{}", env!("CARGO_PKG_VERSION")));
 
     // ── Context signals ────────────────────────────────────────────────────
     let sse_event: RwSignal<Option<BoardSseEvent>> = RwSignal::new(None);
     let drag_payload: RwSignal<DragPayload> = RwSignal::new(DragPayload::None);
-    // Tracks which card (if any) is currently expanded or editing across the
-    // whole board so that only one card can be open at a time.
     let expanded_card_id: RwSignal<Option<String>> = RwSignal::new(None);
-    // Tracks which column ID (if any) a dragged column is currently hovering
-    // over, driving the narrow ghost placeholder shown before that column.
     let drag_over_col_id: RwSignal<Option<String>> = RwSignal::new(None);
 
     provide_context(sse_event);
     provide_context(drag_payload);
     provide_context(columns);
     provide_context(ExpandedCardId(expanded_card_id));
-    // Wrapped in DragOverColId so use_context in ColumnView retrieves the
-    // correct signal even after ColumnView provides its own RwSignal<Option<String>>.
     provide_context(DragOverColId(drag_over_col_id));
 
     // ── Maximised card overlay ─────────────────────────────────────────────
-    // When the URL has `?card=<id>`, we fetch that card and show it in a
-    // full-screen `CardModal`.  Navigating away from the URL (or closing the
-    // modal) removes the query parameter without remounting the board.
     let maximised_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
 
-    Effect::new(move |_| {
-        match maximised_card_id() {
-            Some(card_id) => {
-                wasm_bindgen_futures::spawn_local(async move {
-                    match crate::api::fetch_card(&card_id).await {
-                        Ok(card) => maximised_card.set(Some(card)),
-                        Err(e) => leptos::logging::error!("fetch maximised card failed: {e}"),
-                    }
-                });
-            }
-            None => {
-                // Clear any stale card when the query param is removed.
-                maximised_card.set(None);
-            }
+    Effect::new(move |_| match maximised_card_number() {
+        Some(num) => {
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::api::fetch_card_by_number(num).await {
+                    Ok(card) => maximised_card.set(Some(card)),
+                    Err(e) => leptos::logging::error!("fetch maximised card failed: {e}"),
+                }
+            });
+        }
+        None => {
+            maximised_card.set(None);
         }
     });
 
-    // Navigate back to the plain board URL when the modal signals it should close.
+    // Navigate back to the plain board URL (by slug) when the modal closes.
     let on_modal_close = Callback::new(move |_: ()| {
-        navigate(&format!("/boards/{}", board_id()), Default::default());
+        navigate(&format!("/boards/{}", board_slug()), Default::default());
     });
 
-    let on_modal_updated = Callback::new(move |_: shared::Card| {
-        // SSE `CardUpdated` event keeps the column list in sync; no extra action needed.
-    });
-
-    let on_modal_delete = Callback::new(move |_: String| {
-        // SSE `CardDeleted` removes the card from all columns.
-    });
+    let on_modal_updated = Callback::new(move |_: shared::Card| {});
+    let on_modal_delete = Callback::new(move |_: String| {});
 
     // ── Watermark fetch ────────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -106,12 +95,16 @@ pub fn BoardView() -> impl IntoView {
     on_cleanup(|| document().set_title("bored"));
 
     // ── SSE connection ────────────────────────────────────────────────────
+    // The EventSource uses the board ULID (not the slug) for filtering because
+    // all server-side events carry the ULID as their `board_id`. The ULID is
+    // set after the first successful board fetch, so the effect re-runs once
+    // the async fetch completes.
     Effect::new(move |_| {
-        let bid = board_id();
-        if bid.is_empty() {
+        let ulid = board_ulid.get();
+        if ulid.is_empty() {
             return;
         }
-        let url = format!("/api/events?board_id={bid}");
+        let url = format!("/api/events?board_id={ulid}");
         let Ok(es) = web_sys::EventSource::new(&url) else {
             leptos::logging::error!("EventSource: failed to open {url}");
             return;
@@ -131,18 +124,12 @@ pub fn BoardView() -> impl IntoView {
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
 
-        // ── Deployment-triggered reload via SSE reconnect ─────────────────
-        // Store the version seen on first connection. On every reconnect
-        // (onerror → onopen) we re-fetch /api/info; if the version has
-        // changed the server was redeployed and we hard-reload to pick up
-        // new frontend assets.
+        // Deployment-triggered reload via SSE reconnect.
         let initial_version: std::rc::Rc<std::cell::RefCell<Option<String>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         let had_error: std::rc::Rc<std::cell::Cell<bool>> =
             std::rc::Rc::new(std::cell::Cell::new(false));
 
-        // onopen: on first open capture the version; on reconnect after an
-        // error check whether the version changed.
         let initial_version_open = initial_version.clone();
         let had_error_open = had_error.clone();
         let onopen_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
@@ -152,14 +139,10 @@ pub fn BoardView() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 if let Ok(info) = crate::api::fetch_app_info().await {
                     if is_reconnect {
-                        // Reconnected after a drop — reload if version changed.
                         let stored = iv.borrow().clone();
                         match stored {
-                            // Baseline was never stored (initial fetch failed); log
-                            // so the silent miss is visible in production diagnostics.
                             None => leptos::logging::warn!(
-                                "auto-reload: baseline version unknown (initial fetch failed); \
-                                 skipping reload check"
+                                "auto-reload: baseline version unknown; skipping reload check"
                             ),
                             Some(baseline) if baseline != info.version => {
                                 let _ = leptos::prelude::window().location().reload();
@@ -167,7 +150,6 @@ pub fn BoardView() -> impl IntoView {
                             Some(_) => {}
                         }
                     } else {
-                        // First open — record baseline version.
                         *iv.borrow_mut() = Some(info.version);
                     }
                 }
@@ -176,8 +158,6 @@ pub fn BoardView() -> impl IntoView {
         es.set_onopen(Some(onopen_cb.as_ref().unchecked_ref()));
         onopen_cb.forget();
 
-        // onerror: mark that the connection dropped so the next onopen knows
-        // it is a reconnect rather than the initial open.
         let had_error_err = had_error.clone();
         let onerror_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
             had_error_err.set(true);
@@ -190,16 +170,21 @@ pub fn BoardView() -> impl IntoView {
 
     // ── Initial data fetch ────────────────────────────────────────────────
     Effect::new(move |_| {
-        let id = board_id();
-        if id.is_empty() {
+        let slug = board_slug();
+        if slug.is_empty() {
+            board_ulid.set(String::new());
             return;
         }
+        // Clear ULID immediately so the SSE effect closes any stale connection.
+        board_ulid.set(String::new());
         loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(board) = crate::api::fetch_board(&id).await {
+            if let Ok(board) = crate::api::fetch_board(&slug).await {
                 board_name.set(board.name);
+                // Set the ULID after fetch — triggers the SSE effect to connect.
+                board_ulid.set(board.id);
             }
-            match crate::api::fetch_columns(&id).await {
+            match crate::api::fetch_columns(&slug).await {
                 Ok(fetched) => {
                     columns.set(fetched.into_iter().map(RwSignal::new).collect());
                 }
@@ -210,12 +195,14 @@ pub fn BoardView() -> impl IntoView {
     });
 
     // ── Column-level SSE events ───────────────────────────────────────────
+    // Use `board_ulid.get_untracked()` for the board-ID comparison so this
+    // Effect is only reactive on `sse_event`, not on `board_ulid`.
     Effect::new(move |_| {
         let Some(event) = sse_event.get() else { return };
-        let bid = board_id();
+        let ulid = board_ulid.get_untracked();
         match event {
             BoardSseEvent::ColumnCreated { column } => {
-                if column.board_id == bid {
+                if column.board_id == ulid {
                     columns.update(|cs| {
                         if cs.iter().any(|s| s.get_untracked().id == column.id) {
                             return;
@@ -225,7 +212,7 @@ pub fn BoardView() -> impl IntoView {
                 }
             }
             BoardSseEvent::ColumnUpdated { column } => {
-                if column.board_id == bid {
+                if column.board_id == ulid {
                     columns.with_untracked(|cs| {
                         if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == column.id) {
                             sig.set(column);
@@ -239,7 +226,7 @@ pub fn BoardView() -> impl IntoView {
             BoardSseEvent::ColumnsReordered { columns: reordered } => {
                 if reordered
                     .first()
-                    .map(|c| c.board_id == bid)
+                    .map(|c| c.board_id == ulid)
                     .unwrap_or(false)
                 {
                     columns.update(|cs| {
@@ -278,9 +265,6 @@ pub fn BoardView() -> impl IntoView {
                     children=move |sig| {
                         let col_id = sig.get_untracked().id.clone();
                         view! {
-                            // Ghost placeholder shown before the hovered column while
-                            // a column drag is in progress.  Shows the dragged column's
-                            // name so the user knows what they are repositioning.
                             <Show when=move || {
                                 drag_over_col_id.get().as_deref() == Some(col_id.as_str())
                                     && matches!(drag_payload.get(), DragPayload::Column { .. })
@@ -311,7 +295,6 @@ pub fn BoardView() -> impl IntoView {
             </div>
         </div>
 
-        // Maximised card overlay — shown when `?card=<id>` is in the URL.
         <CardModal
             card=maximised_card
             on_updated=on_modal_updated

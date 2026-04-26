@@ -55,7 +55,7 @@ pub fn BoardsList() -> impl IntoView {
                     children=|board| {
                         view! {
                             <div class="board-card">
-                                <A href=format!("/boards/{}", board.id)>
+                                <A href=format!("/boards/{}", board.name)>
                                     {board.name.clone()}
                                 </A>
                             </div>
