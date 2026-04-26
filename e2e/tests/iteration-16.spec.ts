@@ -5,12 +5,12 @@ import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from '.
 
 test.describe('Ticket number format', () => {
   test('card numbers render without leading zeros', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Number Format Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `number-format-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     // Create two cards; backend assigns sequential numbers (e.g. 1, 2).
     await apiCreateCard(request, col.id, 'First');
     await apiCreateCard(request, col.id, 'Second');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     const numbers = await page.locator('.card-number').allTextContents();
     for (const n of numbers) {
@@ -24,11 +24,11 @@ test.describe('Ticket number format', () => {
 
 test.describe('Drag-over outline cleanup', () => {
   test('no drag-over outline remains after cross-column card drop', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Ghost Cleanup Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'Source', 0);
-    await apiCreateColumn(request, board.id, 'Target', 1);
+    const board = await apiCreateBoard(request, `ghost-cleanup-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'Source', 0);
+    await apiCreateColumn(request, board.name, 'Target', 1);
     await apiCreateCard(request, col1.id, 'Drag me');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     const card = page.locator('.column-view').nth(0).locator('.card-item').first();
     const targetList = page.locator('.column-view').nth(1).locator('.card-list');
@@ -39,12 +39,12 @@ test.describe('Drag-over outline cleanup', () => {
   });
 
   test('no drag-over outline remains when card dropped on another card', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card-on-Card Drop Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'Source', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Target', 1);
+    const board = await apiCreateBoard(request, `card-on-card-drop-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'Source', 0);
+    const col2 = await apiCreateColumn(request, board.name, 'Target', 1);
     await apiCreateCard(request, col1.id, 'Drag me');
     await apiCreateCard(request, col2.id, 'Drop target');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Drop the card from col1 directly on top of the card in col2.
     const dragCard = page.locator('.column-view').nth(0).locator('.card-item').first();
@@ -59,10 +59,10 @@ test.describe('Drag-over outline cleanup', () => {
 
 test.describe('Column drag ghost', () => {
   test('column drag reorders columns and leaves no ghost after drop', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Ghost Board ${Date.now()}`);
-    await apiCreateColumn(request, board.id, 'Alpha', 0);
-    await apiCreateColumn(request, board.id, 'Beta', 1);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-ghost-board-${Date.now()}`);
+    await apiCreateColumn(request, board.name, 'Alpha', 0);
+    await apiCreateColumn(request, board.name, 'Beta', 1);
+    await gotoBoardView(page, board.name);
 
     // Drag Beta (index 1) leftward onto Alpha (index 0) so the reorder produces
     // a visible DOM change [Alpha, Beta] → [Beta, Alpha].  The ghost placeholder
@@ -80,11 +80,11 @@ test.describe('Column drag ghost', () => {
   });
 
   test('ghost is absent after each of several successive column drags', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Ghost Track Board ${Date.now()}`);
-    await apiCreateColumn(request, board.id, 'One', 0);
-    await apiCreateColumn(request, board.id, 'Two', 1);
-    await apiCreateColumn(request, board.id, 'Three', 2);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-ghost-track-board-${Date.now()}`);
+    await apiCreateColumn(request, board.name, 'One', 0);
+    await apiCreateColumn(request, board.name, 'Two', 1);
+    await apiCreateColumn(request, board.name, 'Three', 2);
+    await gotoBoardView(page, board.name);
 
     // First drag: move col 1 (Two) before col 0 (One) → [Two, One, Three].
     await page.locator('.column-grip').nth(1).dragTo(
@@ -108,7 +108,7 @@ test.describe('Column drag ghost', () => {
 
 test.describe('Auto-reload on deployment', () => {
   test('reloads when version changes after SSE reconnect', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Auto Reload Board ${Date.now()}`);
+    const board = await apiCreateBoard(request, `auto-reload-board-${Date.now()}`);
 
     // Inject a tracker to capture the EventSource instance before WASM runs.
     await page.addInitScript(() => {
@@ -126,7 +126,7 @@ test.describe('Auto-reload on deployment', () => {
       (window as any).EventSource = PatchedES;
     });
 
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Wait until the EventSource is OPEN (readyState 1), then give the
     // spawn_local fetch_app_info task a tick to store the baseline version.
@@ -160,7 +160,7 @@ test.describe('Auto-reload on deployment', () => {
   });
 
   test('does not reload when version is unchanged after reconnect', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `No Reload Board ${Date.now()}`);
+    const board = await apiCreateBoard(request, `no-reload-board-${Date.now()}`);
 
     await page.addInitScript(() => {
       const OrigES = (window as any).EventSource;
@@ -177,7 +177,7 @@ test.describe('Auto-reload on deployment', () => {
       (window as any).EventSource = PatchedES;
     });
 
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Wait until the EventSource is OPEN, then give the baseline fetch a tick.
     await page.waitForFunction(
@@ -202,4 +202,3 @@ test.describe('Auto-reload on deployment', () => {
     expect(navigated).toBe(false);
   });
 });
-

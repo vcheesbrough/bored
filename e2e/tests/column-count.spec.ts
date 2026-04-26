@@ -10,17 +10,17 @@ import {
 
 test.describe('column card count badge', () => {
   test('empty column shows badge with 0', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Count Badge Empty ${Date.now()}`);
-    await apiCreateColumn(request, board.id, 'Empty');
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `count-badge-empty-${Date.now()}`);
+    await apiCreateColumn(request, board.name, 'Empty');
+    await gotoBoardView(page, board.name);
 
     await expect(page.locator('.card-count-badge').first()).toHaveText('0');
   });
 
   test('badge increments when a card is added via API', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Count Badge Add ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Col');
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `count-badge-add-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Col');
+    await gotoBoardView(page, board.name);
 
     await expect(page.locator('.card-count-badge').first()).toHaveText('0');
 
@@ -32,10 +32,10 @@ test.describe('column card count badge', () => {
   });
 
   test('badge decrements when a card is deleted via API', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Count Badge Delete ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Col');
+    const board = await apiCreateBoard(request, `count-badge-delete-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Col');
     const card = await apiCreateCard(request, col.id, 'Bye');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     await expect(page.locator('.card-count-badge').first()).toHaveText('1');
 
@@ -44,11 +44,11 @@ test.describe('column card count badge', () => {
   });
 
   test('moving a card updates counts on both columns', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Count Badge Move ${Date.now()}`);
-    const src = await apiCreateColumn(request, board.id, 'Source', 0);
-    const dst = await apiCreateColumn(request, board.id, 'Dest', 1);
+    const board = await apiCreateBoard(request, `count-badge-move-${Date.now()}`);
+    const src = await apiCreateColumn(request, board.name, 'Source', 0);
+    const dst = await apiCreateColumn(request, board.name, 'Dest', 1);
     const card = await apiCreateCard(request, src.id, 'Traveller');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     const badges = page.locator('.card-count-badge');
     await expect(badges.nth(0)).toHaveText('1');
@@ -61,11 +61,11 @@ test.describe('column card count badge', () => {
   });
 
   test('badge updates in second browser context via SSE', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `Count Badge SSE ${Date.now()}`);
-    await apiCreateColumn(request, board.id, 'Col');
+    const board = await apiCreateBoard(request, `count-badge-sse-${Date.now()}`);
+    await apiCreateColumn(request, board.name, 'Col');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     await expect(pageA.locator('.card-count-badge').first()).toHaveText('0');
     await expect(pageB.locator('.card-count-badge').first()).toHaveText('0');
@@ -94,11 +94,11 @@ async function openTwoContexts(browser: Browser) {
 async function openBoardInBoth(
   ctxA: Awaited<ReturnType<Browser['newContext']>>,
   ctxB: Awaited<ReturnType<Browser['newContext']>>,
-  boardId: string
+  boardSlug: string
 ) {
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
-  await gotoBoardView(pageA, boardId);
-  await gotoBoardView(pageB, boardId);
+  await gotoBoardView(pageA, boardSlug);
+  await gotoBoardView(pageB, boardSlug);
   return [pageA, pageB] as const;
 }

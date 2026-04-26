@@ -33,7 +33,8 @@ pub fn Home() -> impl IntoView {
                     if let Some(first) = boards.into_iter().next() {
                         // Navigate to the first board's URL. `Default::default()` uses
                         // the default navigation options (no replace, no state).
-                        nav(&format!("/boards/{}", first.id), Default::default());
+                        // Board names are URL slugs, so we navigate by name, not ULID.
+                        nav(&format!("/boards/{}", first.name), Default::default());
                     } else {
                         // No boards exist — show the empty-state form.
                         no_boards.set(true);
@@ -58,7 +59,7 @@ pub fn Home() -> impl IntoView {
         let nav = navigate2.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::create_board(name).await {
-                Ok(board) => nav(&format!("/boards/{}", board.id), Default::default()),
+                Ok(board) => nav(&format!("/boards/{}", board.name), Default::default()),
                 Err(e) => leptos::logging::error!("failed to create board: {e}"),
             }
         });
@@ -91,9 +92,31 @@ pub fn Home() -> impl IntoView {
                     // `on:input` fires on every keystroke and updates the signal.
                     <input
                         type="text"
-                        placeholder="Board name"
+                        placeholder="Board name (lowercase, digits, hyphens)"
                         prop:value=move || new_board_name.get()
-                        on:input=move |ev| new_board_name.set(event_target_value(&ev))
+                        on:input=move |ev| {
+                            // Sanitize on every input event (covers paste, autocomplete,
+                            // drag-and-drop — not just keystrokes). Lowercase first so
+                            // pasted uppercase text is converted rather than stripped.
+                            let sanitized: String = event_target_value(&ev)
+                                .to_ascii_lowercase()
+                                .chars()
+                                .filter(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+                                .collect();
+                            new_board_name.set(sanitized);
+                        }
+                        // Block any character that isn't a valid slug character.
+                        // Multi-character key names (Backspace, Enter, etc.) are
+                        // always allowed — only single printable chars are filtered.
+                        on:keydown=move |ev: web_sys::KeyboardEvent| {
+                            let key = ev.key();
+                            if key.len() == 1 {
+                                let ch = key.chars().next().unwrap();
+                                if !matches!(ch, 'a'..='z' | '0'..='9' | '-') {
+                                    ev.prevent_default();
+                                }
+                            }
+                        }
                     />
                     <button type="submit">"Create board"</button>
                 </form>

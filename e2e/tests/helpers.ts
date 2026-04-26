@@ -10,14 +10,14 @@ export async function apiCreateBoard(request: APIRequestContext, name: string) {
 
 export async function apiCreateColumn(
   request: APIRequestContext,
-  boardId: string,
+  boardSlug: string,
   name: string,
   position = 0
 ) {
-  const res = await request.post(`/api/boards/${boardId}/columns`, {
+  const res = await request.post(`/api/boards/${boardSlug}/columns`, {
     data: { name, position },
   });
-  if (!res.ok()) throw new Error(`POST /api/boards/${boardId}/columns failed: ${res.status()} ${await res.text()}`);
+  if (!res.ok()) throw new Error(`POST /api/boards/${boardSlug}/columns failed: ${res.status()} ${await res.text()}`);
   return await res.json() as { id: string; name: string; board_id: string };
 }
 
@@ -53,8 +53,8 @@ export async function apiMoveCard(
 // ── Browser helpers ───────────────────────────────────────────────────────
 
 /** Navigate to a board and wait for the columns row to be present. */
-export async function gotoBoardView(page: Page, boardId: string) {
-  await page.goto(`/boards/${boardId}`);
+export async function gotoBoardView(page: Page, boardSlug: string) {
+  await page.goto(`/boards/${boardSlug}`);
   // Wait for the WASM app to load and render the board view.
   await page.waitForSelector('.columns-row');
 }

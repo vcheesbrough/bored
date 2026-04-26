@@ -3,11 +3,11 @@ import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from '.
 
 test.describe('Drag and drop', () => {
   test('move card to another column', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Drag Card Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'Source', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Target', 1);
+    const board = await apiCreateBoard(request, `drag-card-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'Source', 0);
+    const col2 = await apiCreateColumn(request, board.name, 'Target', 1);
     await apiCreateCard(request, col1.id, 'Drag me');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Drag the card from column 1 to column 2's card-list.
     const card = page.locator('.column-view').nth(0).locator('.card-item').first();
@@ -20,11 +20,11 @@ test.describe('Drag and drop', () => {
   });
 
   test('moved card position persists after reload', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Drag Persist Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'Source', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Target', 1);
+    const board = await apiCreateBoard(request, `drag-persist-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'Source', 0);
+    const col2 = await apiCreateColumn(request, board.name, 'Target', 1);
     const card = await apiCreateCard(request, col1.id, 'Persist me');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Drag the card to col2.
     const cardEl = page.locator('.column-view').nth(0).locator('.card-item').first();
@@ -41,16 +41,16 @@ test.describe('Drag and drop', () => {
   });
 
   test('column order reflects API reorder (SSE update)', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Order Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'Alpha', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Beta', 1);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-order-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'Alpha', 0);
+    const col2 = await apiCreateColumn(request, board.name, 'Beta', 1);
+    await gotoBoardView(page, board.name);
 
     await expect(page.locator('.column-name').nth(0)).toHaveText('Alpha');
     await expect(page.locator('.column-name').nth(1)).toHaveText('Beta');
 
     // Reorder via API (same call the drag handler makes); SSE broadcasts the change.
-    await request.put(`/api/boards/${board.id}/columns/reorder`, {
+    await request.put(`/api/boards/${board.name}/columns/reorder`, {
       data: { order: [col2.id, col1.id] },
     });
 
@@ -60,12 +60,12 @@ test.describe('Drag and drop', () => {
   });
 
   test('reorder cards within the same column via API and verify SSE update', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Reorder Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column', 0);
+    const board = await apiCreateBoard(request, `card-reorder-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column', 0);
     // API inserts at top, so cardB (created second) appears above cardA.
     const cardA = await apiCreateCard(request, col.id, 'Card A');
     const cardB = await apiCreateCard(request, col.id, 'Card B');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Card B is at index 0 (top), Card A at index 1.
     await expect(page.locator('.card-item').nth(0).locator('.card-preview')).toContainText('Card B');
@@ -88,12 +88,12 @@ test.describe('Drag and drop', () => {
   });
 
   test('column order persists after reload', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Persist Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'First', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Second', 1);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-persist-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'First', 0);
+    const col2 = await apiCreateColumn(request, board.name, 'Second', 1);
+    await gotoBoardView(page, board.name);
 
-    await request.put(`/api/boards/${board.id}/columns/reorder`, {
+    await request.put(`/api/boards/${board.name}/columns/reorder`, {
       data: { order: [col2.id, col1.id] },
     });
 

@@ -6,31 +6,25 @@ use axum::{
 
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
-use crate::models::{DbBoard, DbColumn};
-use crate::routes::boards::{editor_sub, AppState};
+use crate::models::DbColumn;
+use crate::routes::boards::{editor_sub, find_board_by_slug, AppState};
 
 pub async fn list_columns(
     State(state): State<AppState>,
-    Path(board_id): Path<String>,
+    Path(board_slug): Path<String>,
 ) -> Result<Json<Vec<shared::Column>>, StatusCode> {
-    // Verify the board exists so we return 404 rather than an empty list for
-    // unknown board IDs — callers shouldn't silently see zero columns.
-    let board: Option<DbBoard> = state
-        .db
-        .select(("boards", &board_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if board.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let board = match find_board_by_slug(&state.db, &board_slug).await? {
+        Some(b) => b,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let board_ulid = board.id.id.to_raw();
 
     let columns: Vec<DbColumn> = state
         .db
         .query(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
-        .bind(("id", board_id.clone()))
+        .bind(("id", board_ulid))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -41,19 +35,15 @@ pub async fn list_columns(
 
 pub async fn create_column(
     State(state): State<AppState>,
-    Path(board_id): Path<String>,
+    Path(board_slug): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateColumnRequest>,
 ) -> Result<(StatusCode, Json<shared::Column>), StatusCode> {
-    let board: Option<DbBoard> = state
-        .db
-        .select(("boards", &board_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if board.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let board = match find_board_by_slug(&state.db, &board_slug).await? {
+        Some(b) => b,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let board_ulid = board.id.id.to_raw();
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
@@ -62,7 +52,7 @@ pub async fn create_column(
         .db
         .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position, last_edited_by = $editor")
         .bind(("id", id))
-        .bind(("board_id", board_id.clone()))
+        .bind(("board_id", board_ulid.clone()))
         .bind(("name", payload.name))
         .bind(("position", payload.position))
         .bind(("editor", editor))
@@ -75,7 +65,7 @@ pub async fn create_column(
         Some(c) => {
             let api_col = c.into_api();
             let _ = state.events.send(BroadcastEvent {
-                board_id: board_id.clone(),
+                board_id: board_ulid,
                 event: BoardEvent::ColumnCreated {
                     column: api_col.clone(),
                 },
@@ -185,30 +175,26 @@ pub async fn delete_column(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `PUT /api/boards/:id/columns/reorder`
+/// `PUT /api/boards/:slug/columns/reorder`
 ///
 /// Accepts a complete ordered list of column IDs (`{ order: ["id1","id2",…] }`)
 /// and assigns `position = index` to each. This is a bulk operation — the client
 /// sends the full desired order and the server rewrites every position in one
-/// transaction. Column IDs not present in the list are skipped (their position
-/// is unchanged), so the caller must include every column to guarantee a
-/// consistent result.
+/// pass. Column IDs not present in the list are skipped (their position is
+/// unchanged), so the caller must include every column to guarantee a consistent
+/// result. The board is looked up by slug; the ULID is used for the DB query
+/// guard that prevents cross-board IDOR writes.
 pub async fn reorder_columns(
     State(state): State<AppState>,
-    Path(board_id): Path<String>,
+    Path(board_slug): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::ColumnsReorderRequest>,
 ) -> Result<Json<Vec<shared::Column>>, StatusCode> {
-    // Verify the board exists before touching any columns.
-    let board: Option<DbBoard> = state
-        .db
-        .select(("boards", &board_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if board.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let board = match find_board_by_slug(&state.db, &board_slug).await? {
+        Some(b) => b,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let board_ulid = board.id.id.to_raw();
 
     let editor = editor_sub(&claims);
     // Update each column's position to its index in the supplied order.
@@ -221,7 +207,7 @@ pub async fn reorder_columns(
             .query("UPDATE type::thing('columns', $id) SET position = $pos, last_edited_by = $editor WHERE board = type::thing('boards', $board_id)")
             .bind(("id", col_id.clone()))
             .bind(("pos", index as i32))
-            .bind(("board_id", board_id.clone()))
+            .bind(("board_id", board_ulid.clone()))
             .bind(("editor", editor.clone()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -233,7 +219,7 @@ pub async fn reorder_columns(
         .query(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
-        .bind(("id", board_id.clone()))
+        .bind(("id", board_ulid.clone()))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -242,7 +228,7 @@ pub async fn reorder_columns(
     let api_cols: Vec<shared::Column> = columns.into_iter().map(DbColumn::into_api).collect();
 
     let _ = state.events.send(BroadcastEvent {
-        board_id,
+        board_id: board_ulid,
         event: BoardEvent::ColumnsReordered {
             columns: api_cols.clone(),
         },

@@ -21,7 +21,7 @@ pub struct ExpandedCardId(pub RwSignal<Option<String>>);
 /// `Editing`   → blur / Escape → `Expanded`
 ///
 /// The maximize button (visible in Expanded/Editing) navigates to
-/// `/boards/:id?card=:card_id`, which causes `BoardView` to overlay the
+/// `/boards/:slug?card=:number`, which causes `BoardView` to overlay the
 /// same card in full-screen mode without remounting the board.
 #[derive(Clone, PartialEq)]
 enum CardState {
@@ -63,7 +63,8 @@ pub fn CardItem(
         use_context::<ExpandedCardId>().expect("ExpandedCardId context missing");
 
     let params = use_params_map();
-    let board_id = move || params.with(|p| p.get("id").unwrap_or_default());
+    // Reads the board slug from the `:slug` route parameter.
+    let board_slug = move || params.with(|p| p.get("slug").unwrap_or_default());
     let navigate = StoredValue::new(use_navigate());
 
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
@@ -221,8 +222,10 @@ pub fn CardItem(
 
     let on_maximize_click = move |e: leptos::ev::MouseEvent| {
         e.stop_propagation();
-        let card_id = card.get_untracked().id.clone();
-        let url = format!("/boards/{}?card={}", board_id(), card_id);
+        // Use the card's sequential number (not ULID) in the URL so the link
+        // is human-readable and stable across environment resets.
+        let card_num = card.get_untracked().number;
+        let url = format!("/boards/{}?card={}", board_slug(), card_num);
         navigate.with_value(|nav| nav(&url, NavigateOptions::default()));
     };
 
