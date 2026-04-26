@@ -120,7 +120,10 @@ pub async fn app(state: AppState) -> Router {
         .route("/boards/:slug", put(routes::boards::update_board))
         .route("/boards/:slug", delete(routes::boards::delete_board))
         .route("/boards/:slug/columns", get(routes::columns::list_columns))
-        .route("/boards/:slug/columns", post(routes::columns::create_column))
+        .route(
+            "/boards/:slug/columns",
+            post(routes::columns::create_column),
+        )
         // Bulk reorder: PUT replaces the entire column order in one round-trip.
         .route(
             "/boards/:slug/columns/reorder",
