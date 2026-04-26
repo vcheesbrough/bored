@@ -108,7 +108,8 @@ async fn migrate_board_names(db: &Surreal<Db>) -> surrealdb::Result<()> {
             db.query("UPDATE $id SET name = $name")
                 .bind(("id", board.id))
                 .bind(("name", final_name))
-                .await?;
+                .await?
+                .check()?;
         }
     }
 
