@@ -1,6 +1,5 @@
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
-use wasm_bindgen::prelude::*;
 
 #[component]
 pub fn BoardChooser(
@@ -240,7 +239,17 @@ pub fn BoardChooser(
                     placeholder="Board name"
                     style:display=move || if adding_board.get() { "block" } else { "none" }
                     prop:value=move || new_board_name.get()
-                    on:input=move |ev| new_board_name.set(event_target_value(&ev))
+                    on:input=move |ev| {
+                        // Sanitize on every input event (covers paste, autocomplete,
+                        // drag-and-drop — not just keystrokes). Lowercase first so
+                        // pasted uppercase text is converted rather than stripped.
+                        let sanitized: String = event_target_value(&ev)
+                            .to_ascii_lowercase()
+                            .chars()
+                            .filter(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+                            .collect();
+                        new_board_name.set(sanitized);
+                    }
                     on:blur=move |_| submit_new_board.run(())
                     on:keydown=move |ev: web_sys::KeyboardEvent| {
                         let key = ev.key();

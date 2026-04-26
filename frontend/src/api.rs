@@ -138,16 +138,6 @@ pub async fn delete_column(column_id: &str) -> Result<(), gloo_net::Error> {
     }
 }
 
-pub async fn fetch_card(card_id: &str) -> Result<shared::Card, gloo_net::Error> {
-    check_auth(
-        Request::get(&format!("/api/cards/{card_id}"))
-            .send()
-            .await?,
-    )?
-    .json::<shared::Card>()
-    .await
-}
-
 /// Fetch a card by its human-readable sequential number via `GET /api/cards/by-number/:number`.
 /// Used when the URL carries `?card=<number>` rather than the internal ULID.
 pub async fn fetch_card_by_number(number: u32) -> Result<shared::Card, gloo_net::Error> {

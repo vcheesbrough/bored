@@ -1,6 +1,5 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate; // `use_navigate` returns a function you can call to redirect
-use wasm_bindgen::prelude::*;
 
 use crate::components::user_badge::UserBadge;
 
@@ -95,7 +94,17 @@ pub fn Home() -> impl IntoView {
                         type="text"
                         placeholder="Board name (lowercase, digits, hyphens)"
                         prop:value=move || new_board_name.get()
-                        on:input=move |ev| new_board_name.set(event_target_value(&ev))
+                        on:input=move |ev| {
+                            // Sanitize on every input event (covers paste, autocomplete,
+                            // drag-and-drop — not just keystrokes). Lowercase first so
+                            // pasted uppercase text is converted rather than stripped.
+                            let sanitized: String = event_target_value(&ev)
+                                .to_ascii_lowercase()
+                                .chars()
+                                .filter(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+                                .collect();
+                            new_board_name.set(sanitized);
+                        }
                         // Block any character that isn't a valid slug character.
                         // Multi-character key names (Backspace, Enter, etc.) are
                         // always allowed — only single printable chars are filtered.
