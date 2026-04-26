@@ -130,6 +130,11 @@ pub async fn app(state: AppState) -> Router {
         .route("/columns/:id", delete(routes::columns::delete_column))
         .route("/columns/:id/cards", get(routes::cards::list_cards))
         .route("/columns/:id/cards", post(routes::cards::create_card))
+        // Static segment "by-number" must come before `:id` so it takes priority.
+        .route(
+            "/cards/by-number/:number",
+            get(routes::cards::get_card_by_number),
+        )
         .route("/cards/:id", get(routes::cards::get_card))
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
@@ -299,20 +304,19 @@ mod tests {
 
     #[tokio::test]
     async fn create_board_starts_empty() {
-        // New boards have no default columns — the user creates them manually.
         let server = test_app().await;
 
         let create_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Empty Board".to_string(),
+                name: "empty-board".to_string(),
             })
             .await;
         create_resp.assert_status(StatusCode::CREATED);
         let board: shared::Board = create_resp.json();
 
         let list_resp = server
-            .get(&format!("/api/boards/{}/columns", board.id))
+            .get(&format!("/api/boards/{}/columns", board.name))
             .await;
         list_resp.assert_status_ok();
         let columns: Vec<shared::Column> = list_resp.json();
@@ -326,37 +330,70 @@ mod tests {
         let create_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Test Board".to_string(),
+                name: "test-board".to_string(),
             })
             .await;
         create_resp.assert_status(StatusCode::CREATED);
         let board: shared::Board = create_resp.json();
-        assert_eq!(board.name, "Test Board");
+        assert_eq!(board.name, "test-board");
 
         let list_resp = server.get("/api/boards").await;
         list_resp.assert_status_ok();
         let boards: Vec<shared::Board> = list_resp.json();
-        // `.any(...)` returns true if at least one element satisfies the predicate.
         assert!(boards.iter().any(|b| b.id == board.id));
     }
 
     #[tokio::test]
-    async fn get_board_by_id() {
+    async fn create_board_invalid_name_returns_422() {
+        let server = test_app().await;
+        // Names with spaces, uppercase, or leading/trailing hyphens are rejected.
+        for bad in &["My Board", "UPPER", "-leading", "trailing-", ""] {
+            server
+                .post("/api/boards")
+                .json(&shared::CreateBoardRequest {
+                    name: bad.to_string(),
+                })
+                .await
+                .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_board_duplicate_name_returns_409() {
+        let server = test_app().await;
+        server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "dupe-board".to_string(),
+            })
+            .await
+            .assert_status(StatusCode::CREATED);
+        server
+            .post("/api/boards")
+            .json(&shared::CreateBoardRequest {
+                name: "dupe-board".to_string(),
+            })
+            .await
+            .assert_status(StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn get_board_by_slug() {
         let server = test_app().await;
 
         let create_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Get Me".to_string(),
+                name: "get-me".to_string(),
             })
             .await;
         let board: shared::Board = create_resp.json();
 
-        let get_resp = server.get(&format!("/api/boards/{}", board.id)).await;
+        let get_resp = server.get(&format!("/api/boards/{}", board.name)).await;
         get_resp.assert_status_ok();
         let fetched: shared::Board = get_resp.json();
         assert_eq!(fetched.id, board.id);
-        assert_eq!(fetched.name, "Get Me");
+        assert_eq!(fetched.name, "get-me");
     }
 
     #[tokio::test]
@@ -366,24 +403,25 @@ mod tests {
         let create_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Old Name".to_string(),
+                name: "old-name".to_string(),
             })
             .await;
         let board: shared::Board = create_resp.json();
 
         let update_resp = server
-            .put(&format!("/api/boards/{}", board.id))
+            .put(&format!("/api/boards/{}", board.name))
             .json(&shared::UpdateBoardRequest {
-                name: "New Name".to_string(),
+                name: "new-name".to_string(),
             })
             .await;
         update_resp.assert_status_ok();
         let updated: shared::Board = update_resp.json();
-        assert_eq!(updated.name, "New Name");
+        assert_eq!(updated.name, "new-name");
 
-        let get_resp = server.get(&format!("/api/boards/{}", board.id)).await;
+        // After rename, fetch by the new slug.
+        let get_resp = server.get(&format!("/api/boards/{}", updated.name)).await;
         let fetched: shared::Board = get_resp.json();
-        assert_eq!(fetched.name, "New Name");
+        assert_eq!(fetched.name, "new-name");
     }
 
     #[tokio::test]
@@ -393,15 +431,15 @@ mod tests {
         let create_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Delete Me".to_string(),
+                name: "delete-me".to_string(),
             })
             .await;
         let board: shared::Board = create_resp.json();
 
-        let del_resp = server.delete(&format!("/api/boards/{}", board.id)).await;
+        let del_resp = server.delete(&format!("/api/boards/{}", board.name)).await;
         del_resp.assert_status(StatusCode::NO_CONTENT);
 
-        let get_resp = server.get(&format!("/api/boards/{}", board.id)).await;
+        let get_resp = server.get(&format!("/api/boards/{}", board.name)).await;
         get_resp.assert_status(StatusCode::NOT_FOUND);
     }
 
@@ -412,13 +450,13 @@ mod tests {
         let create_board_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Board With Columns".to_string(),
+                name: "board-with-columns".to_string(),
             })
             .await;
         let board: shared::Board = create_board_resp.json();
 
         let create_col_resp = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "To Do".to_string(),
                 position: 0,
@@ -430,7 +468,7 @@ mod tests {
         assert_eq!(column.board_id, board.id);
 
         let list_resp = server
-            .get(&format!("/api/boards/{}/columns", board.id))
+            .get(&format!("/api/boards/{}/columns", board.name))
             .await;
         list_resp.assert_status_ok();
         let columns: Vec<shared::Column> = list_resp.json();
@@ -444,13 +482,13 @@ mod tests {
         let create_board_resp = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Board For Cascade".to_string(),
+                name: "board-for-cascade".to_string(),
             })
             .await;
         let board: shared::Board = create_board_resp.json();
 
         let create_col_resp = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Col 1".to_string(),
                 position: 0,
@@ -459,11 +497,10 @@ mod tests {
         let column: shared::Column = create_col_resp.json();
 
         server
-            .delete(&format!("/api/boards/{}", board.id))
+            .delete(&format!("/api/boards/{}", board.name))
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        // Verify the column no longer exists by trying to update it.
         let update_resp = server
             .put(&format!("/api/columns/{}", column.id))
             .json(&shared::UpdateColumnRequest {
@@ -474,18 +511,17 @@ mod tests {
         update_resp.assert_status(StatusCode::NOT_FOUND);
     }
 
-    // Shared helper used by several card tests. Creates a board (with its default
-    // Todo/Done columns) and then adds a fresh column named "Col".
+    // Shared helper used by several card tests.
     async fn setup_board_and_column(server: &TestServer) -> (shared::Board, shared::Column) {
         let board: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Test Board".to_string(),
+                name: "test-board".to_string(),
             })
             .await
             .json();
         let column: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Col".to_string(),
                 position: 0,
@@ -663,7 +699,7 @@ mod tests {
             .json();
 
         server
-            .delete(&format!("/api/boards/{}", board.id))
+            .delete(&format!("/api/boards/{}", board.name))
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
@@ -914,8 +950,6 @@ mod tests {
         resp.assert_status(StatusCode::NOT_FOUND);
     }
 
-    // Verifies that reorder_columns assigns positions matching the supplied order
-    // and returns the columns sorted by their new positions.
     #[tokio::test]
     async fn reorder_columns_assigns_positions() {
         let server = test_app().await;
@@ -923,14 +957,13 @@ mod tests {
         let board: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Reorder Board".to_string(),
+                name: "reorder-board".to_string(),
             })
             .await
             .json();
 
-        // Create three columns explicitly (no default columns since iteration 13).
         let col_a: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Todo".to_string(),
                 position: 0,
@@ -938,7 +971,7 @@ mod tests {
             .await
             .json();
         let col_b: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Done".to_string(),
                 position: 1,
@@ -946,7 +979,7 @@ mod tests {
             .await
             .json();
         let col_c: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "In Progress".to_string(),
                 position: 2,
@@ -958,9 +991,8 @@ mod tests {
         let col_done = col_b.id.clone();
         let col_ip = col_c.id.clone();
 
-        // Reorder to: In Progress, Todo, Done.
         let reorder_resp = server
-            .put(&format!("/api/boards/{}/columns/reorder", board.id))
+            .put(&format!("/api/boards/{}/columns/reorder", board.name))
             .json(&shared::ColumnsReorderRequest {
                 order: vec![col_ip.clone(), col_todo.clone(), col_done.clone()],
             })
@@ -977,24 +1009,20 @@ mod tests {
         assert_eq!(reordered[2].position, 2);
     }
 
-    // Verifies that reorder_columns ignores column IDs that belong to a
-    // different board, preventing cross-board IDOR position writes.
     #[tokio::test]
     async fn reorder_columns_rejects_foreign_column_ids() {
         let server = test_app().await;
 
-        // Board A — we will try to tamper with its column from board B's endpoint.
         let board_a: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Board A".to_string(),
+                name: "board-a".to_string(),
             })
             .await
             .json();
 
-        // Create a column on board A explicitly (no default columns since iteration 13).
         let col_a_todo: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board_a.id))
+            .post(&format!("/api/boards/{}/columns", board_a.name))
             .json(&shared::CreateColumnRequest {
                 name: "Todo".to_string(),
                 position: 0,
@@ -1003,18 +1031,16 @@ mod tests {
             .json();
         let original_position = col_a_todo.position;
 
-        // Board B — the attacker's board. Submit board A's column ID in the order.
         let board_b: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Board B".to_string(),
+                name: "board-b".to_string(),
             })
             .await
             .json();
 
-        // Create two columns on board B explicitly.
         let col_b_todo: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board_b.id))
+            .post(&format!("/api/boards/{}/columns", board_b.name))
             .json(&shared::CreateColumnRequest {
                 name: "Todo".to_string(),
                 position: 0,
@@ -1022,7 +1048,7 @@ mod tests {
             .await
             .json();
         let col_b_done: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board_b.id))
+            .post(&format!("/api/boards/{}/columns", board_b.name))
             .json(&shared::CreateColumnRequest {
                 name: "Done".to_string(),
                 position: 1,
@@ -1030,10 +1056,8 @@ mod tests {
             .await
             .json();
 
-        // Inject board A's column into board B's reorder request.
-        // The WHERE board = … clause should make this a no-op for col_a_todo.
         let resp = server
-            .put(&format!("/api/boards/{}/columns/reorder", board_b.id))
+            .put(&format!("/api/boards/{}/columns/reorder", board_b.name))
             .json(&shared::ColumnsReorderRequest {
                 order: vec![
                     col_b_done.id.clone(),
@@ -1044,9 +1068,8 @@ mod tests {
             .await;
         resp.assert_status_ok();
 
-        // Board A's column must still have its original position.
         let cols_a_after: Vec<shared::Column> = server
-            .get(&format!("/api/boards/{}/columns", board_a.id))
+            .get(&format!("/api/boards/{}/columns", board_a.name))
             .await
             .json();
         let col_a_todo_after = cols_a_after.iter().find(|c| c.id == col_a_todo.id).unwrap();
@@ -1072,16 +1095,11 @@ mod tests {
         let board: shared::Board = server
             .post("/api/boards")
             .json(&shared::CreateBoardRequest {
-                name: "Event Board".to_string(),
+                name: "event-board".to_string(),
             })
             .await
             .json();
 
-        // Use a bounded async wait instead of try_recv so the test doesn't race
-        // the handler. The send always happens before the HTTP response returns,
-        // but relying on try_recv returning Ok rather than Empty is fragile under
-        // a busy executor. 1 s is generous — in practice the channel is ready
-        // in microseconds.
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
             .expect("BoardCreated event timed out")
@@ -1093,7 +1111,7 @@ mod tests {
 
         // CREATE column → ColumnCreated
         let col: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Col".to_string(),
                 position: 0,
@@ -1110,9 +1128,8 @@ mod tests {
             events::BoardEvent::ColumnCreated { .. }
         ));
 
-        // Create a second column so there is somewhere to move the card to.
         let other_col: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Other Col".to_string(),
                 position: 1,
@@ -1215,12 +1232,12 @@ mod tests {
 
         // REORDER columns → ColumnsReordered
         let cols: Vec<shared::Column> = server
-            .get(&format!("/api/boards/{}/columns", board.id))
+            .get(&format!("/api/boards/{}/columns", board.name))
             .await
             .json();
         let order: Vec<String> = cols.iter().rev().map(|c| c.id.clone()).collect();
         server
-            .put(&format!("/api/boards/{}/columns/reorder", board.id))
+            .put(&format!("/api/boards/{}/columns/reorder", board.name))
             .json(&shared::ColumnsReorderRequest { order })
             .await
             .assert_status_ok();
@@ -1251,9 +1268,9 @@ mod tests {
 
         // UPDATE board → BoardUpdated
         server
-            .put(&format!("/api/boards/{}", board.id))
+            .put(&format!("/api/boards/{}", board.name))
             .json(&shared::UpdateBoardRequest {
-                name: "Renamed Board".to_string(),
+                name: "renamed-board".to_string(),
             })
             .await
             .assert_status_ok();
@@ -1267,9 +1284,9 @@ mod tests {
             events::BoardEvent::BoardUpdated { .. }
         ));
 
-        // DELETE board → BoardDeleted
+        // DELETE board → BoardDeleted (use the updated name from the rename above)
         server
-            .delete(&format!("/api/boards/{}", board.id))
+            .delete("/api/boards/renamed-board")
             .await
             .assert_status(StatusCode::NO_CONTENT);
 

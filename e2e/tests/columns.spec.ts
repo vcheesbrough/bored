@@ -3,8 +3,8 @@ import { apiCreateBoard, apiCreateColumn, gotoBoardView, openChooser, closeChoos
 
 test.describe('Columns', () => {
   test('create column via board chooser', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Create Board ${Date.now()}`);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-create-board-${Date.now()}`);
+    await gotoBoardView(page, board.name);
 
     await openChooser(page);
 
@@ -21,9 +21,9 @@ test.describe('Columns', () => {
   });
 
   test('rename column via board chooser', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Rename Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, `Original Name ${Date.now()}`);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-rename-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, `Original Name ${Date.now()}`);
+    await gotoBoardView(page, board.name);
 
     await openChooser(page);
 
@@ -47,9 +47,9 @@ test.describe('Columns', () => {
   });
 
   test('delete column via board chooser', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Col Delete Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, `Delete Me ${Date.now()}`);
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `col-delete-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, `Delete Me ${Date.now()}`);
+    await gotoBoardView(page, board.name);
 
     await openChooser(page);
 

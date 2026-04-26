@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
+use wasm_bindgen::prelude::*;
 
 #[component]
 pub fn BoardChooser(
@@ -7,7 +8,8 @@ pub fn BoardChooser(
     columns: RwSignal<Vec<RwSignal<shared::Column>>>,
 ) -> impl IntoView {
     let params = use_params_map();
-    let current_id = move || params.with(|p| p.get("id").unwrap_or_default());
+    // Reads the `:slug` route parameter — the board name, which doubles as the URL slug.
+    let current_slug = move || params.with(|p| p.get("slug").unwrap_or_default());
 
     let show = RwSignal::new(false);
     let boards: RwSignal<Vec<shared::Board>> = RwSignal::new(Vec::new());
@@ -43,7 +45,8 @@ pub fn BoardChooser(
                     new_board_name.set(String::new());
                     adding_board.set(false);
                     show.set(false);
-                    nav(&format!("/boards/{}", board.id), Default::default());
+                    // Board name is the slug; navigate by name.
+                    nav(&format!("/boards/{}", board.name), Default::default());
                 }
                 Err(e) => leptos::logging::error!("failed to create board: {e}"),
             }
@@ -56,7 +59,8 @@ pub fn BoardChooser(
             adding_col.set(false);
             return;
         }
-        let board_id = current_id();
+        // Use the board slug (current route param) as the API path segment.
+        let board_id = current_slug();
         if board_id.is_empty() {
             return;
         }
@@ -99,7 +103,7 @@ pub fn BoardChooser(
     };
 
     let delete_board_cb: Callback<(String, String)> =
-        Callback::new(move |(board_id, b_name): (String, String)| {
+        Callback::new(move |(board_slug, b_name): (String, String)| {
             let confirmed = window()
                 .confirm_with_message(&format!(
                     "Delete board \"{}\" and all its columns and cards?",
@@ -109,18 +113,21 @@ pub fn BoardChooser(
             if !confirmed {
                 return;
             }
-            let was_current = board_id == current_id();
+            // Compare slug vs current route slug to decide whether to navigate away.
+            let was_current = board_slug == current_slug();
             let nav = navigate_for_delete.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                match crate::api::delete_board(&board_id).await {
+                match crate::api::delete_board(&board_slug).await {
                     Ok(()) => {
-                        boards.update(|bs| bs.retain(|b| b.id != board_id));
+                        // Retain by name (slug), not by ULID.
+                        boards.update(|bs| bs.retain(|b| b.name != board_slug));
                         if was_current {
-                            let next_id =
-                                boards.with_untracked(|bs| bs.first().map(|b| b.id.clone()));
+                            // Navigate to the next board by its slug (name), or home.
+                            let next_slug =
+                                boards.with_untracked(|bs| bs.first().map(|b| b.name.clone()));
                             show.set(false);
-                            match next_id {
-                                Some(id) => nav(&format!("/boards/{}", id), Default::default()),
+                            match next_slug {
+                                Some(slug) => nav(&format!("/boards/{}", slug), Default::default()),
                                 None => nav("/", Default::default()),
                             }
                         }
@@ -185,16 +192,17 @@ pub fn BoardChooser(
                     each=move || boards.get()
                     key=|b| b.id.clone()
                     children=move |board| {
-                        let href = format!("/boards/{}", board.id);
-                        let board_id_active = board.id.clone();
-                        let board_id_delete = board.id.clone();
+                        // Board name IS the slug; use it directly in the URL.
+                        let href = format!("/boards/{}", board.name);
+                        let board_slug_active = board.name.clone();
+                        let board_slug_delete = board.name.clone();
                         let board_name_delete = board.name.clone();
                         view! {
                             <div class="chooser-board-row">
                                 <a
                                     href=href
                                     class="chooser-item"
-                                    class:chooser-item-active=move || board_id_active == current_id()
+                                    class:chooser-item-active=move || board_slug_active == current_slug()
                                     on:click=move |_| show.set(false)
                                 >
                                     {board.name.clone()}
@@ -206,7 +214,7 @@ pub fn BoardChooser(
                                         ev.prevent_default();
                                         ev.stop_propagation();
                                         delete_board_cb.run((
-                                            board_id_delete.clone(),
+                                            board_slug_delete.clone(),
                                             board_name_delete.clone(),
                                         ));
                                     }
@@ -234,13 +242,20 @@ pub fn BoardChooser(
                     prop:value=move || new_board_name.get()
                     on:input=move |ev| new_board_name.set(event_target_value(&ev))
                     on:blur=move |_| submit_new_board.run(())
-                    on:keydown=move |ev| {
-                        if ev.key() == "Enter" {
+                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                        let key = ev.key();
+                        if key == "Enter" {
                             ev.prevent_default();
                             submit_new_board.run(());
-                        } else if ev.key() == "Escape" {
+                        } else if key == "Escape" {
                             new_board_name.set(String::new());
                             adding_board.set(false);
+                        } else if key.len() == 1 {
+                            // Block non-slug characters (only [a-z0-9-] allowed).
+                            let ch = key.chars().next().unwrap();
+                            if !matches!(ch, 'a'..='z' | '0'..='9' | '-') {
+                                ev.prevent_default();
+                            }
                         }
                     }
                     node_ref={
