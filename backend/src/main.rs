@@ -116,14 +116,14 @@ pub async fn app(state: AppState) -> Router {
         .route("/me", get(routes::auth::me))
         .route("/boards", get(routes::boards::list_boards))
         .route("/boards", post(routes::boards::create_board))
-        .route("/boards/:id", get(routes::boards::get_board))
-        .route("/boards/:id", put(routes::boards::update_board))
-        .route("/boards/:id", delete(routes::boards::delete_board))
-        .route("/boards/:id/columns", get(routes::columns::list_columns))
-        .route("/boards/:id/columns", post(routes::columns::create_column))
+        .route("/boards/:slug", get(routes::boards::get_board))
+        .route("/boards/:slug", put(routes::boards::update_board))
+        .route("/boards/:slug", delete(routes::boards::delete_board))
+        .route("/boards/:slug/columns", get(routes::columns::list_columns))
+        .route("/boards/:slug/columns", post(routes::columns::create_column))
         // Bulk reorder: PUT replaces the entire column order in one round-trip.
         .route(
-            "/boards/:id/columns/reorder",
+            "/boards/:slug/columns/reorder",
             put(routes::columns::reorder_columns),
         )
         .route("/columns/:id", put(routes::columns::update_column))
