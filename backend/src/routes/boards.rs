@@ -98,6 +98,16 @@ pub(crate) async fn find_board_by_slug(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// Map a SurrealDB error to an HTTP status code.
+/// Unique-index violations on `board_name_unique` become 409; everything else 500.
+fn board_db_err(e: surrealdb::Error) -> StatusCode {
+    if e.to_string().contains("board_name_unique") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 pub async fn list_boards(
@@ -121,15 +131,6 @@ pub async fn create_board(
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    // Check uniqueness before inserting so we can return 409 rather than a
-    // generic DB error. The unique index enforces this at the DB level too.
-    if find_board_by_slug(&state.db, &payload.name)
-        .await?
-        .is_some()
-    {
-        return Err(StatusCode::CONFLICT);
-    }
-
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
 
@@ -138,7 +139,7 @@ pub async fn create_board(
         .create(("boards", &id))
         .content(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(board_db_err)?;
 
     let board = board.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -180,15 +181,6 @@ pub async fn update_board(
         None => return Err(StatusCode::NOT_FOUND),
     };
 
-    // If the name is changing, verify the new slug is not already taken.
-    if payload.name != existing.name
-        && find_board_by_slug(&state.db, &payload.name)
-            .await?
-            .is_some()
-    {
-        return Err(StatusCode::CONFLICT);
-    }
-
     let board_ulid = existing.id.id.to_raw();
     let editor = editor_sub(&claims);
 
@@ -197,7 +189,7 @@ pub async fn update_board(
         .update(("boards", &board_ulid))
         .merge(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(board_db_err)?;
 
     match board {
         Some(b) => {

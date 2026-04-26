@@ -588,7 +588,7 @@ mod tests {
         let (board, col_a) = setup_board_and_column(&server).await;
 
         let col_b: shared::Column = server
-            .post(&format!("/api/boards/{}/columns", board.id))
+            .post(&format!("/api/boards/{}/columns", board.name))
             .json(&shared::CreateColumnRequest {
                 name: "Col B".to_string(),
                 position: 1,
