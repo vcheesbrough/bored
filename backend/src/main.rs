@@ -864,6 +864,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_card_by_number() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        // Create a card and capture its sequential number assigned by the backend.
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "# Number me".to_string(),
+            })
+            .await
+            .json();
+
+        // Fetch the same card via the human-readable number endpoint.
+        let resp = server
+            .get(&format!("/api/cards/by-number/{}", card.number))
+            .await;
+        resp.assert_status_ok();
+        let fetched: shared::Card = resp.json();
+        assert_eq!(fetched.id, card.id);
+        assert_eq!(fetched.number, card.number);
+        assert_eq!(fetched.body, "# Number me");
+    }
+
+    #[tokio::test]
+    async fn get_card_by_nonexistent_number_returns_404() {
+        let server = test_app().await;
+        // u32::MAX is extremely unlikely to be a real card number in tests.
+        server
+            .get(&format!("/api/cards/by-number/{}", u32::MAX))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn get_nonexistent_card_returns_404() {
         let server = test_app().await;
         server
