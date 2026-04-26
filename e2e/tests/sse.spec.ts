@@ -7,11 +7,11 @@ import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from '.
 
 test.describe('SSE real-time updates', () => {
   test('card created in context A appears in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Create Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `sse-create-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     // Context A clicks the + button to create a card.
     await pageA.locator('.add-card-btn').first().click();
@@ -25,12 +25,12 @@ test.describe('SSE real-time updates', () => {
   });
 
   test('card body edited in context A updates in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Edit Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `sse-edit-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, 'Original body');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     // Expand, edit and save in context A.
     await pageA.locator('.card-item').first().click();
@@ -48,12 +48,12 @@ test.describe('SSE real-time updates', () => {
   });
 
   test('card deleted in context A disappears in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Delete Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `sse-delete-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, 'Goodbye');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     await expect(pageB.locator('.card-item')).toHaveCount(1);
 
@@ -71,13 +71,13 @@ test.describe('SSE real-time updates', () => {
   });
 
   test('card moved in context A updates column in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Move Board ${Date.now()}`);
-    const col1 = await apiCreateColumn(request, board.id, 'Source', 0);
-    const col2 = await apiCreateColumn(request, board.id, 'Target', 1);
+    const board = await apiCreateBoard(request, `sse-move-board-${Date.now()}`);
+    const col1 = await apiCreateColumn(request, board.name, 'Source', 0);
+    const col2 = await apiCreateColumn(request, board.name, 'Target', 1);
     await apiCreateCard(request, col1.id, 'Moving card');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     await expect(pageB.locator('.column-view').nth(0).locator('.card-item')).toHaveCount(1);
     await expect(pageB.locator('.column-view').nth(1).locator('.card-item')).toHaveCount(0);
@@ -100,13 +100,13 @@ test.describe('SSE real-time updates', () => {
   });
 
   test('column created in context A appears in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Col Create Board ${Date.now()}`);
+    const board = await apiCreateBoard(request, `sse-col-create-board-${Date.now()}`);
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     // Create a column via the API (which the backend broadcasts via SSE).
-    await apiCreateColumn(request, board.id, 'New Column');
+    await apiCreateColumn(request, board.name, 'New Column');
 
     await expect(pageA.locator('.column-name').filter({ hasText: 'New Column' })).toBeVisible({
       timeout: 5000,
@@ -120,11 +120,11 @@ test.describe('SSE real-time updates', () => {
   });
 
   test('column renamed in context A updates in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Col Rename Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Original Name');
+    const board = await apiCreateBoard(request, `sse-col-rename-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Original Name');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     await expect(pageB.locator('.column-name').filter({ hasText: 'Original Name' })).toBeVisible();
 
@@ -144,11 +144,11 @@ test.describe('SSE real-time updates', () => {
   });
 
   test('column deleted in context A disappears in context B', async ({ browser, request }) => {
-    const board = await apiCreateBoard(request, `SSE Col Delete Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Delete Column');
+    const board = await apiCreateBoard(request, `sse-col-delete-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Delete Column');
 
     const [ctxA, ctxB] = await openTwoContexts(browser);
-    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.id);
+    const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     await expect(pageB.locator('.column-name').filter({ hasText: col.name })).toBeVisible();
 
@@ -184,11 +184,11 @@ async function openTwoContexts(browser: Browser) {
 async function openBoardInBoth(
   ctxA: Awaited<ReturnType<Browser['newContext']>>,
   ctxB: Awaited<ReturnType<Browser['newContext']>>,
-  boardId: string
+  boardSlug: string
 ) {
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
-  await gotoBoardView(pageA, boardId);
-  await gotoBoardView(pageB, boardId);
+  await gotoBoardView(pageA, boardSlug);
+  await gotoBoardView(pageB, boardSlug);
   return [pageA, pageB] as const;
 }

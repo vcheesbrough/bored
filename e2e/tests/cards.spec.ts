@@ -3,9 +3,9 @@ import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from '.
 
 test.describe('Cards', () => {
   test('create card via the + button', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Create Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
-    await gotoBoardView(page, board.id);
+    const board = await apiCreateBoard(request, `card-create-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await gotoBoardView(page, board.name);
 
     // Click the add-card button; a new card is created immediately and opens in edit mode.
     await page.locator('.add-card-btn').first().click();
@@ -15,10 +15,10 @@ test.describe('Cards', () => {
   });
 
   test('edit card body and see markdown preview update', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Edit Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-edit-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, '');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Expand the card by clicking it.
     await page.locator('.card-item').first().click();
@@ -40,10 +40,10 @@ test.describe('Cards', () => {
   });
 
   test('open card in maximised modal', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Modal Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-modal-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     const card = await apiCreateCard(request, col.id, 'Modal test card');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Expand the card first.
     await page.locator('.card-item').first().click();
@@ -62,10 +62,10 @@ test.describe('Cards', () => {
   });
 
   test('delete card via confirm modal', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Delete Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-delete-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     const card = await apiCreateCard(request, col.id, 'Delete me');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Expand the card.
     await page.locator('.card-item').first().click();
@@ -86,10 +86,10 @@ test.describe('Cards', () => {
   });
 
   test('cancel card deletion keeps the card', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Cancel Delete Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-cancel-delete-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, 'Keep me');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Expand the card.
     await page.locator('.card-item').first().click();
@@ -104,10 +104,10 @@ test.describe('Cards', () => {
   });
 
   test('card body persists after page reload', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Persist Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-persist-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, '');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Expand and edit the card body.
     await page.locator('.card-item').first().click();
@@ -124,10 +124,10 @@ test.describe('Cards', () => {
   });
 
   test('edit card body in full-screen modal and verify save', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Modal Edit Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-modal-edit-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, 'Original');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Open the modal.
     await page.locator('.card-item').first().click();
@@ -151,10 +151,10 @@ test.describe('Cards', () => {
   });
 
   test('Esc from editing returns to expanded, second Esc collapses card', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Esc Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-esc-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, 'Esc test');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Click to expand, then click body to enter edit mode.
     await page.locator('.card-item').first().click();
@@ -172,10 +172,10 @@ test.describe('Cards', () => {
   });
 
   test('Esc closes full-screen modal', async ({ page, request }) => {
-    const board = await apiCreateBoard(request, `Card Modal Esc Board ${Date.now()}`);
-    const col = await apiCreateColumn(request, board.id, 'Column');
+    const board = await apiCreateBoard(request, `card-modal-esc-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(request, col.id, 'Modal Esc test');
-    await gotoBoardView(page, board.id);
+    await gotoBoardView(page, board.name);
 
     // Open modal.
     await page.locator('.card-item').first().click();

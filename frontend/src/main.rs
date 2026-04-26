@@ -20,7 +20,7 @@ fn App() -> impl IntoView {
         <Router>
             <Routes fallback=|| view! { <p class="page loading-text">"Not found"</p> }>
                 <Route path=path!("/") view=Home />
-                <Route path=path!("/boards/:id") view=BoardView />
+                <Route path=path!("/boards/:slug") view=BoardView />
             </Routes>
         </Router>
     }
