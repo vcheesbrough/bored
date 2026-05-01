@@ -48,15 +48,16 @@ pub struct CreateBoardParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct BoardIdParams {
-    /// The ID of the board (returned by list_boards or create_board).
-    pub board_id: String,
+pub struct BoardSlugParams {
+    /// The slug of the board (its `name` as returned by list_boards — slugs
+    /// are the canonical identifier for boards in the URL and API).
+    pub board_slug: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateColumnParams {
-    /// The ID of the board to add the column to.
-    pub board_id: String,
+    /// The slug of the board to add the column to.
+    pub board_slug: String,
     /// The display name for the new column.
     pub name: String,
 }
@@ -79,6 +80,40 @@ pub struct CreateCardParams {
 pub struct CardIdParams {
     /// The ID of the card (returned by list_cards or create_card).
     pub card_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CardNumberParams {
+    /// The integer card number (the `?card=N` value in the web UI URL,
+    /// also visible as the `number` field on a Card object).
+    pub number: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateBoardParams {
+    /// The current slug of the board.
+    pub board_slug: String,
+    /// The new name for the board, which becomes its new slug. Must be
+    /// lowercase ASCII letters, digits, and `-` only.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateColumnParams {
+    /// The ID of the column to update.
+    pub column_id: String,
+    /// Optional new display name.
+    pub name: Option<String>,
+    /// Optional new 0-based position.
+    pub position: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReorderColumnsParams {
+    /// The slug of the board whose columns are being reordered.
+    pub board_slug: String,
+    /// Full ordered list of column IDs. The server assigns position = index.
+    pub order: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -404,13 +439,46 @@ impl BoredMcp {
         json_text(require_ok(resp).await?).await
     }
 
+    #[tool(
+        description = "Get a single board by its slug. Returns the board object including id, name, created_at, updated_at."
+    )]
+    async fn get_board(
+        &self,
+        Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .send(self.client.get(self.api(&format!("boards/{board_slug}"))))
+            .await?;
+        json_text(require_ok(resp).await?).await
+    }
+
+    #[tool(
+        description = "Rename a board. The new name becomes the new slug, so any cached references to the old slug will go stale. Lowercase letters, digits, and `-` only."
+    )]
+    async fn update_board(
+        &self,
+        Parameters(UpdateBoardParams { board_slug, name }): Parameters<UpdateBoardParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .send(
+                self.client
+                    .put(self.api(&format!("boards/{board_slug}")))
+                    .json(&serde_json::json!({ "name": name })),
+            )
+            .await?;
+        json_text(require_ok(resp).await?).await
+    }
+
     #[tool(description = "Delete a board and all its columns and cards permanently.")]
     async fn delete_board(
         &self,
-        Parameters(BoardIdParams { board_id }): Parameters<BoardIdParams>,
+        Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
     ) -> Result<CallToolResult, McpError> {
         let resp = self
-            .send(self.client.delete(self.api(&format!("boards/{board_id}"))))
+            .send(
+                self.client
+                    .delete(self.api(&format!("boards/{board_slug}"))),
+            )
             .await?;
         require_ok(resp).await?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -425,12 +493,12 @@ impl BoredMcp {
     )]
     async fn list_columns(
         &self,
-        Parameters(BoardIdParams { board_id }): Parameters<BoardIdParams>,
+        Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .send(
                 self.client
-                    .get(self.api(&format!("boards/{board_id}/columns"))),
+                    .get(self.api(&format!("boards/{board_slug}/columns"))),
             )
             .await?;
         json_text(require_ok(resp).await?).await
@@ -441,18 +509,68 @@ impl BoredMcp {
     )]
     async fn create_column(
         &self,
-        Parameters(CreateColumnParams { board_id, name }): Parameters<CreateColumnParams>,
+        Parameters(CreateColumnParams { board_slug, name }): Parameters<CreateColumnParams>,
     ) -> Result<CallToolResult, McpError> {
         // Use a large position so the new column always appends to the end
         // rather than requiring the caller to track current column count.
         let resp = self
             .send(
                 self.client
-                    .post(self.api(&format!("boards/{board_id}/columns")))
+                    .post(self.api(&format!("boards/{board_slug}/columns")))
                     .json(&serde_json::json!({ "name": name, "position": 99999 })),
             )
             .await?;
         json_text(require_ok(resp).await?).await
+    }
+
+    #[tool(
+        description = "Update a column's name and/or position. Both fields are optional; pass only the ones you want to change."
+    )]
+    async fn update_column(
+        &self,
+        Parameters(UpdateColumnParams {
+            column_id,
+            name,
+            position,
+        }): Parameters<UpdateColumnParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Build a partial body containing only the fields the caller supplied,
+        // so omitted fields don't get silently overwritten with null/0.
+        let mut body = serde_json::Map::new();
+        if let Some(n) = name {
+            body.insert("name".into(), serde_json::Value::String(n));
+        }
+        if let Some(p) = position {
+            body.insert("position".into(), serde_json::Value::Number(p.into()));
+        }
+        let resp = self
+            .send(
+                self.client
+                    .put(self.api(&format!("columns/{column_id}")))
+                    .json(&serde_json::Value::Object(body)),
+            )
+            .await?;
+        json_text(require_ok(resp).await?).await
+    }
+
+    #[tool(
+        description = "Replace a board's full column ordering in one round-trip. `order` must list every column ID in the desired order; the server assigns position = index."
+    )]
+    async fn reorder_columns(
+        &self,
+        Parameters(ReorderColumnsParams { board_slug, order }): Parameters<ReorderColumnsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .send(
+                self.client
+                    .put(self.api(&format!("boards/{board_slug}/columns/reorder")))
+                    .json(&serde_json::json!({ "order": order })),
+            )
+            .await?;
+        require_ok(resp).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            "Columns reordered.",
+        )]))
     }
 
     #[tool(description = "Delete a column and all its cards permanently.")]
@@ -499,6 +617,22 @@ impl BoredMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .send(self.client.get(self.api(&format!("cards/{card_id}"))))
+            .await?;
+        json_text(require_ok(resp).await?).await
+    }
+
+    #[tool(
+        description = "Look up a card by its human-readable number (the `?card=N` value in the web UI URL). Returns the full Card object including its ULID, body, column_id, and position."
+    )]
+    async fn get_card_by_number(
+        &self,
+        Parameters(CardNumberParams { number }): Parameters<CardNumberParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .send(
+                self.client
+                    .get(self.api(&format!("cards/by-number/{number}"))),
+            )
             .await?;
         json_text(require_ok(resp).await?).await
     }
