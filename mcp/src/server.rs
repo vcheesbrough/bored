@@ -446,6 +446,15 @@ impl BoredMcp {
         &self,
         Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
     ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
         let resp = self
             .send(self.client.get(self.api(&format!("boards/{board_slug}"))))
             .await?;
@@ -459,6 +468,15 @@ impl BoredMcp {
         &self,
         Parameters(UpdateBoardParams { board_slug, name }): Parameters<UpdateBoardParams>,
     ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
         let resp = self
             .send(
                 self.client
@@ -474,6 +492,15 @@ impl BoredMcp {
         &self,
         Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
     ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
         let resp = self
             .send(
                 self.client
@@ -495,6 +522,15 @@ impl BoredMcp {
         &self,
         Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
     ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
         let resp = self
             .send(
                 self.client
@@ -511,6 +547,15 @@ impl BoredMcp {
         &self,
         Parameters(CreateColumnParams { board_slug, name }): Parameters<CreateColumnParams>,
     ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
         // Use a large position so the new column always appends to the end
         // rather than requiring the caller to track current column count.
         let resp = self
@@ -534,6 +579,9 @@ impl BoredMcp {
             position,
         }): Parameters<UpdateColumnParams>,
     ) -> Result<CallToolResult, McpError> {
+        if column_id.len() != 26 || !column_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("column_id must be a 26-character ULID"));
+        }
         // Build a partial body containing only the fields the caller supplied,
         // so omitted fields don't get silently overwritten with null/0.
         let mut body = serde_json::Map::new();
@@ -542,6 +590,11 @@ impl BoredMcp {
         }
         if let Some(p) = position {
             body.insert("position".into(), serde_json::Value::Number(p.into()));
+        }
+        if body.is_empty() {
+            return Err(mcp_err(
+                "update_column requires at least one of `name` or `position`",
+            ));
         }
         let resp = self
             .send(
@@ -560,6 +613,22 @@ impl BoredMcp {
         &self,
         Parameters(ReorderColumnsParams { board_slug, order }): Parameters<ReorderColumnsParams>,
     ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
+        for id in &order {
+            if id.len() != 26 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(mcp_err(
+                    "every entry in `order` must be a 26-character ULID",
+                ));
+            }
+        }
         let resp = self
             .send(
                 self.client
@@ -578,6 +647,9 @@ impl BoredMcp {
         &self,
         Parameters(ColumnIdParams { column_id }): Parameters<ColumnIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        if column_id.len() != 26 || !column_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("column_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(
                 self.client
@@ -599,6 +671,9 @@ impl BoredMcp {
         &self,
         Parameters(ColumnIdParams { column_id }): Parameters<ColumnIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        if column_id.len() != 26 || !column_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("column_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(
                 self.client
@@ -615,6 +690,9 @@ impl BoredMcp {
         &self,
         Parameters(CardIdParams { card_id }): Parameters<CardIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        if card_id.len() != 26 || !card_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("card_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(self.client.get(self.api(&format!("cards/{card_id}"))))
             .await?;
@@ -644,6 +722,9 @@ impl BoredMcp {
         &self,
         Parameters(CreateCardParams { column_id, body }): Parameters<CreateCardParams>,
     ) -> Result<CallToolResult, McpError> {
+        if column_id.len() != 26 || !column_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("column_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(
                 self.client
@@ -661,6 +742,9 @@ impl BoredMcp {
         &self,
         Parameters(UpdateCardParams { card_id, body }): Parameters<UpdateCardParams>,
     ) -> Result<CallToolResult, McpError> {
+        if card_id.len() != 26 || !card_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("card_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(
                 self.client
@@ -682,6 +766,12 @@ impl BoredMcp {
             position,
         }): Parameters<MoveCardParams>,
     ) -> Result<CallToolResult, McpError> {
+        if card_id.len() != 26 || !card_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("card_id must be a 26-character ULID"));
+        }
+        if column_id.len() != 26 || !column_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("column_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(
                 self.client
@@ -697,6 +787,9 @@ impl BoredMcp {
         &self,
         Parameters(CardIdParams { card_id }): Parameters<CardIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        if card_id.len() != 26 || !card_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("card_id must be a 26-character ULID"));
+        }
         let resp = self
             .send(self.client.delete(self.api(&format!("cards/{card_id}"))))
             .await?;
