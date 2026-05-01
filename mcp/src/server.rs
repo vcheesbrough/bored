@@ -477,6 +477,15 @@ impl BoredMcp {
                 "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
             ));
         }
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "name must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
         let resp = self
             .send(
                 self.client
@@ -636,10 +645,7 @@ impl BoredMcp {
                     .json(&serde_json::json!({ "order": order })),
             )
             .await?;
-        require_ok(resp).await?;
-        Ok(CallToolResult::success(vec![Content::text(
-            "Columns reordered.",
-        )]))
+        json_text(require_ok(resp).await?).await
     }
 
     #[tool(description = "Delete a column and all its cards permanently.")]
