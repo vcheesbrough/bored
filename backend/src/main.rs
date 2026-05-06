@@ -305,16 +305,14 @@ mod tests {
         let cid = ulid::Ulid::new().to_string().to_lowercase();
         let kid = ulid::Ulid::new().to_string().to_lowercase();
 
-        db.query(
-            "CREATE type::thing('boards', $bid) SET name = $name, last_edited_by = $sub",
-        )
-        .bind(("bid", bid.clone()))
-        .bind(("name", format!("seed-{bid}")))
-        .bind(("sub", "preaudit-board-editor"))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
+        db.query("CREATE type::thing('boards', $bid) SET name = $name, last_edited_by = $sub")
+            .bind(("bid", bid.clone()))
+            .bind(("name", format!("seed-{bid}")))
+            .bind(("sub", "preaudit-board-editor"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
 
         db.query(
             "CREATE type::thing('columns', $cid) SET board = type::thing('boards', $bid), \
