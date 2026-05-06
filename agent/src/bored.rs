@@ -138,8 +138,7 @@ pub async fn update_card(
     // whatever the backend expects.
     let payload = shared::UpdateCardRequest {
         body: Some(new_body.to_string()),
-        position: None,
-        column_id: None,
+        ..Default::default()
     };
 
     client

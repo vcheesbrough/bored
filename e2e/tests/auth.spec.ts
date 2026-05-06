@@ -19,12 +19,13 @@ test.describe('auth — happy path', () => {
   });
 
   test('GET /api/boards succeeds with the storage-state cookie', async ({ page }) => {
-    await page.goto('/');
+    // Do not use `networkidle`: the board opens an SSE connection that stays
+    // active, so Playwright would wait until timeout.
+    await page.goto('/', { waitUntil: 'load' });
     // The home page either shows the empty-state form or redirects to a
     // board view. Either is fine — the assertion is that the page does NOT
     // navigate to /auth/login (which would happen on an auth failure).
-    await page.waitForLoadState('networkidle');
-    expect(page.url()).not.toContain('/auth/login');
+    await expect(page).not.toHaveURL(/\/auth\/login/, { timeout: 15_000 });
   });
 });
 

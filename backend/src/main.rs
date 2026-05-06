@@ -1,5 +1,6 @@
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
 // These are private by default; the route handlers are reached via `routes::boards::...`.
+mod audit;
 mod auth;
 mod db;
 mod events;
@@ -119,6 +120,7 @@ pub async fn app(state: AppState) -> Router {
         .route("/boards/:slug", get(routes::boards::get_board))
         .route("/boards/:slug", put(routes::boards::update_board))
         .route("/boards/:slug", delete(routes::boards::delete_board))
+        .route("/boards/:slug/history", get(routes::audit::board_history))
         .route("/boards/:slug/columns", get(routes::columns::list_columns))
         .route(
             "/boards/:slug/columns",
@@ -129,6 +131,7 @@ pub async fn app(state: AppState) -> Router {
             "/boards/:slug/columns/reorder",
             put(routes::columns::reorder_columns),
         )
+        .route("/columns/:id/history", get(routes::audit::column_history))
         .route("/columns/:id", put(routes::columns::update_column))
         .route("/columns/:id", delete(routes::columns::delete_column))
         .route("/columns/:id/cards", get(routes::cards::list_cards))
@@ -138,10 +141,12 @@ pub async fn app(state: AppState) -> Router {
             "/cards/by-number/:number",
             get(routes::cards::get_card_by_number),
         )
+        .route("/cards/:id/history", get(routes::audit::card_history))
         .route("/cards/:id", get(routes::cards::get_card))
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
         .route("/cards/:id/move", post(routes::cards::move_card))
+        .route("/audit/:id/restore", post(routes::audit::restore_audit))
         // Apply the auth middleware to every route in this sub-router. The
         // middleware reads from request extensions injected by `with_state`,
         // so the layer must come AFTER the routes are mounted but BEFORE
@@ -291,6 +296,72 @@ mod tests {
         let state = AppState::new(db);
         let router = app(state).await;
         TestServer::new(router).unwrap()
+    }
+
+    #[tokio::test]
+    async fn audit_baseline_backfill_inserts_once_per_entity() {
+        let db = db::connect_mem().await.expect("mem db");
+        let bid = ulid::Ulid::new().to_string().to_lowercase();
+        let cid = ulid::Ulid::new().to_string().to_lowercase();
+        let kid = ulid::Ulid::new().to_string().to_lowercase();
+
+        db.query("CREATE type::thing('boards', $bid) SET name = $name, last_edited_by = $sub")
+            .bind(("bid", bid.clone()))
+            .bind(("name", format!("seed-{bid}")))
+            .bind(("sub", "preaudit-board-editor"))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        db.query(
+            "CREATE type::thing('columns', $cid) SET board = type::thing('boards', $bid), \
+             name = $cname, position = 0, last_edited_by = $sub",
+        )
+        .bind(("cid", cid.clone()))
+        .bind(("bid", bid.clone()))
+        .bind(("cname", "Col"))
+        .bind(("sub", "preaudit-column-editor"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        db.query(
+            "CREATE type::thing('cards', $kid) SET column = type::thing('columns', $cid), \
+             body = $body, position = 0, number = 1, last_edited_by = $sub",
+        )
+        .bind(("kid", kid.clone()))
+        .bind(("cid", cid.clone()))
+        .bind(("body", "hello"))
+        .bind(("sub", "preaudit-card-editor"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        audit::migrate_audit_baselines(&db).await.unwrap();
+
+        let baselines: Vec<crate::models::DbAuditLog> = db
+            .query("SELECT * FROM audit_log WHERE action = 'baseline' ORDER BY entity_type ASC")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(baselines.len(), 3);
+
+        let board_row = baselines.iter().find(|r| r.entity_type == "board").unwrap();
+        assert_eq!(board_row.entity_id, bid);
+        assert_eq!(board_row.actor_sub, "preaudit-board-editor");
+
+        audit::migrate_audit_baselines(&db).await.unwrap();
+        let baselines_again: Vec<crate::models::DbAuditLog> = db
+            .query("SELECT * FROM audit_log WHERE action = 'baseline'")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(baselines_again.len(), 3);
     }
 
     #[tokio::test]
@@ -579,13 +650,188 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("# New body\n\nWith details".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await;
         update_resp.assert_status_ok();
         let updated: shared::Card = update_resp.json();
         assert_eq!(updated.body, "# New body\n\nWith details");
+    }
+
+    #[tokio::test]
+    async fn card_updates_same_audit_session_merge_into_one_row() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "alpha".to_string(),
+            })
+            .await
+            .json();
+
+        let sess = "merge-test-session";
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("beta".to_string()),
+                audit_edit_session: Some(sess.to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("gamma".to_string()),
+                audit_edit_session: Some(sess.to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+
+        let updates: Vec<_> = hist.iter().filter(|e| e.action == "update").collect();
+        assert_eq!(updates.len(), 1);
+        let row = updates[0];
+        assert_eq!(
+            row.snapshot_before
+                .as_ref()
+                .and_then(|v| v.get("body"))
+                .and_then(|v| v.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            row.snapshot_after
+                .as_ref()
+                .and_then(|v| v.get("body"))
+                .and_then(|v| v.as_str()),
+            Some("gamma")
+        );
+    }
+
+    #[tokio::test]
+    async fn column_history_endpoint_returns_cards_for_that_column_only() {
+        let server = test_app().await;
+        let (board, col_a) = setup_board_and_column(&server).await;
+
+        let col_b: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.name))
+            .json(&shared::CreateColumnRequest {
+                name: "B".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", col_a.id))
+            .json(&shared::CreateCardRequest {
+                body: "only-a".to_string(),
+            })
+            .await
+            .json();
+
+        let hist_a: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/columns/{}/history", col_a.id))
+            .await
+            .json();
+
+        assert!(hist_a.iter().any(|e| {
+            e.entity_type == "card" && e.entity_id == card.id && e.action == "create"
+        }));
+        assert!(!hist_a
+            .iter()
+            .any(|e| e.entity_type == "column" && e.entity_id == col_b.id));
+    }
+
+    #[tokio::test]
+    async fn card_updates_without_audit_session_stay_separate_rows() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "a".to_string(),
+            })
+            .await
+            .json();
+
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("b".to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("c".to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+
+        let updates: Vec<_> = hist.iter().filter(|e| e.action == "update").collect();
+        assert_eq!(updates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_card_body_and_column_change_audit_action_is_update_not_move() {
+        let server = test_app().await;
+        let (board, col_a) = setup_board_and_column(&server).await;
+
+        let col_b: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.name))
+            .json(&shared::CreateColumnRequest {
+                name: "Col B".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", col_a.id))
+            .json(&shared::CreateCardRequest {
+                body: "original".to_string(),
+            })
+            .await
+            .json();
+
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("edited after move".to_string()),
+                column_id: Some(col_b.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+
+        let layout_mutations: Vec<_> = hist
+            .iter()
+            .filter(|e| e.action == "update" || e.action == "move")
+            .collect();
+        assert_eq!(layout_mutations.len(), 1);
+        assert_eq!(layout_mutations[0].action, "update");
     }
 
     #[tokio::test]
@@ -684,8 +930,7 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("x".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await;
         resp.assert_status(StatusCode::NOT_FOUND);
@@ -723,8 +968,7 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("x".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await;
         card_resp.assert_status(StatusCode::NOT_FOUND);
@@ -761,27 +1005,24 @@ mod tests {
         server
             .put(&format!("/api/cards/{}", c1.id))
             .json(&shared::UpdateCardRequest {
-                body: None,
                 position: Some(2),
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c2.id))
             .json(&shared::UpdateCardRequest {
-                body: None,
                 position: Some(0),
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c3.id))
             .json(&shared::UpdateCardRequest {
-                body: None,
                 position: Some(1),
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
@@ -839,8 +1080,7 @@ mod tests {
             .put("/api/cards/doesnotexist")
             .json(&shared::UpdateCardRequest {
                 body: Some("x".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status(StatusCode::NOT_FOUND);
@@ -1133,6 +1373,23 @@ mod tests {
         );
     }
 
+    /// Every mutation now records an `AuditAppended` event before the domain
+    /// `BoardEvent` — tests that care about the latter skip audit noise here.
+    async fn recv_next_non_audit_board_event(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::events::BroadcastEvent>,
+    ) -> crate::events::BoardEvent {
+        loop {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("SSE recv timed out")
+                .expect("broadcast channel closed");
+            match msg.event {
+                crate::events::BoardEvent::AuditAppended { .. } => continue,
+                other => return other,
+            }
+        }
+    }
+
     // Verifies that mutation routes emit the expected SSE events. We subscribe
     // to the broadcast channel before performing a mutation and check that the
     // correct event arrives with the right payload.
@@ -1159,14 +1416,8 @@ mod tests {
         // but relying on try_recv returning Ok rather than Empty is fragile under
         // a busy executor. 1 s is generous — in practice the channel is ready
         // in microseconds.
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("BoardCreated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::BoardCreated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::BoardCreated { .. }));
 
         // CREATE column → ColumnCreated
         let col: shared::Column = server
@@ -1178,14 +1429,8 @@ mod tests {
             .await
             .json();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnCreated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnCreated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnCreated { .. }));
 
         // Create a second column so there is somewhere to move the card to.
         let other_col: shared::Column = server
@@ -1197,11 +1442,8 @@ mod tests {
             .await
             .json();
 
-        // Drain the ColumnCreated event for other_col so it doesn't interfere.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("second ColumnCreated event timed out")
-            .expect("broadcast channel closed");
+        // Drain audit + ColumnCreated for other_col so it doesn't interfere.
+        let _ = recv_next_non_audit_board_event(&mut rx).await;
 
         // CREATE card → CardCreated
         let card: shared::Card = server
@@ -1212,14 +1454,8 @@ mod tests {
             .await
             .json();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardCreated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::CardCreated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardCreated { .. }));
 
         server
             .post(&format!("/api/cards/{}/move", card.id))
@@ -1230,31 +1466,21 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardMoved event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(event.event, events::BoardEvent::CardMoved { .. }));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardMoved { .. }));
 
         // UPDATE card → CardUpdated
         server
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("updated body".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardUpdated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::CardUpdated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardUpdated { .. }));
 
         // DELETE card → CardDeleted
         server
@@ -1262,14 +1488,8 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardDeleted event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::CardDeleted { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardDeleted { .. }));
 
         // UPDATE column → ColumnUpdated
         server
@@ -1281,14 +1501,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnUpdated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnUpdated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnUpdated { .. }));
 
         // REORDER columns → ColumnsReordered
         let cols: Vec<shared::Column> = server
@@ -1302,14 +1516,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnsReordered event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnsReordered { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnsReordered { .. }));
 
         // DELETE column → ColumnDeleted
         server
@@ -1317,14 +1525,8 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnDeleted event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnDeleted { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnDeleted { .. }));
 
         // UPDATE board → BoardUpdated
         server
@@ -1335,14 +1537,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("BoardUpdated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::BoardUpdated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::BoardUpdated { .. }));
 
         // DELETE board → BoardDeleted (use the updated name from the rename above)
         server
@@ -1350,13 +1546,46 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::BoardDeleted { .. }));
+    }
+
+    #[tokio::test]
+    async fn audit_delete_card_then_restore_via_audit_endpoint() {
+        let server = test_app().await;
+        let (board, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "# Audit restore target".to_string(),
+            })
             .await
-            .expect("BoardDeleted event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::BoardDeleted { .. }
-        ));
+            .json();
+
+        server
+            .delete(&format!("/api/cards/{}", card.id))
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let hist_resp = server
+            .get(&format!("/api/boards/{}/history", board.name))
+            .await;
+        hist_resp.assert_status_ok();
+        let hist: Vec<shared::AuditLogEntry> = hist_resp.json();
+        let delete_row = hist
+            .iter()
+            .find(|e| e.action == "delete" && e.entity_type == "card" && e.entity_id == card.id)
+            .expect("delete audit row present");
+
+        let restore_resp = server
+            .post(&format!("/api/audit/{}/restore", delete_row.id))
+            .await;
+        restore_resp.assert_status_ok();
+
+        server
+            .get(&format!("/api/cards/{}", card.id))
+            .await
+            .assert_status_ok();
     }
 }

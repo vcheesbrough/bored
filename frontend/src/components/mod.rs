@@ -3,5 +3,6 @@ pub mod card;
 pub mod card_modal;
 pub mod column;
 pub mod confirm_modal;
+pub mod history_panel;
 pub mod markdown;
 pub mod user_badge;

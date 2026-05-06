@@ -1,4 +1,5 @@
 mod api;
+pub(crate) mod audit_edit_session;
 mod components;
 mod events;
 mod pages;

@@ -45,6 +45,7 @@ async fn init(db: &Surreal<Db>) -> surrealdb::Result<()> {
     // Sanitize existing board names into slug format (lowercase, hyphens only)
     // and deduplicate before enforcing the unique index below.
     migrate_board_names(db).await?;
+    crate::audit::migrate_audit_baselines(db).await?;
     // Now safe to add the uniqueness constraint — all names are already clean.
     db.query("DEFINE INDEX IF NOT EXISTS board_name_unique ON TABLE boards FIELDS name UNIQUE")
         .await?

@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
+
 #[component]
 pub fn BoardChooser(
     board_name: RwSignal<String>,
@@ -20,6 +22,7 @@ pub fn BoardChooser(
     let edit_buf = RwSignal::new(String::new());
     let navigate = use_navigate();
     let navigate_for_delete = navigate.clone();
+    let history_drawer = use_context::<HistoryDrawer>();
 
     Effect::new(move |_| {
         if show.get() {
@@ -206,6 +209,21 @@ pub fn BoardChooser(
                                 >
                                     {board.name.clone()}
                                 </a>
+                                <Show when=move || history_drawer.is_some() fallback=|| ()>
+                                    <button
+                                        class="chooser-history-btn"
+                                        type="button"
+                                        title="Board history"
+                                        on:click=move |ev| {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                            if let Some(hd) = history_drawer {
+                                                hd.0.set(Some(HistoryScope::Board));
+                                            }
+                                            show.set(false);
+                                        }
+                                    ><HistoryIcon /></button>
+                                </Show>
                                 <button
                                     class="chooser-board-delete"
                                     title="Delete board"
@@ -324,6 +342,22 @@ pub fn BoardChooser(
                                         }
                                     }
                                 />
+                                <Show when=move || history_drawer.is_some() fallback=|| ()>
+                                    <button
+                                        class="chooser-history-btn"
+                                        type="button"
+                                        title="Column history"
+                                        on:click=move |ev| {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                            if let Some(hd) = history_drawer {
+                                                let cid = sig.get_untracked().id.clone();
+                                                hd.0.set(Some(HistoryScope::Column(cid)));
+                                            }
+                                            show.set(false);
+                                        }
+                                    ><HistoryIcon /></button>
+                                </Show>
                                 <button
                                     class="chooser-col-delete"
                                     title="Delete column"
