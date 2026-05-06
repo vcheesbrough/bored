@@ -14,6 +14,30 @@ pub enum HistoryScope {
 #[derive(Clone, Copy)]
 pub struct HistoryDrawer(pub RwSignal<Option<HistoryScope>>);
 
+/// Monochrome clock glyph using `currentColor` — avoids colourful emoji clocks in headers/toolbars.
+#[component]
+pub fn HistoryIcon() -> impl IntoView {
+    view! {
+        <svg
+            class="history-icon-svg"
+            width="1em"
+            height="1em"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+        >
+            <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5" />
+            <path
+                d="M8 4.75V8h3.25"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+            />
+        </svg>
+    }
+}
+
 #[component]
 pub fn HistoryPanel(
     board_slug: RwSignal<String>,
@@ -139,7 +163,7 @@ pub fn HistoryPanel(
             <div class="history-backdrop" on:click=close></div>
             <aside class="history-drawer">
                 <div class="history-drawer-header">
-                    <span class="history-drawer-title">"🕘 History"</span>
+                    <span class="history-drawer-title">"History"</span>
                     <button
                         class="card-toolbar-btn history-drawer-close"
                         type="button"

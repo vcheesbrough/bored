@@ -6,7 +6,7 @@ use crate::components::board_chooser::BoardChooser;
 use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
-use crate::components::history_panel::{HistoryDrawer, HistoryPanel, HistoryScope};
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel, HistoryScope};
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
@@ -258,7 +258,7 @@ pub fn BoardView() -> impl IntoView {
                 type="button"
                 title="Board history"
                 on:click=move |_| history_scope.set(Some(HistoryScope::Board))
-            >"🕘"</button>
+            ><HistoryIcon /></button>
             <span class="navbar-watermark">{move || watermark.get()}</span>
             <UserBadge />
         </nav>

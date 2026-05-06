@@ -545,6 +545,16 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   transition: color 0.15s;
 }
 
+.column-history-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.history-icon-svg {
+  display: block;
+}
+
 .add-card-btn:hover,
 .column-history-btn:hover {
   color: var(--accent);
@@ -1179,6 +1189,9 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   opacity: 0;
   transition: opacity 0.15s, color 0.15s;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .chooser-board-row:hover .chooser-history-btn,

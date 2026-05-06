@@ -2,7 +2,7 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 use crate::components::confirm_modal::ConfirmModal;
-use crate::components::history_panel::{HistoryDrawer, HistoryScope};
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
 
 #[derive(Clone, PartialEq)]
@@ -202,7 +202,7 @@ pub fn CardModal(
                                     }
                                 }
                             }
-                        >"🕘"</button>
+                        ><HistoryIcon /></button>
                         <button
                             class="card-toolbar-btn"
                             title="Restore to board"

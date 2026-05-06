@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
-use crate::components::history_panel::{HistoryDrawer, HistoryScope};
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 
 #[component]
 pub fn BoardChooser(
@@ -222,7 +222,7 @@ pub fn BoardChooser(
                                             }
                                             show.set(false);
                                         }
-                                    >"🕘"</button>
+                                    ><HistoryIcon /></button>
                                 </Show>
                                 <button
                                     class="chooser-board-delete"
@@ -356,7 +356,7 @@ pub fn BoardChooser(
                                             }
                                             show.set(false);
                                         }
-                                    >"🕘"</button>
+                                    ><HistoryIcon /></button>
                                 </Show>
                                 <button
                                     class="chooser-col-delete"

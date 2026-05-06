@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 
 use crate::components::card::CardItem;
-use crate::components::history_panel::{HistoryDrawer, HistoryScope};
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
@@ -371,7 +371,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                                 }
                             }
                         }
-                    >"🕘"</button>
+                    ><HistoryIcon /></button>
                 </Show>
                 <button
                     class="add-card-btn"
