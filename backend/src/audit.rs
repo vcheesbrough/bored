@@ -80,9 +80,8 @@ async fn try_merge_card_update_audit(
         .take(0)?;
 
     let Some(db_row) = merged.into_iter().next() else {
-        return Err(surrealdb::Error::from(
-            surrealdb::error::Api::InternalError("merge audit UPDATE returned no row".into()),
-        ));
+        // Lost optimistic CAS (or row vanished): card write stands — append a fresh audit row.
+        return Ok(None);
     };
     let entry = db_row.into_api();
     let board_id = rec.board_id.clone();
