@@ -19,23 +19,28 @@ pub fn new_batch_group() -> String {
     audit_ulid()
 }
 
+/// Parameters for [`record_and_broadcast`].
+pub struct AuditRecord<'a> {
+    pub claims: &'a Claims,
+    pub board_id: String,
+    pub entity_type: &'a str,
+    pub entity_id: &'a str,
+    pub action: &'a str,
+    pub snapshot_before: Option<Value>,
+    pub snapshot_after: Option<Value>,
+    pub restored_from: Option<String>,
+    pub batch_group: Option<String>,
+}
+
 /// Insert one audit row and broadcast `AuditAppended` to the board stream.
 pub async fn record_and_broadcast(
     db: &Surreal<Db>,
     events: &Sender<BroadcastEvent>,
-    claims: &Claims,
-    board_id: String,
-    entity_type: &str,
-    entity_id: &str,
-    action: &str,
-    snapshot_before: Option<Value>,
-    snapshot_after: Option<Value>,
-    restored_from: Option<String>,
-    batch_group: Option<String>,
+    rec: AuditRecord<'_>,
 ) -> Result<shared::AuditLogEntry, surrealdb::Error> {
     let id = audit_ulid();
-    let actor_sub = claims.sub.clone();
-    let actor_display_name = claims.display_name();
+    let actor_sub = rec.claims.sub.clone();
+    let actor_display_name = rec.claims.display_name();
 
     let row: Option<DbAuditLog> = db
         .query(
@@ -55,22 +60,23 @@ pub async fn record_and_broadcast(
         .bind(("id", id))
         .bind(("actor_sub", actor_sub))
         .bind(("actor_display_name", actor_display_name))
-        .bind(("entity_type", entity_type.to_string()))
-        .bind(("entity_id", entity_id.to_string()))
-        .bind(("board_id", board_id.clone()))
-        .bind(("action", action.to_string()))
-        .bind(("snapshot_before", snapshot_before))
-        .bind(("snapshot_after", snapshot_after))
-        .bind(("restored_from", restored_from))
-        .bind(("batch_group", batch_group))
+        .bind(("entity_type", rec.entity_type.to_string()))
+        .bind(("entity_id", rec.entity_id.to_string()))
+        .bind(("board_id", rec.board_id.clone()))
+        .bind(("action", rec.action.to_string()))
+        .bind(("snapshot_before", rec.snapshot_before))
+        .bind(("snapshot_after", rec.snapshot_after))
+        .bind(("restored_from", rec.restored_from))
+        .bind(("batch_group", rec.batch_group))
         .await?
         .take(0)?;
 
     let entry = row.expect("audit CREATE must return row").into_api();
+    let board_id = rec.board_id;
     let _ = events.send(BroadcastEvent {
         board_id,
         event: BoardEvent::AuditAppended {
-            entry: entry.clone(),
+            entry: Box::new(entry.clone()),
         },
     });
     Ok(entry)
@@ -81,9 +87,7 @@ pub async fn list_board_history(
     board_ulid: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, surrealdb::Error> {
     let rows: Vec<DbAuditLog> = db
-        .query(
-            "SELECT * FROM audit_log WHERE board_id = $bid ORDER BY created_at DESC",
-        )
+        .query("SELECT * FROM audit_log WHERE board_id = $bid ORDER BY created_at DESC")
         .bind(("bid", board_ulid.to_string()))
         .await?
         .take(0)?;
@@ -122,7 +126,10 @@ pub async fn list_card_history(
     Ok(rows.into_iter().map(DbAuditLog::into_api).collect())
 }
 
-async fn load_audit(db: &Surreal<Db>, audit_id: &str) -> Result<Option<DbAuditLog>, surrealdb::Error> {
+async fn load_audit(
+    db: &Surreal<Db>,
+    audit_id: &str,
+) -> Result<Option<DbAuditLog>, surrealdb::Error> {
     db.select(("audit_log", audit_id)).await
 }
 
@@ -182,15 +189,17 @@ async fn restore_one_delete(
             let entry = record_and_broadcast(
                 db,
                 events,
-                claims,
-                row.board_id.clone(),
-                "board",
-                &row.entity_id,
-                "restore",
-                None,
-                Some(after),
-                Some(original_audit_id),
-                None,
+                AuditRecord {
+                    claims,
+                    board_id: row.board_id.clone(),
+                    entity_type: "board",
+                    entity_id: &row.entity_id,
+                    action: "restore",
+                    snapshot_before: None,
+                    snapshot_after: Some(after),
+                    restored_from: Some(original_audit_id),
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -226,15 +235,17 @@ async fn restore_one_delete(
             let entry = record_and_broadcast(
                 db,
                 events,
-                claims,
-                row.board_id.clone(),
-                "column",
-                &row.entity_id,
-                "restore",
-                None,
-                Some(after),
-                Some(original_audit_id),
-                None,
+                AuditRecord {
+                    claims,
+                    board_id: row.board_id.clone(),
+                    entity_type: "column",
+                    entity_id: &row.entity_id,
+                    action: "restore",
+                    snapshot_before: None,
+                    snapshot_after: Some(after),
+                    restored_from: Some(original_audit_id),
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -271,21 +282,23 @@ async fn restore_one_delete(
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .take(0)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let after =
-                serde_json::to_value(card.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let after = serde_json::to_value(card.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let mut out = Vec::new();
             let entry = record_and_broadcast(
                 db,
                 events,
-                claims,
-                row.board_id.clone(),
-                "card",
-                &row.entity_id,
-                "restore",
-                None,
-                Some(after),
-                Some(original_audit_id),
-                None,
+                AuditRecord {
+                    claims,
+                    board_id: row.board_id.clone(),
+                    entity_type: "card",
+                    entity_id: &row.entity_id,
+                    action: "restore",
+                    snapshot_before: None,
+                    snapshot_after: Some(after),
+                    restored_from: Some(original_audit_id),
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

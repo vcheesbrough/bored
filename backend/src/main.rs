@@ -120,10 +120,7 @@ pub async fn app(state: AppState) -> Router {
         .route("/boards/:slug", get(routes::boards::get_board))
         .route("/boards/:slug", put(routes::boards::update_board))
         .route("/boards/:slug", delete(routes::boards::delete_board))
-        .route(
-            "/boards/:slug/history",
-            get(routes::audit::board_history),
-        )
+        .route("/boards/:slug/history", get(routes::audit::board_history))
         .route("/boards/:slug/columns", get(routes::columns::list_columns))
         .route(
             "/boards/:slug/columns",

@@ -14,7 +14,7 @@ test.describe('SSE real-time updates', () => {
     const [pageA, pageB] = await openBoardInBoth(ctxA, ctxB, board.name);
 
     // Context A clicks the + button to create a card.
-    await pageA.locator('.add-card-btn').first().click();
+    await pageA.locator('[title="Add card"]').first().click();
     await expect(pageA.locator('.card-item')).toHaveCount(1);
 
     // Context B should receive the SSE event and show the new card.

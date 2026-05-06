@@ -532,7 +532,8 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   line-height: 16px;
 }
 
-.add-card-btn {
+.add-card-btn,
+.column-history-btn {
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -544,7 +545,8 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   transition: color 0.15s;
 }
 
-.add-card-btn:hover {
+.add-card-btn:hover,
+.column-history-btn:hover {
   color: var(--accent);
   background: transparent;
 }
@@ -1028,7 +1030,8 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .history-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  /* Above full-screen card modal (100) so history opened from the modal is usable */
+  z-index: 110;
   background: rgba(0, 0, 0, 0.45);
 }
 
@@ -1040,7 +1043,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   width: min(420px, 100vw);
   background: var(--surface);
   border-left: 1px solid var(--border);
-  z-index: 91;
+  z-index: 111;
   display: flex;
   flex-direction: column;
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);

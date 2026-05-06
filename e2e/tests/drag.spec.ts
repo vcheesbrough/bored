@@ -50,13 +50,18 @@ test.describe('Drag and drop', () => {
     await expect(page.locator('.column-name').nth(1)).toHaveText('Beta');
 
     // Reorder via API (same call the drag handler makes); SSE broadcasts the change.
-    await request.put(`/api/boards/${board.name}/columns/reorder`, {
+    const reorderRes = await request.put(`/api/boards/${board.name}/columns/reorder`, {
       data: { order: [col2.id, col1.id] },
     });
+    expect(reorderRes.ok()).toBeTruthy();
 
     // Board view should update without a reload.
-    await expect(page.locator('.column-name').nth(0)).toHaveText('Beta', { timeout: 5000 });
-    await expect(page.locator('.column-name').nth(1)).toHaveText('Alpha', { timeout: 5000 });
+    await expect(page.locator('.columns-row .column-name').nth(0)).toHaveText('Beta', {
+      timeout: 15_000,
+    });
+    await expect(page.locator('.columns-row .column-name').nth(1)).toHaveText('Alpha', {
+      timeout: 15_000,
+    });
   });
 
   test('reorder cards within the same column via API and verify SSE update', async ({ page, request }) => {
@@ -93,15 +98,18 @@ test.describe('Drag and drop', () => {
     const col2 = await apiCreateColumn(request, board.name, 'Second', 1);
     await gotoBoardView(page, board.name);
 
-    await request.put(`/api/boards/${board.name}/columns/reorder`, {
+    const reorderRes = await request.put(`/api/boards/${board.name}/columns/reorder`, {
       data: { order: [col2.id, col1.id] },
     });
+    expect(reorderRes.ok()).toBeTruthy();
 
-    await expect(page.locator('.column-name').nth(0)).toHaveText('Second', { timeout: 5000 });
+    await expect(page.locator('.columns-row .column-name').nth(0)).toHaveText('Second', {
+      timeout: 15_000,
+    });
 
     await page.reload();
     await page.waitForSelector('.columns-row');
-    await expect(page.locator('.column-name').nth(0)).toHaveText('Second');
-    await expect(page.locator('.column-name').nth(1)).toHaveText('First');
+    await expect(page.locator('.columns-row .column-name').nth(0)).toHaveText('Second');
+    await expect(page.locator('.columns-row .column-name').nth(1)).toHaveText('First');
   });
 });

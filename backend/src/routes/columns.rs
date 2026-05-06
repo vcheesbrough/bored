@@ -70,15 +70,17 @@ pub async fn create_column(
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
-                &claims,
-                board_ulid.clone(),
-                "column",
-                &api_col.id,
-                "create",
-                None,
-                Some(snapshot_after),
-                None,
-                None,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: board_ulid.clone(),
+                    entity_type: "column",
+                    entity_id: &api_col.id,
+                    action: "create",
+                    snapshot_before: None,
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -128,8 +130,8 @@ pub async fn update_column(
     if patch.is_empty() {
         return Ok(Json(existing.into_api()));
     }
-    let snapshot_before =
-        serde_json::to_value(existing.clone().into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     patch.insert(
         "last_edited_by".to_string(),
@@ -157,15 +159,17 @@ pub async fn update_column(
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
-                &claims,
-                board_id.clone(),
-                "column",
-                &api_col.id,
-                action,
-                Some(snapshot_before),
-                Some(snapshot_after),
-                None,
-                None,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: board_id.clone(),
+                    entity_type: "column",
+                    entity_id: &api_col.id,
+                    action,
+                    snapshot_before: Some(snapshot_before),
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -219,15 +223,17 @@ pub async fn delete_column(
         audit::record_and_broadcast(
             &state.db,
             &state.events,
-            &claims,
-            board_id.clone(),
-            "card",
-            &entity_id,
-            "delete",
-            Some(snapshot_before),
-            None,
-            None,
-            Some(batch.clone()),
+            audit::AuditRecord {
+                claims: &claims,
+                board_id: board_id.clone(),
+                entity_type: "card",
+                entity_id: &entity_id,
+                action: "delete",
+                snapshot_before: Some(snapshot_before),
+                snapshot_after: None,
+                restored_from: None,
+                batch_group: Some(batch.clone()),
+            },
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -244,15 +250,17 @@ pub async fn delete_column(
     audit::record_and_broadcast(
         &state.db,
         &state.events,
-        &claims,
-        board_id.clone(),
-        "column",
-        &col_id,
-        "delete",
-        Some(col_snap),
-        None,
-        None,
-        Some(batch),
+        audit::AuditRecord {
+            claims: &claims,
+            board_id: board_id.clone(),
+            entity_type: "column",
+            entity_id: &col_id,
+            action: "delete",
+            snapshot_before: Some(col_snap),
+            snapshot_after: None,
+            restored_from: None,
+            batch_group: Some(batch),
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -345,15 +353,17 @@ pub async fn reorder_columns(
         audit::record_and_broadcast(
             &state.db,
             &state.events,
-            &claims,
-            board_ulid.clone(),
-            "column",
-            col_id,
-            "move",
-            Some(snapshot_before),
-            Some(snapshot_after),
-            None,
-            Some(batch.clone()),
+            audit::AuditRecord {
+                claims: &claims,
+                board_id: board_ulid.clone(),
+                entity_type: "column",
+                entity_id: col_id.as_str(),
+                action: "move",
+                snapshot_before: Some(snapshot_before),
+                snapshot_after: Some(snapshot_after),
+                restored_from: None,
+                batch_group: Some(batch.clone()),
+            },
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

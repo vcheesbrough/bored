@@ -71,7 +71,7 @@ test.describe('column card count badge', () => {
     await expect(pageB.locator('.card-count-badge').first()).toHaveText('0');
 
     // Create a card in context A via the + button.
-    await pageA.locator('.add-card-btn').first().click();
+    await pageA.locator('[title="Add card"]').first().click();
     await expect(pageA.locator('.card-count-badge').first()).toHaveText('1', { timeout: 5000 });
 
     // Context B must see the count update via SSE.

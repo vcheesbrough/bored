@@ -65,7 +65,6 @@ pub async fn restore_audit(
     Path(audit_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<Json<Vec<shared::AuditLogEntry>>, StatusCode> {
-    let rows =
-        audit::restore_from_audit(&state.db, &claims, &state.events, &audit_id).await?;
+    let rows = audit::restore_from_audit(&state.db, &claims, &state.events, &audit_id).await?;
     Ok(Json(rows))
 }

@@ -304,15 +304,17 @@ pub async fn create_card(
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
-                &claims,
-                board_id.clone(),
-                "card",
-                &api_card.id,
-                "create",
-                None,
-                Some(snapshot_after),
-                None,
-                None,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: board_id.clone(),
+                    entity_type: "card",
+                    entity_id: &api_card.id,
+                    action: "create",
+                    snapshot_before: None,
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -346,8 +348,8 @@ pub async fn update_card(
         None => return Err(StatusCode::NOT_FOUND),
     };
 
-    let snapshot_before =
-        serde_json::to_value(existing.clone().into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Always look up the current column so we have the board ID for the SSE event.
     let current_col: Option<DbColumn> = state
@@ -439,15 +441,17 @@ pub async fn update_card(
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
-                &claims,
-                board_id.clone(),
-                "card",
-                &api_card.id,
-                action,
-                Some(snapshot_before),
-                Some(snapshot_after),
-                None,
-                None,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: board_id.clone(),
+                    entity_type: "card",
+                    entity_id: &api_card.id,
+                    action,
+                    snapshot_before: Some(snapshot_before),
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -494,15 +498,17 @@ pub async fn delete_card(
     audit::record_and_broadcast(
         &state.db,
         &state.events,
-        &claims,
-        board_id.clone(),
-        "card",
-        &card_id,
-        "delete",
-        Some(snapshot_before),
-        None,
-        None,
-        None,
+        audit::AuditRecord {
+            claims: &claims,
+            board_id: board_id.clone(),
+            entity_type: "card",
+            entity_id: &card_id,
+            action: "delete",
+            snapshot_before: Some(snapshot_before),
+            snapshot_after: None,
+            restored_from: None,
+            batch_group: None,
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -555,8 +561,8 @@ pub async fn move_card(
         None => return Err(StatusCode::NOT_FOUND),
     };
 
-    let snapshot_before =
-        serde_json::to_value(existing.clone().into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let target_col: Option<DbColumn> = state
         .db
@@ -620,15 +626,17 @@ pub async fn move_card(
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
-                &claims,
-                board_id.clone(),
-                "card",
-                &api_card.id,
-                "move",
-                Some(snapshot_before),
-                Some(snapshot_after),
-                None,
-                None,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: board_id.clone(),
+                    entity_type: "card",
+                    entity_id: &api_card.id,
+                    action: "move",
+                    snapshot_before: Some(snapshot_before),
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: None,
+                },
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

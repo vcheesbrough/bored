@@ -360,7 +360,8 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                 <span class="card-count-badge">{card_count}</span>
                 <Show when=move || history_drawer.is_some() fallback=|| ()>
                     <button
-                        class="add-card-btn"
+                        class="column-history-btn"
+                        type="button"
                         title="Column history"
                         on:click={
                             let cid = col_id_history_btn.clone();
