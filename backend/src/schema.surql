@@ -60,6 +60,7 @@ DEFINE FIELD IF NOT EXISTS snapshot_before ON audit_log FLEXIBLE TYPE option<obj
 DEFINE FIELD IF NOT EXISTS snapshot_after ON audit_log FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS restored_from ON audit_log TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS batch_group ON audit_log TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS created_at ON audit_log TYPE datetime VALUE time::now();
+-- DEFAULT allows backfill migrations to SET created_at from entity `updated_at`.
+DEFINE FIELD OVERWRITE created_at ON audit_log TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS audit_board_time ON audit_log FIELDS board_id, created_at;
 DEFINE INDEX IF NOT EXISTS audit_entity_time ON audit_log FIELDS entity_type, entity_id, created_at;

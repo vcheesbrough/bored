@@ -82,6 +82,155 @@ pub async fn record_and_broadcast(
     Ok(entry)
 }
 
+/// Insert a synthetic **`baseline`** audit row for entities that existed before audit was enabled,
+/// using each row's current API snapshot as `snapshot_after`, `updated_at` as `created_at`, and
+/// `last_edited_by` (falling back to `"anonymous"`) as `actor_sub` / `actor_display_name`.
+///
+/// Idempotent per `(entity_type, entity_id)`: skips whenever **any** audit row already exists for
+/// that pair so normal mutation history is never duplicated.
+///
+/// Does **not** broadcast SSE — avoids flooding clients at startup.
+pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Result<()> {
+    #[derive(Debug, serde::Deserialize, Hash, Eq, PartialEq)]
+    struct AuditEntityPair {
+        entity_type: String,
+        entity_id: String,
+    }
+
+    let existing: Vec<AuditEntityPair> = db
+        .query("SELECT entity_type, entity_id FROM audit_log")
+        .await?
+        .take(0)
+        .unwrap_or_default();
+    let covered: std::collections::HashSet<AuditEntityPair> = existing.into_iter().collect();
+
+    let skip = |ty: &str, id: &str, covered: &std::collections::HashSet<AuditEntityPair>| {
+        covered.contains(&AuditEntityPair {
+            entity_type: ty.to_string(),
+            entity_id: id.to_string(),
+        })
+    };
+
+    async fn insert_baseline_row(
+        db: &Surreal<Db>,
+        entity_type: &str,
+        entity_id: &str,
+        board_id: String,
+        actor_sub: String,
+        snapshot_after: Value,
+        created_at: surrealdb::sql::Datetime,
+    ) -> surrealdb::Result<()> {
+        let id = audit_ulid();
+        let actor_display_name = actor_sub.clone();
+        db.query(
+            "CREATE type::thing('audit_log', $id) SET \
+             actor_sub = $actor_sub, \
+             actor_display_name = $actor_display_name, \
+             entity_type = $entity_type, \
+             entity_id = $entity_id, \
+             board_id = $board_id, \
+             action = 'baseline', \
+             snapshot_before = NONE, \
+             snapshot_after = $snapshot_after, \
+             restored_from = NONE, \
+             batch_group = NONE, \
+             created_at = $created_at \
+             RETURN AFTER",
+        )
+        .bind(("id", id))
+        .bind(("actor_sub", actor_sub))
+        .bind(("actor_display_name", actor_display_name))
+        .bind(("entity_type", entity_type.to_string()))
+        .bind(("entity_id", entity_id.to_string()))
+        .bind(("board_id", board_id))
+        .bind(("snapshot_after", snapshot_after))
+        .bind(("created_at", created_at))
+        .await?
+        .check()?;
+        Ok(())
+    }
+
+    let boards: Vec<DbBoard> = db
+        .query("SELECT * FROM boards ORDER BY created_at ASC")
+        .await?
+        .take(0)?;
+
+    for board in boards {
+        let entity_id = board.id.id.to_raw();
+        if skip("board", &entity_id, &covered) {
+            continue;
+        }
+        let actor_sub = board
+            .last_edited_by
+            .clone()
+            .unwrap_or_else(|| "anonymous".to_string());
+        let ts = board.updated_at.clone();
+        let snap =
+            serde_json::to_value(board.into_api()).expect("DbBoard serializes to snapshot_after");
+        insert_baseline_row(
+            db,
+            "board",
+            &entity_id,
+            entity_id.clone(),
+            actor_sub,
+            snap,
+            ts,
+        )
+        .await?;
+    }
+
+    let columns: Vec<DbColumn> = db
+        .query("SELECT * FROM columns ORDER BY board ASC, position ASC")
+        .await?
+        .take(0)?;
+
+    let col_to_board: std::collections::HashMap<String, String> = columns
+        .iter()
+        .map(|c| (c.id.id.to_raw(), c.board.id.to_raw()))
+        .collect();
+
+    for col in columns {
+        let entity_id = col.id.id.to_raw();
+        if skip("column", &entity_id, &covered) {
+            continue;
+        }
+        let board_id = col.board.id.to_raw();
+        let actor_sub = col
+            .last_edited_by
+            .clone()
+            .unwrap_or_else(|| "anonymous".to_string());
+        let ts = col.updated_at.clone();
+        let snap =
+            serde_json::to_value(col.into_api()).expect("DbColumn serializes to snapshot_after");
+        insert_baseline_row(db, "column", &entity_id, board_id, actor_sub, snap, ts).await?;
+    }
+
+    let cards: Vec<DbCard> = db
+        .query("SELECT * FROM cards ORDER BY column ASC, position ASC")
+        .await?
+        .take(0)?;
+
+    for card in cards {
+        let entity_id = card.id.id.to_raw();
+        if skip("card", &entity_id, &covered) {
+            continue;
+        }
+        let Some(board_id) = col_to_board.get(&card.column.id.to_raw()).cloned() else {
+            continue;
+        };
+        let actor_sub = card
+            .last_edited_by
+            .clone()
+            .unwrap_or_else(|| "anonymous".to_string());
+        let ts = card.updated_at.clone();
+        let snap =
+            serde_json::to_value(card.into_api()).expect("DbCard serializes to snapshot_after");
+        insert_baseline_row(db, "card", &entity_id, board_id, actor_sub, snap, ts).await?;
+    }
+
+    Ok(())
+}
+
 pub async fn list_board_history(
     db: &Surreal<Db>,
     board_ulid: &str,

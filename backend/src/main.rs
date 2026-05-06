@@ -299,6 +299,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audit_baseline_backfill_inserts_once_per_entity() {
+        let db = db::connect_mem().await.expect("mem db");
+        let bid = ulid::Ulid::new().to_string().to_lowercase();
+        let cid = ulid::Ulid::new().to_string().to_lowercase();
+        let kid = ulid::Ulid::new().to_string().to_lowercase();
+
+        db.query(
+            "CREATE type::thing('boards', $bid) SET name = $name, last_edited_by = $sub",
+        )
+        .bind(("bid", bid.clone()))
+        .bind(("name", format!("seed-{bid}")))
+        .bind(("sub", "preaudit-board-editor"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        db.query(
+            "CREATE type::thing('columns', $cid) SET board = type::thing('boards', $bid), \
+             name = $cname, position = 0, last_edited_by = $sub",
+        )
+        .bind(("cid", cid.clone()))
+        .bind(("bid", bid.clone()))
+        .bind(("cname", "Col"))
+        .bind(("sub", "preaudit-column-editor"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        db.query(
+            "CREATE type::thing('cards', $kid) SET column = type::thing('columns', $cid), \
+             body = $body, position = 0, number = 1, last_edited_by = $sub",
+        )
+        .bind(("kid", kid.clone()))
+        .bind(("cid", cid.clone()))
+        .bind(("body", "hello"))
+        .bind(("sub", "preaudit-card-editor"))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        audit::migrate_audit_baselines(&db).await.unwrap();
+
+        let baselines: Vec<crate::models::DbAuditLog> = db
+            .query("SELECT * FROM audit_log WHERE action = 'baseline' ORDER BY entity_type ASC")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(baselines.len(), 3);
+
+        let board_row = baselines.iter().find(|r| r.entity_type == "board").unwrap();
+        assert_eq!(board_row.entity_id, bid);
+        assert_eq!(board_row.actor_sub, "preaudit-board-editor");
+
+        audit::migrate_audit_baselines(&db).await.unwrap();
+        let baselines_again: Vec<crate::models::DbAuditLog> = db
+            .query("SELECT * FROM audit_log WHERE action = 'baseline'")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(baselines_again.len(), 3);
+    }
+
+    #[tokio::test]
     async fn health_handler_returns_ok() {
         assert_eq!(health().await, "ok");
     }
