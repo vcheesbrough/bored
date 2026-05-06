@@ -1,5 +1,6 @@
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
 // These are private by default; the route handlers are reached via `routes::boards::...`.
+mod audit;
 mod auth;
 mod db;
 mod events;
@@ -119,6 +120,10 @@ pub async fn app(state: AppState) -> Router {
         .route("/boards/:slug", get(routes::boards::get_board))
         .route("/boards/:slug", put(routes::boards::update_board))
         .route("/boards/:slug", delete(routes::boards::delete_board))
+        .route(
+            "/boards/:slug/history",
+            get(routes::audit::board_history),
+        )
         .route("/boards/:slug/columns", get(routes::columns::list_columns))
         .route(
             "/boards/:slug/columns",
@@ -129,6 +134,7 @@ pub async fn app(state: AppState) -> Router {
             "/boards/:slug/columns/reorder",
             put(routes::columns::reorder_columns),
         )
+        .route("/columns/:id/history", get(routes::audit::column_history))
         .route("/columns/:id", put(routes::columns::update_column))
         .route("/columns/:id", delete(routes::columns::delete_column))
         .route("/columns/:id/cards", get(routes::cards::list_cards))
@@ -138,10 +144,12 @@ pub async fn app(state: AppState) -> Router {
             "/cards/by-number/:number",
             get(routes::cards::get_card_by_number),
         )
+        .route("/cards/:id/history", get(routes::audit::card_history))
         .route("/cards/:id", get(routes::cards::get_card))
         .route("/cards/:id", put(routes::cards::update_card))
         .route("/cards/:id", delete(routes::cards::delete_card))
         .route("/cards/:id/move", post(routes::cards::move_card))
+        .route("/audit/:id/restore", post(routes::audit::restore_audit))
         // Apply the auth middleware to every route in this sub-router. The
         // middleware reads from request extensions injected by `with_state`,
         // so the layer must come AFTER the routes are mounted but BEFORE
@@ -1133,6 +1141,23 @@ mod tests {
         );
     }
 
+    /// Every mutation now records an `AuditAppended` event before the domain
+    /// `BoardEvent` — tests that care about the latter skip audit noise here.
+    async fn recv_next_non_audit_board_event(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::events::BroadcastEvent>,
+    ) -> crate::events::BoardEvent {
+        loop {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("SSE recv timed out")
+                .expect("broadcast channel closed");
+            match msg.event {
+                crate::events::BoardEvent::AuditAppended { .. } => continue,
+                other => return other,
+            }
+        }
+    }
+
     // Verifies that mutation routes emit the expected SSE events. We subscribe
     // to the broadcast channel before performing a mutation and check that the
     // correct event arrives with the right payload.
@@ -1159,14 +1184,8 @@ mod tests {
         // but relying on try_recv returning Ok rather than Empty is fragile under
         // a busy executor. 1 s is generous — in practice the channel is ready
         // in microseconds.
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("BoardCreated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::BoardCreated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::BoardCreated { .. }));
 
         // CREATE column → ColumnCreated
         let col: shared::Column = server
@@ -1178,14 +1197,8 @@ mod tests {
             .await
             .json();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnCreated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnCreated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnCreated { .. }));
 
         // Create a second column so there is somewhere to move the card to.
         let other_col: shared::Column = server
@@ -1197,11 +1210,8 @@ mod tests {
             .await
             .json();
 
-        // Drain the ColumnCreated event for other_col so it doesn't interfere.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("second ColumnCreated event timed out")
-            .expect("broadcast channel closed");
+        // Drain audit + ColumnCreated for other_col so it doesn't interfere.
+        let _ = recv_next_non_audit_board_event(&mut rx).await;
 
         // CREATE card → CardCreated
         let card: shared::Card = server
@@ -1212,14 +1222,8 @@ mod tests {
             .await
             .json();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardCreated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::CardCreated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardCreated { .. }));
 
         server
             .post(&format!("/api/cards/{}/move", card.id))
@@ -1230,11 +1234,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardMoved event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(event.event, events::BoardEvent::CardMoved { .. }));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardMoved { .. }));
 
         // UPDATE card → CardUpdated
         server
@@ -1247,14 +1248,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardUpdated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::CardUpdated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardUpdated { .. }));
 
         // DELETE card → CardDeleted
         server
@@ -1262,14 +1257,8 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("CardDeleted event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::CardDeleted { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::CardDeleted { .. }));
 
         // UPDATE column → ColumnUpdated
         server
@@ -1281,14 +1270,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnUpdated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnUpdated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnUpdated { .. }));
 
         // REORDER columns → ColumnsReordered
         let cols: Vec<shared::Column> = server
@@ -1302,14 +1285,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnsReordered event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnsReordered { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnsReordered { .. }));
 
         // DELETE column → ColumnDeleted
         server
@@ -1317,14 +1294,8 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("ColumnDeleted event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::ColumnDeleted { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::ColumnDeleted { .. }));
 
         // UPDATE board → BoardUpdated
         server
@@ -1335,14 +1306,8 @@ mod tests {
             .await
             .assert_status_ok();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("BoardUpdated event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::BoardUpdated { .. }
-        ));
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::BoardUpdated { .. }));
 
         // DELETE board → BoardDeleted (use the updated name from the rename above)
         server
@@ -1350,13 +1315,46 @@ mod tests {
             .await
             .assert_status(StatusCode::NO_CONTENT);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = recv_next_non_audit_board_event(&mut rx).await;
+        assert!(matches!(event, events::BoardEvent::BoardDeleted { .. }));
+    }
+
+    #[tokio::test]
+    async fn audit_delete_card_then_restore_via_audit_endpoint() {
+        let server = test_app().await;
+        let (board, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "# Audit restore target".to_string(),
+            })
             .await
-            .expect("BoardDeleted event timed out")
-            .expect("broadcast channel closed");
-        assert!(matches!(
-            event.event,
-            events::BoardEvent::BoardDeleted { .. }
-        ));
+            .json();
+
+        server
+            .delete(&format!("/api/cards/{}", card.id))
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+
+        let hist_resp = server
+            .get(&format!("/api/boards/{}/history", board.name))
+            .await;
+        hist_resp.assert_status_ok();
+        let hist: Vec<shared::AuditLogEntry> = hist_resp.json();
+        let delete_row = hist
+            .iter()
+            .find(|e| e.action == "delete" && e.entity_type == "card" && e.entity_id == card.id)
+            .expect("delete audit row present");
+
+        let restore_resp = server
+            .post(&format!("/api/audit/{}/restore", delete_row.id))
+            .await;
+        restore_resp.assert_status_ok();
+
+        server
+            .get(&format!("/api/cards/{}", card.id))
+            .await
+            .assert_status_ok();
     }
 }

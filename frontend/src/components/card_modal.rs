@@ -2,6 +2,7 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 use crate::components::confirm_modal::ConfirmModal;
+use crate::components::history_panel::{HistoryDrawer, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
 
 #[derive(Clone, PartialEq)]
@@ -151,6 +152,7 @@ pub fn CardModal(
     let body_signal = Signal::derive(move || body.get());
 
     let modal_ref = NodeRef::<leptos::html::Div>::new();
+    let history_drawer = use_context::<HistoryDrawer>();
 
     // Keep focus on the modal div when viewing (not editing) so keyboard Esc
     // is received without requiring a click first.
@@ -190,6 +192,17 @@ pub fn CardModal(
                         <span class="modal-card-number">
                             {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
                         </span>
+                        <button
+                            class="card-toolbar-btn"
+                            title="Card history"
+                            on:click=move |_| {
+                                if let Some(hd) = history_drawer {
+                                    if let Some(c) = card.get() {
+                                        hd.0.set(Some(HistoryScope::Card(c.id.clone())));
+                                    }
+                                }
+                            }
+                        >"🕘"</button>
                         <button
                             class="card-toolbar-btn"
                             title="Restore to board"

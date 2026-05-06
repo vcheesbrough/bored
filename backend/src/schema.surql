@@ -47,3 +47,19 @@ FOR $card IN (SELECT id, created_at FROM cards WHERE number IS NONE OR number = 
     LET $ctr = (UPDATE card_counter:global SET count += 1 RETURN AFTER)[0];
     UPDATE $card.id SET number = $ctr.count;
 };
+
+-- Append-only audit trail for boards / columns / cards (iteration 21 — card #127).
+DEFINE TABLE IF NOT EXISTS audit_log SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS actor_sub ON audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS actor_display_name ON audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS entity_type ON audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS entity_id ON audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS board_id ON audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS action ON audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS snapshot_before ON audit_log FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS snapshot_after ON audit_log FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS restored_from ON audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS batch_group ON audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON audit_log TYPE datetime VALUE time::now();
+DEFINE INDEX IF NOT EXISTS audit_board_time ON audit_log FIELDS board_id, created_at;
+DEFINE INDEX IF NOT EXISTS audit_entity_time ON audit_log FIELDS entity_type, entity_id, created_at;

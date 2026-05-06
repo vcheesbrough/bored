@@ -4,9 +4,10 @@ use axum::{
     Extension, Json,
 };
 
+use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
-use crate::models::DbColumn;
+use crate::models::{DbCard, DbColumn};
 use crate::routes::boards::{editor_sub, find_board_by_slug, AppState};
 
 pub async fn list_columns(
@@ -64,6 +65,24 @@ pub async fn create_column(
     match column {
         Some(c) => {
             let api_col = c.into_api();
+            let snapshot_after = serde_json::to_value(api_col.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                &claims,
+                board_ulid.clone(),
+                "column",
+                &api_col.id,
+                "create",
+                None,
+                Some(snapshot_after),
+                None,
+                None,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             let _ = state.events.send(BroadcastEvent {
                 board_id: board_ulid,
                 event: BoardEvent::ColumnCreated {
@@ -109,6 +128,9 @@ pub async fn update_column(
     if patch.is_empty() {
         return Ok(Json(existing.into_api()));
     }
+    let snapshot_before =
+        serde_json::to_value(existing.clone().into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     patch.insert(
         "last_edited_by".to_string(),
         serde_json::Value::String(editor_sub(&claims)),
@@ -124,6 +146,30 @@ pub async fn update_column(
     match column {
         Some(c) => {
             let api_col = c.into_api();
+            let snapshot_after = serde_json::to_value(api_col.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let action = if payload.position.is_some() {
+                "move"
+            } else {
+                "update"
+            };
+
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                &claims,
+                board_id.clone(),
+                "column",
+                &api_col.id,
+                action,
+                Some(snapshot_before),
+                Some(snapshot_after),
+                None,
+                None,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             let _ = state.events.send(BroadcastEvent {
                 board_id,
                 event: BoardEvent::ColumnUpdated {
@@ -139,6 +185,7 @@ pub async fn update_column(
 pub async fn delete_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
+    claims: Extension<Claims>,
 ) -> Result<StatusCode, StatusCode> {
     let existing: Option<DbColumn> = state
         .db
@@ -152,14 +199,63 @@ pub async fn delete_column(
         None => return Err(StatusCode::NOT_FOUND),
     };
     let board_id = existing.board.id.to_raw();
+    let batch = audit::new_batch_group();
 
-    // Cascade: delete all cards in this column before deleting the column itself.
-    state
+    let cards: Vec<DbCard> = state
         .db
-        .query("DELETE cards WHERE column = type::thing('columns', $id)")
-        .bind(("id", col_id.clone()))
+        .query(
+            "SELECT * FROM cards WHERE column = type::thing('columns', $cid) ORDER BY position ASC",
+        )
+        .bind(("cid", col_id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for card in cards {
+        let entity_id = card.id.id.to_raw();
+        let snapshot_before = serde_json::to_value(card.clone().into_api())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        audit::record_and_broadcast(
+            &state.db,
+            &state.events,
+            &claims,
+            board_id.clone(),
+            "card",
+            &entity_id,
+            "delete",
+            Some(snapshot_before),
+            None,
+            None,
+            Some(batch.clone()),
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let _: Option<DbCard> = state
+            .db
+            .delete(("cards", &entity_id))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    let col_snap = serde_json::to_value(existing.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    audit::record_and_broadcast(
+        &state.db,
+        &state.events,
+        &claims,
+        board_id.clone(),
+        "column",
+        &col_id,
+        "delete",
+        Some(col_snap),
+        None,
+        None,
+        Some(batch),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state
         .db
@@ -197,20 +293,70 @@ pub async fn reorder_columns(
     let board_ulid = board.id.id.to_raw();
 
     let editor = editor_sub(&claims);
+    let batch = audit::new_batch_group();
+
     // Update each column's position to its index in the supplied order.
     // The WHERE clause scopes the update to this board, so a foreign column ID
     // silently no-ops (matches zero rows) rather than mutating another board's
     // state — preventing cross-board IDOR writes.
     for (index, col_id) in payload.order.iter().enumerate() {
+        let before: Option<DbColumn> = state
+            .db
+            .select(("columns", col_id.as_str()))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(col_before) = before else {
+            continue;
+        };
+        if col_before.board.id.to_raw() != board_ulid {
+            continue;
+        }
+        if col_before.position == index as i32 {
+            continue;
+        }
+
+        let snapshot_before = serde_json::to_value(col_before.into_api())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         state
             .db
-            .query("UPDATE type::thing('columns', $id) SET position = $pos, last_edited_by = $editor WHERE board = type::thing('boards', $board_id)")
+            .query(
+                "UPDATE type::thing('columns', $id) SET position = $pos, last_edited_by = $editor \
+                 WHERE board = type::thing('boards', $board_id)",
+            )
             .bind(("id", col_id.clone()))
             .bind(("pos", index as i32))
             .bind(("board_id", board_ulid.clone()))
             .bind(("editor", editor.clone()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let after: Option<DbColumn> = state
+            .db
+            .select(("columns", col_id.as_str()))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(col_after) = after else {
+            continue;
+        };
+        let snapshot_after = serde_json::to_value(col_after.into_api())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        audit::record_and_broadcast(
+            &state.db,
+            &state.events,
+            &claims,
+            board_ulid.clone(),
+            "column",
+            col_id,
+            "move",
+            Some(snapshot_before),
+            Some(snapshot_after),
+            None,
+            Some(batch.clone()),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     // Re-fetch the full ordered list so we can return it and broadcast it.

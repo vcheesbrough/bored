@@ -65,6 +65,11 @@ pub enum BoardEvent {
     BoardUpdated { board: shared::Board },
     /// A board was deleted.
     BoardDeleted { board_id: String },
+
+    /// A new audit-log row was appended — drives the history drawer in real time.
+    AuditAppended {
+        entry: shared::AuditLogEntry,
+    },
 }
 
 /// Wraps a `BoardEvent` with the ID of the board it originated from.

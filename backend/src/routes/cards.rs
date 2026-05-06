@@ -5,6 +5,7 @@ use axum::{
 };
 use surrealdb::{engine::local::Db, Surreal};
 
+use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
@@ -298,6 +299,24 @@ pub async fn create_card(
     match card {
         Some(c) => {
             let api_card = c.into_api();
+            let snapshot_after = serde_json::to_value(api_card.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                &claims,
+                board_id.clone(),
+                "card",
+                &api_card.id,
+                "create",
+                None,
+                Some(snapshot_after),
+                None,
+                None,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             let _ = state.events.send(BroadcastEvent {
                 board_id,
                 event: BoardEvent::CardCreated {
@@ -327,6 +346,9 @@ pub async fn update_card(
         None => return Err(StatusCode::NOT_FOUND),
     };
 
+    let snapshot_before =
+        serde_json::to_value(existing.clone().into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     // Always look up the current column so we have the board ID for the SSE event.
     let current_col: Option<DbColumn> = state
         .db
@@ -339,7 +361,7 @@ pub async fn update_card(
         .unwrap_or_default();
 
     // Validate target column if provided, and guard against cross-board moves.
-    if let Some(ref col_id) = payload.column_id {
+    if let Some(col_id) = payload.column_id.as_ref() {
         let target_col: Option<DbColumn> = state
             .db
             .select(("columns", col_id.as_str()))
@@ -384,6 +406,8 @@ pub async fn update_card(
         set_parts.join(", ")
     );
 
+    let is_move_audit = payload.column_id.is_some() || payload.position.is_some();
+
     let mut q = state
         .db
         .query(query_str)
@@ -408,6 +432,26 @@ pub async fn update_card(
     match card {
         Some(c) => {
             let api_card = c.into_api();
+            let snapshot_after = serde_json::to_value(api_card.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let action = if is_move_audit { "move" } else { "update" };
+
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                &claims,
+                board_id.clone(),
+                "card",
+                &api_card.id,
+                action,
+                Some(snapshot_before),
+                Some(snapshot_after),
+                None,
+                None,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             let _ = state.events.send(BroadcastEvent {
                 board_id,
                 event: BoardEvent::CardUpdated {
@@ -423,7 +467,46 @@ pub async fn update_card(
 pub async fn delete_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
+    claims: Extension<Claims>,
 ) -> Result<StatusCode, StatusCode> {
+    let existing: Option<DbCard> = state
+        .db
+        .select(("cards", &card_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let existing = match existing {
+        Some(e) => e,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    let board_id = state
+        .db
+        .select::<Option<DbColumn>>(("columns", existing.column.id.to_raw()))
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.board.id.to_raw())
+        .unwrap_or_default();
+
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    audit::record_and_broadcast(
+        &state.db,
+        &state.events,
+        &claims,
+        board_id.clone(),
+        "card",
+        &card_id,
+        "delete",
+        Some(snapshot_before),
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     match state
         .db
         .delete::<Option<DbCard>>(("cards", &card_id))
@@ -471,6 +554,9 @@ pub async fn move_card(
         Some(e) => e,
         None => return Err(StatusCode::NOT_FOUND),
     };
+
+    let snapshot_before =
+        serde_json::to_value(existing.clone().into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let target_col: Option<DbColumn> = state
         .db
@@ -529,6 +615,24 @@ pub async fn move_card(
     match card {
         Some(c) => {
             let api_card = c.into_api();
+            let snapshot_after = serde_json::to_value(api_card.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                &claims,
+                board_id.clone(),
+                "card",
+                &api_card.id,
+                "move",
+                Some(snapshot_before),
+                Some(snapshot_after),
+                None,
+                None,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             let _ = state.events.send(BroadcastEvent {
                 board_id,
                 event: BoardEvent::CardMoved {

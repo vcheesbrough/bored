@@ -15,4 +15,4 @@ serde = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 # EventSource for SSE; DragEvent for drag-and-drop
-web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "DragEvent"] }
+web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "DragEvent", "HtmlInputElement"] }
