@@ -326,27 +326,29 @@ pub async fn reorder_columns(
         let snapshot_before = serde_json::to_value(col_before.into_api())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        state
+        // Single RETURN AFTER so we never apply an UPDATE without a confirmed row for audit,
+        // and never skip auditing after a successful position write (second SELECT could yield None).
+        let updated: Vec<DbColumn> = state
             .db
             .query(
                 "UPDATE type::thing('columns', $id) SET position = $pos, last_edited_by = $editor \
-                 WHERE board = type::thing('boards', $board_id)",
+                 WHERE board = type::thing('boards', $board_id) RETURN AFTER",
             )
             .bind(("id", col_id.clone()))
             .bind(("pos", index as i32))
             .bind(("board_id", board_ulid.clone()))
             .bind(("editor", editor.clone()))
             .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .take(0)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let after: Option<DbColumn> = state
-            .db
-            .select(("columns", col_id.as_str()))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some(col_after) = after else {
-            continue;
+        let mut it = updated.into_iter();
+        let Some(col_after) = it.next() else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         };
+        if it.next().is_some() {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         let snapshot_after = serde_json::to_value(col_after.into_api())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
