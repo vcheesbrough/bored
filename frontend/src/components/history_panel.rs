@@ -83,7 +83,9 @@ pub fn HistoryPanel(
         if let BoardSseEvent::AuditAppended { entry } = ev {
             if entry.board_id == ulid {
                 entries.update(|es| {
-                    if !es.iter().any(|r| r.id == entry.id) {
+                    if let Some(i) = es.iter().position(|r| r.id == entry.id) {
+                        es[i] = entry.clone();
+                    } else {
                         es.insert(0, entry);
                     }
                 });

@@ -80,6 +80,7 @@ pub async fn create_column(
                     snapshot_after: Some(snapshot_after),
                     restored_from: None,
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await
@@ -169,6 +170,7 @@ pub async fn update_column(
                     snapshot_after: Some(snapshot_after),
                     restored_from: None,
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await
@@ -233,6 +235,7 @@ pub async fn delete_column(
                 snapshot_after: None,
                 restored_from: None,
                 batch_group: Some(batch.clone()),
+                audit_edit_session: None,
             },
         )
         .await
@@ -260,6 +263,7 @@ pub async fn delete_column(
             snapshot_after: None,
             restored_from: None,
             batch_group: Some(batch),
+            audit_edit_session: None,
         },
     )
     .await
@@ -365,6 +369,7 @@ pub async fn reorder_columns(
                 snapshot_after: Some(snapshot_after),
                 restored_from: None,
                 batch_group: Some(batch.clone()),
+                audit_edit_session: None,
             },
         )
         .await

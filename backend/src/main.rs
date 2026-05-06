@@ -650,13 +650,108 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("# New body\n\nWith details".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await;
         update_resp.assert_status_ok();
         let updated: shared::Card = update_resp.json();
         assert_eq!(updated.body, "# New body\n\nWith details");
+    }
+
+    #[tokio::test]
+    async fn card_updates_same_audit_session_merge_into_one_row() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "alpha".to_string(),
+            })
+            .await
+            .json();
+
+        let sess = "merge-test-session";
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("beta".to_string()),
+                audit_edit_session: Some(sess.to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("gamma".to_string()),
+                audit_edit_session: Some(sess.to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+
+        let updates: Vec<_> = hist.iter().filter(|e| e.action == "update").collect();
+        assert_eq!(updates.len(), 1);
+        let row = updates[0];
+        assert_eq!(
+            row.snapshot_before
+                .as_ref()
+                .and_then(|v| v.get("body"))
+                .and_then(|v| v.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            row.snapshot_after
+                .as_ref()
+                .and_then(|v| v.get("body"))
+                .and_then(|v| v.as_str()),
+            Some("gamma")
+        );
+    }
+
+    #[tokio::test]
+    async fn card_updates_without_audit_session_stay_separate_rows() {
+        let server = test_app().await;
+        let (_, column) = setup_board_and_column(&server).await;
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "a".to_string(),
+            })
+            .await
+            .json();
+
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("b".to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("c".to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+
+        let updates: Vec<_> = hist.iter().filter(|e| e.action == "update").collect();
+        assert_eq!(updates.len(), 2);
     }
 
     #[tokio::test]
@@ -755,8 +850,7 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("x".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await;
         resp.assert_status(StatusCode::NOT_FOUND);
@@ -794,8 +888,7 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("x".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await;
         card_resp.assert_status(StatusCode::NOT_FOUND);
@@ -832,27 +925,24 @@ mod tests {
         server
             .put(&format!("/api/cards/{}", c1.id))
             .json(&shared::UpdateCardRequest {
-                body: None,
                 position: Some(2),
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c2.id))
             .json(&shared::UpdateCardRequest {
-                body: None,
                 position: Some(0),
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
         server
             .put(&format!("/api/cards/{}", c3.id))
             .json(&shared::UpdateCardRequest {
-                body: None,
                 position: Some(1),
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();
@@ -910,8 +1000,7 @@ mod tests {
             .put("/api/cards/doesnotexist")
             .json(&shared::UpdateCardRequest {
                 body: Some("x".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status(StatusCode::NOT_FOUND);
@@ -1305,8 +1394,7 @@ mod tests {
             .put(&format!("/api/cards/{}", card.id))
             .json(&shared::UpdateCardRequest {
                 body: Some("updated body".to_string()),
-                position: None,
-                column_id: None,
+                ..Default::default()
             })
             .await
             .assert_status_ok();

@@ -1,4 +1,7 @@
-//! Append-only audit recording + history queries + restore replay.
+//! Audit recording + history queries + restore replay.
+//!
+//! Card body `update` rows may merge in place when the client repeats the same
+//! `audit_edit_session` (one editing stretch). Everything else is append-only.
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
@@ -30,17 +33,81 @@ pub struct AuditRecord<'a> {
     pub snapshot_after: Option<Value>,
     pub restored_from: Option<String>,
     pub batch_group: Option<String>,
+    pub audit_edit_session: Option<&'a str>,
 }
 
-/// Insert one audit row and broadcast `AuditAppended` to the board stream.
+async fn try_merge_card_update_audit(
+    db: &Surreal<Db>,
+    events: &Sender<BroadcastEvent>,
+    rec: &AuditRecord<'_>,
+    session: &str,
+) -> Result<Option<shared::AuditLogEntry>, surrealdb::Error> {
+    let rows: Vec<DbAuditLog> = db
+        .query(
+            "SELECT * FROM audit_log \
+             WHERE entity_type = 'card' AND entity_id = $eid \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(("eid", rec.entity_id.to_string()))
+        .await?
+        .take(0)?;
+    let Some(last) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let can_merge = last.action == "update"
+        && last.actor_sub == rec.claims.sub
+        && last.batch_group.is_none()
+        && last.restored_from.is_none()
+        && last.audit_edit_session.as_deref() == Some(session);
+    if !can_merge {
+        return Ok(None);
+    }
+
+    let audit_thing = last.id.id.to_raw();
+    let row: Option<DbAuditLog> = db
+        .query(
+            "UPDATE type::thing('audit_log', $aid) SET \
+             snapshot_after = $snapshot_after, \
+             created_at = time::now() \
+             RETURN AFTER",
+        )
+        .bind(("aid", audit_thing))
+        .bind(("snapshot_after", rec.snapshot_after.clone()))
+        .await?
+        .take(0)?;
+
+    let entry = row.expect("merge audit UPDATE returns row").into_api();
+    let board_id = rec.board_id.clone();
+    let _ = events.send(BroadcastEvent {
+        board_id,
+        event: BoardEvent::AuditAppended {
+            entry: Box::new(entry.clone()),
+        },
+    });
+    Ok(Some(entry))
+}
+
+/// Insert one audit row (or merge a card body update) and broadcast `AuditAppended`.
 pub async fn record_and_broadcast(
     db: &Surreal<Db>,
     events: &Sender<BroadcastEvent>,
     rec: AuditRecord<'_>,
 ) -> Result<shared::AuditLogEntry, surrealdb::Error> {
+    if rec.entity_type == "card" && rec.action == "update" {
+        if let Some(sess) = rec.audit_edit_session.filter(|s| !s.is_empty()) {
+            if let Some(entry) = try_merge_card_update_audit(db, events, &rec, sess).await? {
+                return Ok(entry);
+            }
+        }
+    }
+
     let id = audit_ulid();
     let actor_sub = rec.claims.sub.clone();
     let actor_display_name = rec.claims.display_name();
+    let aes = rec
+        .audit_edit_session
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     let row: Option<DbAuditLog> = db
         .query(
@@ -54,7 +121,8 @@ pub async fn record_and_broadcast(
              snapshot_before = $snapshot_before, \
              snapshot_after = $snapshot_after, \
              restored_from = $restored_from, \
-             batch_group = $batch_group \
+             batch_group = $batch_group, \
+             audit_edit_session = $audit_edit_session \
              RETURN AFTER",
         )
         .bind(("id", id))
@@ -68,6 +136,7 @@ pub async fn record_and_broadcast(
         .bind(("snapshot_after", rec.snapshot_after))
         .bind(("restored_from", rec.restored_from))
         .bind(("batch_group", rec.batch_group))
+        .bind(("audit_edit_session", aes))
         .await?
         .take(0)?;
 
@@ -134,6 +203,7 @@ pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Resu
              snapshot_after = $snapshot_after, \
              restored_from = NONE, \
              batch_group = NONE, \
+             audit_edit_session = NONE, \
              created_at = $created_at \
              RETURN AFTER",
         )
@@ -348,6 +418,7 @@ async fn restore_one_delete(
                     snapshot_after: Some(after),
                     restored_from: Some(original_audit_id),
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await
@@ -394,6 +465,7 @@ async fn restore_one_delete(
                     snapshot_after: Some(after),
                     restored_from: Some(original_audit_id),
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await
@@ -447,6 +519,7 @@ async fn restore_one_delete(
                     snapshot_after: Some(after),
                     restored_from: Some(original_audit_id),
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await

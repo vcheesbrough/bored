@@ -60,11 +60,18 @@ pub struct CreateCardRequest {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateCardRequest {
+    #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
     pub position: Option<i32>,
+    #[serde(default)]
     pub column_id: Option<String>,
+    /// Client-generated id for one uninterrupted editing stretch; repeated
+    /// body saves with the same token merge into a single audit row.
+    #[serde(default)]
+    pub audit_edit_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,4 +127,6 @@ pub struct AuditLogEntry {
     pub snapshot_after: Option<JsonValue>,
     pub restored_from: Option<String>,
     pub batch_group: Option<String>,
+    #[serde(default)]
+    pub audit_edit_session: Option<String>,
 }

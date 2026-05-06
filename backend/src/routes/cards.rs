@@ -314,6 +314,7 @@ pub async fn create_card(
                     snapshot_after: Some(snapshot_after),
                     restored_from: None,
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await
@@ -437,6 +438,14 @@ pub async fn update_card(
             let snapshot_after = serde_json::to_value(api_card.clone())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let action = if is_move_audit { "move" } else { "update" };
+            let audit_edit_session = if action == "update" {
+                payload
+                    .audit_edit_session
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
 
             audit::record_and_broadcast(
                 &state.db,
@@ -451,6 +460,7 @@ pub async fn update_card(
                     snapshot_after: Some(snapshot_after),
                     restored_from: None,
                     batch_group: None,
+                    audit_edit_session,
                 },
             )
             .await
@@ -508,6 +518,7 @@ pub async fn delete_card(
             snapshot_after: None,
             restored_from: None,
             batch_group: None,
+            audit_edit_session: None,
         },
     )
     .await
@@ -636,6 +647,7 @@ pub async fn move_card(
                     snapshot_after: Some(snapshot_after),
                     restored_from: None,
                     batch_group: None,
+                    audit_edit_session: None,
                 },
             )
             .await

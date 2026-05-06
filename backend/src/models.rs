@@ -93,6 +93,8 @@ pub struct DbAuditLog {
     pub snapshot_after: Option<serde_json::Value>,
     pub restored_from: Option<String>,
     pub batch_group: Option<String>,
+    #[serde(default)]
+    pub audit_edit_session: Option<String>,
     pub created_at: surrealdb::sql::Datetime,
 }
 
@@ -111,6 +113,7 @@ impl DbAuditLog {
             snapshot_after: self.snapshot_after,
             restored_from: self.restored_from,
             batch_group: self.batch_group,
+            audit_edit_session: self.audit_edit_session,
         }
     }
 }

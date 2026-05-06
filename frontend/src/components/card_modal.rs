@@ -37,6 +37,8 @@ pub fn CardModal(
     let editing = RwSignal::new(false);
     let saved_body = RwSignal::new(String::new());
     let save_status = RwSignal::new(SaveStatus::Idle);
+    // One modal open = one audit merge group for autosaved body edits.
+    let modal_audit_session: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Reset all local state when a new card is opened.
     Effect::new(move |_| {
@@ -45,6 +47,9 @@ pub fn CardModal(
             saved_body.set(c.body.clone());
             editing.set(false);
             save_status.set(SaveStatus::Idle);
+            modal_audit_session.set(Some(crate::audit_edit_session::new()));
+        } else {
+            modal_audit_session.set(None);
         }
     });
 
@@ -53,8 +58,8 @@ pub fn CardModal(
         wasm_bindgen_futures::spawn_local(async move {
             let req = shared::UpdateCardRequest {
                 body: Some(current_body.clone()),
-                position: None,
-                column_id: None,
+                audit_edit_session: modal_audit_session.get_untracked(),
+                ..Default::default()
             };
             match crate::api::update_card(&card_id, req).await {
                 Ok(updated) => {
@@ -104,8 +109,8 @@ pub fn CardModal(
                 wasm_bindgen_futures::spawn_local(async move {
                     let req = shared::UpdateCardRequest {
                         body: Some(current.clone()),
-                        position: None,
-                        column_id: None,
+                        audit_edit_session: modal_audit_session.get_untracked(),
+                        ..Default::default()
                     };
                     match crate::api::update_card(&card_id, req).await {
                         Ok(updated) => {
