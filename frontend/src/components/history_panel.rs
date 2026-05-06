@@ -3,7 +3,7 @@ use wasm_bindgen::JsCast;
 
 use crate::events::BoardSseEvent;
 
-/// Where the user opened history from — drives default tab + filters.
+/// Where the user opened history from — drives drawer title and row filtering (no tabs).
 #[derive(Clone, PartialEq)]
 pub enum HistoryScope {
     Board,
@@ -48,9 +48,6 @@ pub fn HistoryPanel(
     let entries = RwSignal::new(Vec::<shared::AuditLogEntry>::new());
     let loading = RwSignal::new(false);
     let show_moves = RwSignal::new(false);
-    let tab = RwSignal::new(0u8);
-    let filter_column_id: RwSignal<Option<String>> = RwSignal::new(None);
-    let filter_card_id: RwSignal<Option<String>> = RwSignal::new(None);
 
     let reload = Callback::new(move |_: ()| {
         let slug = board_slug.get_untracked();
@@ -65,28 +62,6 @@ pub fn HistoryPanel(
             }
             loading.set(false);
         });
-    });
-
-    Effect::new(move |_| {
-        if let Some(scope) = drawer.0.get() {
-            match scope {
-                HistoryScope::Board => {
-                    tab.set(0);
-                    filter_column_id.set(None);
-                    filter_card_id.set(None);
-                }
-                HistoryScope::Column(id) => {
-                    tab.set(1);
-                    filter_column_id.set(Some(id));
-                    filter_card_id.set(None);
-                }
-                HistoryScope::Card(id) => {
-                    tab.set(2);
-                    filter_card_id.set(Some(id));
-                    filter_column_id.set(None);
-                }
-            }
-        }
     });
 
     Effect::new(move |_| {
@@ -116,42 +91,43 @@ pub fn HistoryPanel(
         }
     });
 
+    let drawer_title = Signal::derive(move || match drawer.0.get().as_ref() {
+        Some(HistoryScope::Board) => "Board history",
+        Some(HistoryScope::Column(_)) => "Column history",
+        Some(HistoryScope::Card(_)) => "Card history",
+        None => "History",
+    });
+
     let filtered = Signal::derive(move || {
         let mut rows: Vec<_> = entries
             .get()
             .into_iter()
             .filter(|e| show_moves.get() || e.action != "move")
             .collect();
-        match tab.get() {
-            1 => {
-                if let Some(cid) = filter_column_id.get() {
-                    rows.retain(|e| {
-                        (e.entity_type == "column" && e.entity_id == cid)
-                            || (e.entity_type == "card"
-                                && e.snapshot_before
-                                    .as_ref()
-                                    .and_then(|v| v.get("column_id"))
-                                    .and_then(|c| c.as_str())
-                                    == Some(cid.as_str()))
-                            || (e.entity_type == "card"
-                                && e.snapshot_after
-                                    .as_ref()
-                                    .and_then(|v| v.get("column_id"))
-                                    .and_then(|c| c.as_str())
-                                    == Some(cid.as_str()))
-                    });
-                } else {
-                    rows.retain(|e| e.entity_type == "column");
-                }
+
+        match drawer.0.get().as_ref() {
+            Some(HistoryScope::Board) => {}
+            Some(HistoryScope::Column(cid)) => {
+                rows.retain(|e| {
+                    (e.entity_type == "column" && e.entity_id == *cid)
+                        || (e.entity_type == "card"
+                            && e.snapshot_before
+                                .as_ref()
+                                .and_then(|v| v.get("column_id"))
+                                .and_then(|c| c.as_str())
+                                == Some(cid.as_str()))
+                        || (e.entity_type == "card"
+                            && e.snapshot_after
+                                .as_ref()
+                                .and_then(|v| v.get("column_id"))
+                                .and_then(|c| c.as_str())
+                                == Some(cid.as_str()))
+                });
             }
-            2 => {
-                if let Some(kid) = filter_card_id.get() {
-                    rows.retain(|e| e.entity_type == "card" && e.entity_id == kid);
-                } else {
-                    rows.retain(|e| e.entity_type == "card");
-                }
+            Some(HistoryScope::Card(kid)) => {
+                rows.retain(|e| e.entity_type == "card" && e.entity_id == *kid);
             }
-            _ => {}
+            None => {}
         }
         rows
     });
@@ -163,34 +139,13 @@ pub fn HistoryPanel(
             <div class="history-backdrop" on:click=close></div>
             <aside class="history-drawer">
                 <div class="history-drawer-header">
-                    <span class="history-drawer-title">"History"</span>
+                    <span class="history-drawer-title">{move || drawer_title.get()}</span>
                     <button
                         class="card-toolbar-btn history-drawer-close"
                         type="button"
                         title="Close"
                         on:click=close
                     >"✕"</button>
-                </div>
-
-                <div class="history-tabs">
-                    <button
-                        type="button"
-                        class="history-tab"
-                        class:history-tab-active=move || tab.get() == 0
-                        on:click=move |_| tab.set(0)
-                    >"Board"</button>
-                    <button
-                        type="button"
-                        class="history-tab"
-                        class:history-tab-active=move || tab.get() == 1
-                        on:click=move |_| tab.set(1)
-                    >"Column"</button>
-                    <button
-                        type="button"
-                        class="history-tab"
-                        class:history-tab-active=move || tab.get() == 2
-                        on:click=move |_| tab.set(2)
-                    >"Card"</button>
                 </div>
 
                 <label class="history-toggle">

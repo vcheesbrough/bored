@@ -5,6 +5,7 @@ use leptos_router::NavigateOptions;
 
 use crate::components::column::ColumnCards;
 use crate::components::confirm_modal::ConfirmModal;
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
 use crate::events::DragPayload;
 
@@ -61,6 +62,7 @@ pub fn CardItem(
     // Board-level exclusive-expand lock: at most one card open at a time.
     let ExpandedCardId(expanded_card_id) =
         use_context::<ExpandedCardId>().expect("ExpandedCardId context missing");
+    let history_drawer = use_context::<HistoryDrawer>();
 
     let params = use_params_map();
     // Reads the board slug from the `:slug` route parameter.
@@ -336,6 +338,20 @@ pub fn CardItem(
                         }}
                     </span>
                     <span class="card-number">{move || format!("#{}", number.get())}</span>
+                    <Show when=move || history_drawer.is_some() fallback=|| ()>
+                        <button
+                            class="card-toolbar-btn"
+                            title="Card history"
+                            on:click=move |e: leptos::ev::MouseEvent| {
+                                e.stop_propagation();
+                                if let Some(hd) = history_drawer {
+                                    hd.0.set(Some(HistoryScope::Card(card.get_untracked().id.clone())));
+                                }
+                            }
+                        >
+                            <HistoryIcon />
+                        </button>
+                    </Show>
                     <button
                         class="card-toolbar-btn"
                         title="Collapse"

@@ -18,7 +18,7 @@ test.describe('Audit history & restore', () => {
 
     await page.locator('.navbar-history-btn').click();
     await expect(page.locator('.history-drawer')).toBeVisible();
-    await expect(page.locator('.history-drawer-title')).toContainText('History');
+    await expect(page.locator('.history-drawer-title')).toHaveText('Board history');
   });
 
   test('board history lists card create after adding a card', async ({ page, request }) => {
@@ -62,34 +62,54 @@ test.describe('Audit history & restore', () => {
     await expect(page.locator('.card-markdown').first()).toContainText('Restore me via UI');
   });
 
-  test('column header opens history scoped to column tab', async ({ page, request }) => {
+  test('column header opens column-scoped history', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `audit-col-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
-    await apiCreateCard(request, col.id, 'Card A');
+    const card = await apiCreateCard(request, col.id, 'Card A');
     await gotoBoardView(page, board.name);
 
     await page.locator('.column-history-btn').first().click();
     await expect(page.locator('.history-drawer')).toBeVisible();
+    await expect(page.locator('.history-drawer-title')).toHaveText('Column history');
 
-    const columnTab = page.locator('.history-tab').nth(1);
-    await expect(columnTab).toHaveClass(/history-tab-active/);
+    const cardRow = page.locator('.history-row').filter({ hasText: card.id });
+    await expect(cardRow).toBeVisible();
+    await expect(cardRow.locator('.history-badge-create')).toBeVisible();
   });
 
-  test('card modal toolbar opens card-scoped history tab', async ({ page, request }) => {
+  test('expanded card toolbar opens card-scoped history', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `audit-inline-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, 'Inline history');
+    await gotoBoardView(page, board.name);
+
+    await page.locator('.card-item').first().click();
+    await expect(page.locator('.card-float-panel')).toBeVisible();
+
+    await page.locator('.card-float-panel [title="Card history"]').click();
+    await expect(page.locator('.history-drawer')).toBeVisible();
+    await expect(page.locator('.history-drawer-title')).toHaveText('Card history');
+
+    const cardRow = page.locator('.history-row').filter({ hasText: card.id });
+    await expect(cardRow).toBeVisible();
+  });
+
+  test('card modal toolbar opens card-scoped history', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `audit-modal-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
-    await apiCreateCard(request, col.id, 'Modal history');
+    const card = await apiCreateCard(request, col.id, 'Modal history');
     await gotoBoardView(page, board.name);
 
     await page.locator('.card-item').first().click();
     await page.locator('[title="Maximise"]').first().click();
     await expect(page.locator('.modal-backdrop')).toBeVisible();
 
-    await page.locator('[title="Card history"]').click();
+    await page.locator('.modal-toolbar [title="Card history"]').click();
     await expect(page.locator('.history-drawer')).toBeVisible();
+    await expect(page.locator('.history-drawer-title')).toHaveText('Card history');
 
-    const cardTab = page.locator('.history-tab').nth(2);
-    await expect(cardTab).toHaveClass(/history-tab-active/);
+    const cardRow = page.locator('.history-row').filter({ hasText: card.id });
+    await expect(cardRow).toBeVisible();
 
     await page.locator('.history-drawer-close').click();
     await expect(page.locator('.history-drawer')).not.toBeVisible();
