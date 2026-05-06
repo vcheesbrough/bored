@@ -716,6 +716,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn column_history_endpoint_returns_cards_for_that_column_only() {
+        let server = test_app().await;
+        let (board, col_a) = setup_board_and_column(&server).await;
+
+        let col_b: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.name))
+            .json(&shared::CreateColumnRequest {
+                name: "B".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", col_a.id))
+            .json(&shared::CreateCardRequest {
+                body: "only-a".to_string(),
+            })
+            .await
+            .json();
+
+        let hist_a: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/columns/{}/history", col_a.id))
+            .await
+            .json();
+
+        assert!(hist_a.iter().any(|e| {
+            e.entity_type == "card" && e.entity_id == card.id && e.action == "create"
+        }));
+        assert!(!hist_a
+            .iter()
+            .any(|e| e.entity_type == "column" && e.entity_id == col_b.id));
+    }
+
+    #[tokio::test]
     async fn card_updates_without_audit_session_stay_separate_rows() {
         let server = test_app().await;
         let (_, column) = setup_board_and_column(&server).await;
@@ -752,6 +787,51 @@ mod tests {
 
         let updates: Vec<_> = hist.iter().filter(|e| e.action == "update").collect();
         assert_eq!(updates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_card_body_and_column_change_audit_action_is_update_not_move() {
+        let server = test_app().await;
+        let (board, col_a) = setup_board_and_column(&server).await;
+
+        let col_b: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.name))
+            .json(&shared::CreateColumnRequest {
+                name: "Col B".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
+
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", col_a.id))
+            .json(&shared::CreateCardRequest {
+                body: "original".to_string(),
+            })
+            .await
+            .json();
+
+        server
+            .put(&format!("/api/cards/{}", card.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("edited after move".to_string()),
+                column_id: Some(col_b.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+
+        let layout_mutations: Vec<_> = hist
+            .iter()
+            .filter(|e| e.action == "update" || e.action == "move")
+            .collect();
+        assert_eq!(layout_mutations.len(), 1);
+        assert_eq!(layout_mutations[0].action, "update");
     }
 
     #[tokio::test]

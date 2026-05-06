@@ -63,6 +63,52 @@ test.describe('Audit history & restore', () => {
     await expect(page.locator('.card-markdown').first()).toContainText('Restore me via UI');
   });
 
+  test('column history drawer requests GET /api/columns/:id/history', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `audit-col-endpoint-${Date.now()}`);
+    const colTodo = await apiCreateColumn(request, board.name, 'Todo', 0);
+    await apiCreateColumn(request, board.name, 'Other', 1);
+    await apiCreateCard(request, colTodo.id, 'Card in Todo');
+    await gotoBoardView(page, board.name);
+
+    const historyRespPromise = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'GET' &&
+        res.url().includes(`/api/columns/${colTodo.id}/history`)
+    );
+
+    await openChooser(page);
+    await page
+      .locator('.chooser-col-row')
+      .filter({ hasText: 'Todo' })
+      .locator('[title="Column history"]')
+      .click();
+
+    const historyResp = await historyRespPromise;
+    expect(historyResp.ok()).toBeTruthy();
+    await expect(page.locator('.history-drawer-title')).toHaveText('Column history');
+  });
+
+  test('card history drawer requests GET /api/cards/:id/history', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `audit-card-endpoint-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, 'Scoped API');
+    await gotoBoardView(page, board.name);
+
+    const historyRespPromise = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'GET' &&
+        res.url().includes(`/api/cards/${card.id}/history`)
+    );
+
+    await page.locator('.card-item').first().click();
+    await expect(page.locator('.card-float-panel')).toBeVisible();
+    await page.locator('.card-float-panel [title="Card history"]').click();
+
+    const historyResp = await historyRespPromise;
+    expect(historyResp.ok()).toBeTruthy();
+    await expect(page.locator('.history-drawer-title')).toHaveText('Card history');
+  });
+
   test('board chooser opens column-scoped history', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `audit-col-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');

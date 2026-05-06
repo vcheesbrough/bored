@@ -33,10 +33,11 @@ pub async fn column_history(
         .select(("columns", &col_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if col.is_none() {
+    let Some(col) = col else {
         return Err(StatusCode::NOT_FOUND);
-    }
-    let rows = audit::list_column_history(&state.db, &col_id)
+    };
+    let board_ulid = col.board.id.to_raw();
+    let rows = audit::list_column_history(&state.db, &col_id, &board_ulid)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows))

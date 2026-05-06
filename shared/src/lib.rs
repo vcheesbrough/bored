@@ -130,3 +130,23 @@ pub struct AuditLogEntry {
     #[serde(default)]
     pub audit_edit_session: Option<String>,
 }
+
+impl AuditLogEntry {
+    fn snapshot_column_id(snap: &Option<JsonValue>) -> Option<&str> {
+        snap.as_ref()?.get("column_id")?.as_str()
+    }
+
+    /// Rows relevant when filtering board audit history down to one column (matches snapshots).
+    pub fn matches_history_column_scope(&self, column_id: &str) -> bool {
+        if self.entity_type == "column" && self.entity_id == column_id {
+            return true;
+        }
+        self.entity_type == "card"
+            && (Self::snapshot_column_id(&self.snapshot_before) == Some(column_id)
+                || Self::snapshot_column_id(&self.snapshot_after) == Some(column_id))
+    }
+
+    pub fn matches_history_card_scope(&self, card_id: &str) -> bool {
+        self.entity_type == "card" && self.entity_id == card_id
+    }
+}

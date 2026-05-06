@@ -409,7 +409,11 @@ pub async fn update_card(
         set_parts.join(", ")
     );
 
-    let is_move_audit = payload.column_id.is_some() || payload.position.is_some();
+    // Layout-only changes are "move" (history toggles / filters). Body edits — alone or
+    // combined with position/column in one PUT — stay "update" so audit_edit_session merge works.
+    let has_layout_change = payload.column_id.is_some() || payload.position.is_some();
+    let has_body_change = payload.body.is_some();
+    let is_move_audit = has_layout_change && !has_body_change;
 
     let mut q = state
         .db

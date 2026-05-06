@@ -51,14 +51,23 @@ pub fn HistoryPanel(
 
     let reload = Callback::new(move |_: ()| {
         let slug = board_slug.get_untracked();
+        let scope = drawer.0.get_untracked();
         if slug.is_empty() {
             return;
         }
+        let Some(scope) = scope else {
+            return;
+        };
         loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
-            match crate::api::fetch_board_history(&slug).await {
+            let result = match scope {
+                HistoryScope::Board => crate::api::fetch_board_history(&slug).await,
+                HistoryScope::Column(cid) => crate::api::fetch_column_history(&cid).await,
+                HistoryScope::Card(card_id) => crate::api::fetch_card_history(&card_id).await,
+            };
+            match result {
                 Ok(rows) => entries.set(rows),
-                Err(e) => leptos::logging::error!("fetch_board_history: {e}"),
+                Err(e) => leptos::logging::error!("history fetch: {e}"),
             }
             loading.set(false);
         });
@@ -81,15 +90,25 @@ pub fn HistoryPanel(
         };
         let ulid = board_ulid.get_untracked();
         if let BoardSseEvent::AuditAppended { entry } = ev {
-            if entry.board_id == ulid {
-                entries.update(|es| {
-                    if let Some(i) = es.iter().position(|r| r.id == entry.id) {
-                        es[i] = entry.clone();
-                    } else {
-                        es.insert(0, entry);
-                    }
-                });
+            if entry.board_id != ulid {
+                return;
             }
+            let keep = match drawer.0.get_untracked().as_ref() {
+                Some(HistoryScope::Board) => true,
+                Some(HistoryScope::Column(cid)) => entry.matches_history_column_scope(cid),
+                Some(HistoryScope::Card(kid)) => entry.matches_history_card_scope(kid),
+                None => false,
+            };
+            if !keep {
+                return;
+            }
+            entries.update(|es| {
+                if let Some(i) = es.iter().position(|r| r.id == entry.id) {
+                    es[i] = entry.clone();
+                } else {
+                    es.insert(0, entry);
+                }
+            });
         }
     });
 
@@ -98,40 +117,6 @@ pub fn HistoryPanel(
         Some(HistoryScope::Column(_)) => "Column history",
         Some(HistoryScope::Card(_)) => "Card history",
         None => "History",
-    });
-
-    let filtered = Signal::derive(move || {
-        let mut rows: Vec<_> = entries
-            .get()
-            .into_iter()
-            .filter(|e| show_moves.get() || e.action != "move")
-            .collect();
-
-        match drawer.0.get().as_ref() {
-            Some(HistoryScope::Board) => {}
-            Some(HistoryScope::Column(cid)) => {
-                rows.retain(|e| {
-                    (e.entity_type == "column" && e.entity_id == *cid)
-                        || (e.entity_type == "card"
-                            && e.snapshot_before
-                                .as_ref()
-                                .and_then(|v| v.get("column_id"))
-                                .and_then(|c| c.as_str())
-                                == Some(cid.as_str()))
-                        || (e.entity_type == "card"
-                            && e.snapshot_after
-                                .as_ref()
-                                .and_then(|v| v.get("column_id"))
-                                .and_then(|c| c.as_str())
-                                == Some(cid.as_str()))
-                });
-            }
-            Some(HistoryScope::Card(kid)) => {
-                rows.retain(|e| e.entity_type == "card" && e.entity_id == *kid);
-            }
-            None => {}
-        }
-        rows
     });
 
     let close = move |_| drawer.0.set(None);
@@ -171,9 +156,15 @@ pub fn HistoryPanel(
                 }>
                     <ul class="history-list">
                         <For
-                            each=move || filtered.get()
-                            key=|e| e.id.clone()
-                            children=move |e| {
+                            each=move || {
+                                entries
+                                    .get()
+                                    .into_iter()
+                                    .filter(|e| show_moves.get() || e.action != "move")
+                                    .collect::<Vec<shared::AuditLogEntry>>()
+                            }
+                            key=|e: &shared::AuditLogEntry| e.id.clone()
+                            children=move |e: shared::AuditLogEntry| {
                                 let aid = e.id.clone();
                                 let action = e.action.clone();
                                 let badge_class = format!("history-badge history-badge-{action}");

@@ -313,20 +313,18 @@ pub async fn list_board_history(
     Ok(rows.into_iter().map(DbAuditLog::into_api).collect())
 }
 
+/// Column-scoped history: that column's audit rows plus card rows whose before/after
+/// snapshots reference the column (same rules as the history drawer).
 pub async fn list_column_history(
     db: &Surreal<Db>,
     column_id: &str,
+    board_ulid: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, surrealdb::Error> {
-    let rows: Vec<DbAuditLog> = db
-        .query(
-            "SELECT * FROM audit_log \
-             WHERE entity_type = 'column' AND entity_id = $cid \
-             ORDER BY created_at DESC",
-        )
-        .bind(("cid", column_id.to_string()))
-        .await?
-        .take(0)?;
-    Ok(rows.into_iter().map(DbAuditLog::into_api).collect())
+    let all = list_board_history(db, board_ulid).await?;
+    Ok(all
+        .into_iter()
+        .filter(|e| e.matches_history_column_scope(column_id))
+        .collect())
 }
 
 pub async fn list_card_history(

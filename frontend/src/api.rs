@@ -232,6 +232,30 @@ pub async fn fetch_board_history(
     .await
 }
 
+pub async fn fetch_column_history(
+    column_id: &str,
+) -> Result<Vec<shared::AuditLogEntry>, gloo_net::Error> {
+    check_auth(
+        Request::get(&format!("/api/columns/{column_id}/history"))
+            .send()
+            .await?,
+    )?
+    .json::<Vec<shared::AuditLogEntry>>()
+    .await
+}
+
+pub async fn fetch_card_history(
+    card_id: &str,
+) -> Result<Vec<shared::AuditLogEntry>, gloo_net::Error> {
+    check_auth(
+        Request::get(&format!("/api/cards/{card_id}/history"))
+            .send()
+            .await?,
+    )?
+    .json::<Vec<shared::AuditLogEntry>>()
+    .await
+}
+
 pub async fn restore_audit_entry(
     audit_id: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, gloo_net::Error> {
