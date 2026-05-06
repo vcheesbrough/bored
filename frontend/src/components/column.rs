@@ -42,7 +42,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let drag_over_col_id = use_context::<DragOverColId>()
         .expect("drag_over_col_id context missing")
         .0;
-
     // ── Static column metadata ─────────────────────────────────────────────
     let initial = column.get_untracked();
     let col_id = initial.id.clone();

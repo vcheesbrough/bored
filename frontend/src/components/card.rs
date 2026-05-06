@@ -5,6 +5,7 @@ use leptos_router::NavigateOptions;
 
 use crate::components::column::ColumnCards;
 use crate::components::confirm_modal::ConfirmModal;
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
 use crate::events::DragPayload;
 
@@ -23,7 +24,7 @@ pub struct ExpandedCardId(pub RwSignal<Option<String>>);
 /// The maximize button (visible in Expanded/Editing) navigates to
 /// `/boards/:slug?card=:number`, which causes `BoardView` to overlay the
 /// same card in full-screen mode without remounting the board.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum CardState {
     Collapsed,
     Expanded,
@@ -61,6 +62,7 @@ pub fn CardItem(
     // Board-level exclusive-expand lock: at most one card open at a time.
     let ExpandedCardId(expanded_card_id) =
         use_context::<ExpandedCardId>().expect("ExpandedCardId context missing");
+    let history_drawer = use_context::<HistoryDrawer>();
 
     let params = use_params_map();
     // Reads the board slug from the `:slug` route parameter.
@@ -72,6 +74,9 @@ pub fn CardItem(
 
     // ── State machine ─────────────────────────────────────────────────────
     let card_state: RwSignal<CardState> = RwSignal::new(CardState::Collapsed);
+    // Server merges consecutive body saves that share this token (one editing stretch).
+    let edit_audit_session: RwSignal<Option<String>> = RwSignal::new(None);
+    let prev_card_state = StoredValue::new(CardState::Collapsed);
 
     let body: RwSignal<String> = RwSignal::new(card.get_untracked().body.clone());
     let saved_body: RwSignal<String> = RwSignal::new(card.get_untracked().body.clone());
@@ -105,6 +110,15 @@ pub fn CardItem(
         }
     });
 
+    Effect::new(move |_| {
+        let st = card_state.get();
+        let was = prev_card_state.get_value();
+        if st == CardState::Editing && was != CardState::Editing {
+            edit_audit_session.set(Some(crate::audit_edit_session::new()));
+        }
+        prev_card_state.set_value(st);
+    });
+
     let number = Signal::derive(move || card.get().number);
     let body_signal = Signal::derive(move || body.get());
 
@@ -113,10 +127,13 @@ pub fn CardItem(
     let do_save = move |card_id: String, current_body: String| {
         save_status.set(SaveStatus::Saving);
         wasm_bindgen_futures::spawn_local(async move {
+            let audit_edit_session = (card_state.get_untracked() == CardState::Editing)
+                .then(|| edit_audit_session.get_untracked())
+                .flatten();
             let req = shared::UpdateCardRequest {
                 body: Some(current_body.clone()),
-                position: None,
-                column_id: None,
+                audit_edit_session,
+                ..Default::default()
             };
             match crate::api::update_card(&card_id, req).await {
                 Ok(updated) => {
@@ -336,6 +353,20 @@ pub fn CardItem(
                         }}
                     </span>
                     <span class="card-number">{move || format!("#{}", number.get())}</span>
+                    <Show when=move || history_drawer.is_some() fallback=|| ()>
+                        <button
+                            class="card-toolbar-btn"
+                            title="Card history"
+                            on:click=move |e: leptos::ev::MouseEvent| {
+                                e.stop_propagation();
+                                if let Some(hd) = history_drawer {
+                                    hd.0.set(Some(HistoryScope::Card(card.get_untracked().id.clone())));
+                                }
+                            }
+                        >
+                            <HistoryIcon />
+                        </button>
+                    </Show>
                     <button
                         class="card-toolbar-btn"
                         title="Collapse"

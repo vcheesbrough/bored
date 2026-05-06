@@ -2,6 +2,7 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 use crate::components::confirm_modal::ConfirmModal;
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
 
 #[derive(Clone, PartialEq)]
@@ -36,6 +37,8 @@ pub fn CardModal(
     let editing = RwSignal::new(false);
     let saved_body = RwSignal::new(String::new());
     let save_status = RwSignal::new(SaveStatus::Idle);
+    // One modal open = one audit merge group for autosaved body edits.
+    let modal_audit_session: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Reset all local state when a new card is opened.
     Effect::new(move |_| {
@@ -44,6 +47,9 @@ pub fn CardModal(
             saved_body.set(c.body.clone());
             editing.set(false);
             save_status.set(SaveStatus::Idle);
+            modal_audit_session.set(Some(crate::audit_edit_session::new()));
+        } else {
+            modal_audit_session.set(None);
         }
     });
 
@@ -52,8 +58,8 @@ pub fn CardModal(
         wasm_bindgen_futures::spawn_local(async move {
             let req = shared::UpdateCardRequest {
                 body: Some(current_body.clone()),
-                position: None,
-                column_id: None,
+                audit_edit_session: modal_audit_session.get_untracked(),
+                ..Default::default()
             };
             match crate::api::update_card(&card_id, req).await {
                 Ok(updated) => {
@@ -103,8 +109,8 @@ pub fn CardModal(
                 wasm_bindgen_futures::spawn_local(async move {
                     let req = shared::UpdateCardRequest {
                         body: Some(current.clone()),
-                        position: None,
-                        column_id: None,
+                        audit_edit_session: modal_audit_session.get_untracked(),
+                        ..Default::default()
                     };
                     match crate::api::update_card(&card_id, req).await {
                         Ok(updated) => {
@@ -151,6 +157,7 @@ pub fn CardModal(
     let body_signal = Signal::derive(move || body.get());
 
     let modal_ref = NodeRef::<leptos::html::Div>::new();
+    let history_drawer = use_context::<HistoryDrawer>();
 
     // Keep focus on the modal div when viewing (not editing) so keyboard Esc
     // is received without requiring a click first.
@@ -190,6 +197,17 @@ pub fn CardModal(
                         <span class="modal-card-number">
                             {move || card.get().map(|c| format!("#{:03}", c.number)).unwrap_or_default()}
                         </span>
+                        <button
+                            class="card-toolbar-btn"
+                            title="Card history"
+                            on:click=move |_| {
+                                if let Some(hd) = history_drawer {
+                                    if let Some(c) = card.get() {
+                                        hd.0.set(Some(HistoryScope::Card(c.id.clone())));
+                                    }
+                                }
+                            }
+                        ><HistoryIcon /></button>
                         <button
                             class="card-toolbar-btn"
                             title="Restore to board"

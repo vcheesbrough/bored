@@ -8,7 +8,7 @@ test.describe('Cards', () => {
     await gotoBoardView(page, board.name);
 
     // Click the add-card button; a new card is created immediately and opens in edit mode.
-    await page.locator('.add-card-btn').first().click();
+    await page.locator('[title="Add card"]').first().click();
 
     // A card item should appear and be in expanded/editing state.
     await expect(page.locator('.card-item.card-expanded')).toBeVisible();

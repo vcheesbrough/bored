@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
@@ -59,11 +60,18 @@ pub struct CreateCardRequest {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateCardRequest {
+    #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
     pub position: Option<i32>,
+    #[serde(default)]
     pub column_id: Option<String>,
+    /// Client-generated id for one uninterrupted editing stretch; repeated
+    /// body saves with the same token merge into a single audit row.
+    #[serde(default)]
+    pub audit_edit_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,4 +106,47 @@ pub struct ColumnsReorderRequest {
     /// Full ordered list of column IDs for the board. Every column must be
     /// present; missing IDs are silently skipped (no partial reorder).
     pub order: Vec<String>,
+}
+
+/// One append-only row from `audit_log` — returned by history endpoints and
+/// pushed over SSE as `audit_appended`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuditLogEntry {
+    pub id: String,
+    pub created_at: String,
+    pub actor_sub: String,
+    pub actor_display_name: String,
+    /// `"board"` | `"column"` | `"card"`
+    pub entity_type: String,
+    pub entity_id: String,
+    /// Denormalised board ULID every mutation touches — scopes SSE + queries.
+    pub board_id: String,
+    /// `"create"` | `"update"` | `"delete"` | `"move"` | `"restore"`
+    pub action: String,
+    pub snapshot_before: Option<JsonValue>,
+    pub snapshot_after: Option<JsonValue>,
+    pub restored_from: Option<String>,
+    pub batch_group: Option<String>,
+    #[serde(default)]
+    pub audit_edit_session: Option<String>,
+}
+
+impl AuditLogEntry {
+    fn snapshot_column_id(snap: &Option<JsonValue>) -> Option<&str> {
+        snap.as_ref()?.get("column_id")?.as_str()
+    }
+
+    /// Rows relevant when filtering board audit history down to one column (matches snapshots).
+    pub fn matches_history_column_scope(&self, column_id: &str) -> bool {
+        if self.entity_type == "column" && self.entity_id == column_id {
+            return true;
+        }
+        self.entity_type == "card"
+            && (Self::snapshot_column_id(&self.snapshot_before) == Some(column_id)
+                || Self::snapshot_column_id(&self.snapshot_after) == Some(column_id))
+    }
+
+    pub fn matches_history_card_scope(&self, card_id: &str) -> bool {
+        self.entity_type == "card" && self.entity_id == card_id
+    }
 }

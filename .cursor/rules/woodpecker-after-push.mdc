@@ -1,0 +1,24 @@
+---
+description: After pushing, verify Woodpecker/GitHub CI and fix failures before handing off.
+alwaysApply: true
+---
+
+# Woodpecker / CI after every push
+
+When this repo has just been pushed (or the user asks to verify CI):
+
+1. **Confirm pipeline outcome for that commit** (Woodpecker reports to GitHub status).
+   - From repo root, after push:
+     - `SHA=$(git rev-parse HEAD)` and  
+       `gh api repos/vcheesbrough/bored/commits/$SHA/status --jq '.state'`  
+       → expect `success`.  
+     - Optional detail:  
+       `gh api repos/vcheesbrough/bored/commits/$SHA/status --jq '.statuses[] | "\(.context): \(.state)"'`
+
+2. **If anything failed**, reproduce CI locally using [.woodpecker/build.yml](.woodpecker/build.yml):
+   - `docker build -t bored:ci-local .` (Rustfmt/clippy/tests/trunk inside Dockerfile).
+   - `TEST_IMAGE=bored:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
+
+3. **Fix failures** in-repo (narrow patches), commit, push, then **poll status again** until green.
+
+If `gh` is unavailable or status is pending, say so and ask whether to wait/retry or use the Woodpecker UI.

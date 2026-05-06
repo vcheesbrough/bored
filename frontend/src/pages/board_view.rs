@@ -6,6 +6,7 @@ use crate::components::board_chooser::BoardChooser;
 use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
+use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel, HistoryScope};
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
@@ -44,6 +45,9 @@ pub fn BoardView() -> impl IntoView {
     provide_context(columns);
     provide_context(ExpandedCardId(expanded_card_id));
     provide_context(DragOverColId(drag_over_col_id));
+
+    let history_scope = RwSignal::new(None::<HistoryScope>);
+    provide_context(HistoryDrawer(history_scope));
 
     // ── Maximised card overlay ─────────────────────────────────────────────
     let maximised_card: RwSignal<Option<shared::Card>> = RwSignal::new(None);
@@ -249,6 +253,12 @@ pub fn BoardView() -> impl IntoView {
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
             <BoardChooser board_name=board_name columns=columns />
+            <button
+                class="card-toolbar-btn navbar-history-btn"
+                type="button"
+                title="Board history"
+                on:click=move |_| history_scope.set(Some(HistoryScope::Board))
+            ><HistoryIcon /></button>
             <span class="navbar-watermark">{move || watermark.get()}</span>
             <UserBadge />
         </nav>
@@ -301,5 +311,7 @@ pub fn BoardView() -> impl IntoView {
             on_delete=on_modal_delete
             on_close=on_modal_close
         />
+
+        <HistoryPanel board_slug=board_name board_ulid=board_ulid sse_event=sse_event />
     }
 }

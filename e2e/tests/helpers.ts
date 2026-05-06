@@ -50,6 +50,44 @@ export async function apiMoveCard(
   if (!res.ok()) throw new Error(`POST /api/cards/${cardId}/move failed: ${res.status()} ${await res.text()}`);
 }
 
+/** Row from `GET /api/boards/:slug/history` — mirrors `shared::AuditLogEntry`. */
+export interface AuditLogEntry {
+  id: string;
+  created_at: string;
+  actor_sub: string;
+  actor_display_name: string;
+  entity_type: string;
+  entity_id: string;
+  board_id: string;
+  action: string;
+  snapshot_before?: unknown;
+  snapshot_after?: unknown;
+  restored_from?: string | null;
+  batch_group?: string | null;
+}
+
+export async function apiBoardHistory(
+  request: APIRequestContext,
+  boardSlug: string
+): Promise<AuditLogEntry[]> {
+  const res = await request.get(`/api/boards/${boardSlug}/history`);
+  if (!res.ok()) {
+    throw new Error(`GET /api/boards/${boardSlug}/history failed: ${res.status()} ${await res.text()}`);
+  }
+  return (await res.json()) as AuditLogEntry[];
+}
+
+export async function apiRestoreAudit(
+  request: APIRequestContext,
+  auditId: string
+): Promise<AuditLogEntry[]> {
+  const res = await request.post(`/api/audit/${auditId}/restore`);
+  if (!res.ok()) {
+    throw new Error(`POST /api/audit/${auditId}/restore failed: ${res.status()} ${await res.text()}`);
+  }
+  return (await res.json()) as AuditLogEntry[];
+}
+
 // ── Browser helpers ───────────────────────────────────────────────────────
 
 /** Navigate to a board and wait for the columns row to be present. */

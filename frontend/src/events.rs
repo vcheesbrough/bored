@@ -67,6 +67,10 @@ pub enum BoardSseEvent {
     BoardDeleted {
         board_id: String,
     },
+
+    AuditAppended {
+        entry: shared::AuditLogEntry,
+    },
 }
 
 /// Newtype wrapper for the column-drag hover signal so it cannot be confused

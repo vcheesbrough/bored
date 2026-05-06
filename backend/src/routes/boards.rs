@@ -8,9 +8,10 @@ use axum::{
 use surrealdb::{engine::local::Db, Surreal};
 use tokio::sync::broadcast;
 
+use crate::audit;
 use crate::auth::{AuthConfig, Claims, JwksCache};
 use crate::events::{BoardEvent, BroadcastEvent, BROADCAST_CAPACITY};
-use crate::models::DbBoard;
+use crate::models::{DbBoard, DbCard, DbColumn};
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 ///
@@ -149,6 +150,27 @@ pub async fn create_board(
     let board = board.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let api_board = board.into_api();
+    let snapshot_after =
+        serde_json::to_value(api_board.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    audit::record_and_broadcast(
+        &state.db,
+        &state.events,
+        audit::AuditRecord {
+            claims: &claims,
+            board_id: api_board.id.clone(),
+            entity_type: "board",
+            entity_id: &api_board.id,
+            action: "create",
+            snapshot_before: None,
+            snapshot_after: Some(snapshot_after),
+            restored_from: None,
+            batch_group: None,
+            audit_edit_session: None,
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let _ = state.events.send(BroadcastEvent {
         // SSE filtering uses the internal ULID so card/column events can use
         // it too without needing to look up the board name.
@@ -188,6 +210,8 @@ pub async fn update_board(
 
     let board_ulid = existing.id.id.to_raw();
     let editor = editor_sub(&claims);
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let board: Option<DbBoard> = state
         .db
@@ -199,6 +223,27 @@ pub async fn update_board(
     match board {
         Some(b) => {
             let api_board = b.into_api();
+            let snapshot_after = serde_json::to_value(api_board.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: api_board.id.clone(),
+                    entity_type: "board",
+                    entity_id: &api_board.id,
+                    action: "update",
+                    snapshot_before: Some(snapshot_before),
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: None,
+                    audit_edit_session: None,
+                },
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             let _ = state.events.send(BroadcastEvent {
                 board_id: api_board.id.clone(),
                 event: BoardEvent::BoardUpdated {
@@ -214,29 +259,118 @@ pub async fn update_board(
 pub async fn delete_board(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    claims: Extension<Claims>,
 ) -> Result<StatusCode, StatusCode> {
-    let board = match find_board_by_slug(&state.db, &slug).await? {
+    let board_record = match find_board_by_slug(&state.db, &slug).await? {
         Some(b) => b,
         None => return Err(StatusCode::NOT_FOUND),
     };
-    // Resolve the internal ULID for cascade queries and DB deletion.
-    let id = board.id.id.to_raw();
+    let id = board_record.id.id.to_raw();
+    let batch = audit::new_batch_group();
 
-    // Cascade delete: cards first, then columns, then the board itself.
-    // SurrealDB does not enforce FK-style cascades automatically.
-    state
+    let cards: Vec<DbCard> = state
         .db
-        .query("DELETE cards WHERE column.board = type::thing('boards', $id)")
-        .bind(("id", id.clone()))
+        .query(
+            "SELECT * FROM cards WHERE column.board = type::thing('boards', $bid) \
+             ORDER BY column ASC, position ASC",
+        )
+        .bind(("bid", id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for card in cards {
+        let entity_id = card.id.id.to_raw();
+        let snapshot_before = serde_json::to_value(card.clone().into_api())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        audit::record_and_broadcast(
+            &state.db,
+            &state.events,
+            audit::AuditRecord {
+                claims: &claims,
+                board_id: id.clone(),
+                entity_type: "card",
+                entity_id: &entity_id,
+                action: "delete",
+                snapshot_before: Some(snapshot_before),
+                snapshot_after: None,
+                restored_from: None,
+                batch_group: Some(batch.clone()),
+                audit_edit_session: None,
+            },
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    state
+        let _: Option<DbCard> = state
+            .db
+            .delete(("cards", &entity_id))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    let cols: Vec<DbColumn> = state
         .db
-        .query("DELETE columns WHERE board = type::thing('boards', $id)")
-        .bind(("id", id.clone()))
+        .query(
+            "SELECT * FROM columns WHERE board = type::thing('boards', $bid) ORDER BY position ASC",
+        )
+        .bind(("bid", id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for col in cols {
+        let entity_id = col.id.id.to_raw();
+        let snapshot_before = serde_json::to_value(col.clone().into_api())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        audit::record_and_broadcast(
+            &state.db,
+            &state.events,
+            audit::AuditRecord {
+                claims: &claims,
+                board_id: id.clone(),
+                entity_type: "column",
+                entity_id: &entity_id,
+                action: "delete",
+                snapshot_before: Some(snapshot_before),
+                snapshot_after: None,
+                restored_from: None,
+                batch_group: Some(batch.clone()),
+                audit_edit_session: None,
+            },
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let _: Option<DbColumn> = state
+            .db
+            .delete(("columns", &entity_id))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    let board_snap = serde_json::to_value(board_record.clone().into_api())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    audit::record_and_broadcast(
+        &state.db,
+        &state.events,
+        audit::AuditRecord {
+            claims: &claims,
+            board_id: id.clone(),
+            entity_type: "board",
+            entity_id: &id,
+            action: "delete",
+            snapshot_before: Some(board_snap),
+            snapshot_after: None,
+            restored_from: None,
+            batch_group: Some(batch),
+            audit_edit_session: None,
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let _: Option<DbBoard> = state
         .db
