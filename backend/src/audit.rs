@@ -64,19 +64,27 @@ async fn try_merge_card_update_audit(
     }
 
     let audit_thing = last.id.id.to_raw();
-    let row: Option<DbAuditLog> = db
+    let expected_created_at = last.created_at.clone();
+    let merged: Vec<DbAuditLog> = db
         .query(
             "UPDATE type::thing('audit_log', $aid) SET \
              snapshot_after = $snapshot_after, \
              created_at = time::now() \
+             WHERE created_at = $expected_created_at \
              RETURN AFTER",
         )
         .bind(("aid", audit_thing))
         .bind(("snapshot_after", rec.snapshot_after.clone()))
+        .bind(("expected_created_at", expected_created_at))
         .await?
         .take(0)?;
 
-    let entry = row.expect("merge audit UPDATE returns row").into_api();
+    let Some(db_row) = merged.into_iter().next() else {
+        return Err(surrealdb::Error::from(
+            surrealdb::error::Api::InternalError("merge audit UPDATE returned no row".into()),
+        ));
+    };
+    let entry = db_row.into_api();
     let board_id = rec.board_id.clone();
     let _ = events.send(BroadcastEvent {
         board_id,
@@ -140,7 +148,12 @@ pub async fn record_and_broadcast(
         .await?
         .take(0)?;
 
-    let entry = row.expect("audit CREATE must return row").into_api();
+    let Some(db_row) = row else {
+        return Err(surrealdb::Error::from(
+            surrealdb::error::Api::InternalError("audit CREATE returned no row".into()),
+        ));
+    };
+    let entry = db_row.into_api();
     let board_id = rec.board_id;
     let _ = events.send(BroadcastEvent {
         board_id,
