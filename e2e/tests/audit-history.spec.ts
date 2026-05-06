@@ -8,6 +8,7 @@ import {
   apiMoveCard,
   apiRestoreAudit,
   gotoBoardView,
+  openChooser,
 } from './helpers';
 
 test.describe('Audit history & restore', () => {
@@ -62,13 +63,18 @@ test.describe('Audit history & restore', () => {
     await expect(page.locator('.card-markdown').first()).toContainText('Restore me via UI');
   });
 
-  test('column header opens column-scoped history', async ({ page, request }) => {
+  test('board chooser opens column-scoped history', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `audit-col-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
     const card = await apiCreateCard(request, col.id, 'Card A');
     await gotoBoardView(page, board.name);
 
-    await page.locator('.column-history-btn').first().click();
+    await openChooser(page);
+    await page
+      .locator('.chooser-col-row')
+      .filter({ hasText: 'Todo' })
+      .locator('[title="Column history"]')
+      .click();
     await expect(page.locator('.history-drawer')).toBeVisible();
     await expect(page.locator('.history-drawer-title')).toHaveText('Column history');
 

@@ -1,7 +1,6 @@
 use leptos::prelude::*;
 
 use crate::components::card::CardItem;
-use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
@@ -43,8 +42,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let drag_over_col_id = use_context::<DragOverColId>()
         .expect("drag_over_col_id context missing")
         .0;
-    let history_drawer = use_context::<HistoryDrawer>();
-
     // ── Static column metadata ─────────────────────────────────────────────
     let initial = column.get_untracked();
     let col_id = initial.id.clone();
@@ -55,7 +52,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
     let col_id_col_drop = col_id.clone();
     let col_id_dragstart = col_id.clone();
     let col_id_for_modal = col_id.clone();
-    let col_id_history_btn = col_id.clone();
     let col_id_dragover = col_id.clone();
 
     // ── Initial card fetch ─────────────────────────────────────────────────
@@ -358,21 +354,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                 >"⠿"</span>
                 <span class="column-name">{move || column.get().name.clone()}</span>
                 <span class="card-count-badge">{card_count}</span>
-                <Show when=move || history_drawer.is_some() fallback=|| ()>
-                    <button
-                        class="column-history-btn"
-                        type="button"
-                        title="Column history"
-                        on:click={
-                            let cid = col_id_history_btn.clone();
-                            move |_| {
-                                if let Some(hd) = history_drawer {
-                                    hd.0.set(Some(HistoryScope::Column(cid.clone())));
-                                }
-                            }
-                        }
-                    ><HistoryIcon /></button>
-                </Show>
                 <button
                     class="add-card-btn"
                     title="Add card"

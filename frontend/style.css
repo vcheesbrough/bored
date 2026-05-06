@@ -532,8 +532,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   line-height: 16px;
 }
 
-.add-card-btn,
-.column-history-btn {
+.add-card-btn {
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -545,18 +544,11 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   transition: color 0.15s;
 }
 
-.column-history-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .history-icon-svg {
   display: block;
 }
 
-.add-card-btn:hover,
-.column-history-btn:hover {
+.add-card-btn:hover {
   color: var(--accent);
   background: transparent;
 }
