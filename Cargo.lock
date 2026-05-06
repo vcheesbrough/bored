@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "axum",
  "axum-extra",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4840,7 +4840,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.19.0"
+version = "1.20.0"
 dependencies = [
  "serde",
 ]
