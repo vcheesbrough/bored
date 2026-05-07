@@ -2,7 +2,7 @@
   "mcpServers": {
     "bored": {
       "type": "stdio",
-      "command": "${userHome}/.cursor/exec-bored-mcp.sh",
+      "command": "/home/vincent/.cargo/targets/bored/release/bored-mcp",
       "envFile": "${userHome}/.cursor/mcp.env",
       "env": {
         "BORED_API_URL": "https://bored.desync.link",
