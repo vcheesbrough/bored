@@ -63,7 +63,7 @@ The PR pipeline ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml)) runs 
 
 ### Required secrets
 
-Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but values are **not** stored in Woodpecker itself: they are fetched from **OpenBao** via the Woodpecker secret extension ([`woodpecker-openbao-broker`](https://github.com/vcheesbrough/woodpecker-openbao-broker)). Add or rotate values in OpenBao under the paths your broker maps for this repo; the names below are the keys the pipeline expects after merge.
+Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but values are **not** stored in Woodpecker itself: they are fetched from **OpenBao** via the Woodpecker secret extension ([`woodpecker-openbao-broker`](https://github.com/vcheesbrough/woodpecker-openbao-broker)). Add or rotate values in OpenBao under the paths your broker maps for this repo; the names below are the keys the pipeline expects after merge. For `authentik_api_token` and `bored_mcp_prod_client_secret`, use the helper in the mini-config repo: [`scripts/patch-bored-woodpecker-openbao-secrets.sh`](https://github.com/vcheesbrough/mini-config/blob/main/scripts/patch-bored-woodpecker-openbao-secrets.sh) (writes to `secret/woodpecker/repos/vcheesbrough/bored` via `bao kv patch`).
 
 | Secret | Used by |
 |---|---|
