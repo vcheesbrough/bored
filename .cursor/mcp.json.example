@@ -1,14 +1,3 @@
 {
-  "mcpServers": {
-    "bored": {
-      "type": "stdio",
-      "command": "/home/vincent/.cargo/targets/bored/release/bored-mcp",
-      "envFile": "${userHome}/.cursor/mcp.env",
-      "env": {
-        "BORED_API_URL": "https://bored.desync.link",
-        "OIDC_TOKEN_URL": "https://auth.desync.link/application/o/token/",
-        "MCP_SCOPE": "bored:prod:access"
-      }
-    }
-  }
+  "mcpServers": {}
 }

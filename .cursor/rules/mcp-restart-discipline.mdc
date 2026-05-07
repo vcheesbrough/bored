@@ -1,0 +1,28 @@
+---
+description: >-
+  Canonical Cursor MCP fix (Claude parity), env-merge rules, restart discipline — apply on every machine via synced ~/.cursor/rules
+alwaysApply: true
+---
+
+# Cursor MCP — canonical fix (remember forever)
+
+**When Cursor MCP fails** (e.g. `bored` won’t connect, `MCP_CLIENT_ID required when OIDC_TOKEN_URL is set`, tools missing after spawn):
+
+1. **Make Cursor match Claude Code.** Copy **`mcpServers`** from **`~/.claude.json`** into **`~/.cursor/mcp.json`** wholesale (same `command` / `args` / `env` per server). Add **`"type": "stdio"`** on each server if Claude omits it. **Do not** hand-merge one field at a time — that recreated the broken state.
+
+2. **OAuth must arrive atomically for `bored-mcp`.** **`OIDC_TOKEN_URL`, `MCP_CLIENT_ID`, `MCP_CLIENT_SECRET`, `MCP_SCOPE`, `BORED_API_URL`** must all be present together in **`env`** (Claude’s layout), **or** all come from a single **`envFile`** Cursor reliably loads — **never** only token URL in inline `env` while client id lives only in `envFile` (Cursor merge order caused **`NotPresent`** + panic).
+
+3. **`command`:** Use an **absolute path** to **`bored-mcp`** (release binary path). Don’t rely on **`${userHome}`** in `command` unless you’ve confirmed Cursor expands it.
+
+4. **Secrets:** If **`~/.cursor/mcp.json`** holds tokens → **`chmod 600`**. Never paste those values into chat.
+
+5. **One reload boundary:** After changing MCP JSON, tell the user **once** whether **MCP reload** vs **full quit Cursor** is needed; batch edits so they aren’t restart-looping for the same incident.
+
+**Other machines / other clones:** Sync **`~/.cursor/rules/`** + **`~/.cursor/mcp.json`** via dotfiles or manual copy. This committed copy matches **`~/.cursor/rules/mcp-restart-discipline.mdc`** — keep them in sync when editing.
+
+---
+
+# MCP / Cursor discipline (ongoing)
+
+- Prefer **one coherent fix** per incident; don’t ask for endless restarts.
+- **`bored`** stays aligned with prod **`https://bored.desync.link`** unless the user explicitly directs otherwise (see **`kanban-card-workflow.mdc`**).
