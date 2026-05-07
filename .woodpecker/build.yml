@@ -57,7 +57,7 @@ steps:
   apply-authentik-blueprint:
     when:
       - event: deployment
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.1.0
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.1.1
     settings:
       api_url: https://auth.desync.link
       api_token:
