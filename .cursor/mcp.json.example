@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "bored-dev": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.cursor/run-bored-mcp.sh",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${userHome}/.cursor/mcp.env",
+      "env": {
+        "BORED_API_URL": "https://bored-dev.desync.link",
+        "OIDC_TOKEN_URL": "https://auth.desync.link/application/o/token/",
+        "MCP_SCOPE": "bored:dev:access"
+      }
+    }
+  }
+}

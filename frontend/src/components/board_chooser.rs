@@ -18,6 +18,8 @@ pub fn BoardChooser(
     let new_col_name = RwSignal::new(String::new());
     let adding_board = RwSignal::new(false);
     let adding_col = RwSignal::new(false);
+    // Prevents duplicate `create_column` calls when Enter and `blur` both fire.
+    let create_col_inflight = RwSignal::new(false);
     let editing_col: RwSignal<Option<String>> = RwSignal::new(None);
     let edit_buf = RwSignal::new(String::new());
     let navigate = use_navigate();
@@ -56,6 +58,9 @@ pub fn BoardChooser(
     });
 
     let submit_new_col: Callback<()> = Callback::new(move |_| {
+        if create_col_inflight.get_untracked() {
+            return;
+        }
         let name = new_col_name.get_untracked();
         if name.trim().is_empty() {
             adding_col.set(false);
@@ -67,8 +72,11 @@ pub fn BoardChooser(
             return;
         }
         let position = columns.with_untracked(|cs| cs.len() as i32);
+        create_col_inflight.set(true);
         wasm_bindgen_futures::spawn_local(async move {
-            match crate::api::create_column(&board_id, name, position).await {
+            let res = crate::api::create_column(&board_id, name, position).await;
+            create_col_inflight.set(false);
+            match res {
                 Ok(col) => {
                     columns.update(|cs| cs.push(RwSignal::new(col)));
                     new_col_name.set(String::new());
