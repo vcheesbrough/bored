@@ -118,6 +118,57 @@ test.describe('Audit history drawer — polished UX', () => {
     expect(tooltip ?? '').toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}( \S+)?$/);
   });
 
+  test('card body edit surfaces the change in the audit row', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `audit-edit-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, '# Edit visibility\n\nshort body');
+    await apiUpdateCard(request, card.id, {
+      body: '# Edit visibility\n\nshort body extended for the audit log',
+    });
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.navbar-history-btn').click();
+    await expect(page.locator('.history-drawer')).toBeVisible();
+
+    const updateRow = page
+      .locator(`.history-row[data-entity-id="${card.id}"]`)
+      .filter({ has: page.locator('.history-badge-update') });
+    await expect(updateRow).toBeVisible();
+    // Headline still names the card; body delta lives in the sub.
+    await expect(updateRow.locator('.history-headline')).toHaveText(
+      'Edited card «Edit visibility»'
+    );
+    // Sub: `Card #N · +XX chars` — exact count varies with the test fixture.
+    await expect(updateRow.locator('.history-sub')).toHaveText(
+      /^Card #\d+ · \+\d+ chars$/
+    );
+  });
+
+  test('card title rename surfaces as «Renamed card to …» with old title', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `audit-rename-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, '# Original title');
+    await apiUpdateCard(request, card.id, { body: '# Renamed title' });
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.navbar-history-btn').click();
+    await expect(page.locator('.history-drawer')).toBeVisible();
+
+    const renameRow = page
+      .locator(`.history-row[data-entity-id="${card.id}"]`)
+      .filter({ has: page.locator('.history-badge-update') });
+    await expect(renameRow).toBeVisible();
+    await expect(renameRow.locator('.history-headline')).toHaveText(
+      'Renamed card to «Renamed title»'
+    );
+    await expect(renameRow.locator('.history-sub')).toHaveText(
+      /^was «Original title» · Card #\d+$/
+    );
+  });
+
   test('badge classes appear for create / update / move / delete operations', async ({
     page,
     request,

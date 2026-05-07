@@ -230,11 +230,10 @@ fn card_baseline(after: Option<&Value>, entity_id: &str) -> Summary {
 }
 
 fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -> Summary {
-    let title_after = str_field(after, "body").map(card_title_from_body);
-    let title = title_after
-        .clone()
-        .or_else(|| str_field(before, "body").map(card_title_from_body))
-        .unwrap_or_else(|| fallback_id_label(entity_id));
+    let body_before = str_field(before, "body");
+    let body_after = str_field(after, "body");
+    let title_before = body_before.map(card_title_from_body);
+    let title_after = body_after.map(card_title_from_body);
 
     let new_col = str_field(after, "column_id");
     let old_col = str_field(before, "column_id");
@@ -243,33 +242,75 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
         _ => false,
     };
 
-    let body_before = str_field(before, "body");
-    let body_after = str_field(after, "body");
+    // Move framing wins over rename / edit when both happen in the same
+    // audit row (rare in practice — the move route uses a separate
+    // `move` action and rename is body-only).
+    if column_changed {
+        let title = title_after
+            .or(title_before)
+            .unwrap_or_else(|| fallback_id_label(entity_id));
+        let mut s = Summary::new(format!("Moved card {}", quoted(&title)));
+        if let Some(sub) = card_sub(after, before) {
+            s = s.with_sub(sub);
+        }
+        return s;
+    }
+
+    // Title rename — first markdown heading line changed. Mirrors the
+    // board / column rename UX: headline carries the new title, sub
+    // carries the old title plus the card number for context.
+    if let (Some(old), Some(new)) = (title_before.as_ref(), title_after.as_ref()) {
+        if old != new {
+            let headline = format!("Renamed card to {}", quoted(new));
+            let was = format!("was {}", quoted(old));
+            let sub = match card_sub(after, before) {
+                Some(n) => format!("{was} · {n}"),
+                None => was,
+            };
+            return Summary::new(headline).with_sub(sub);
+        }
+    }
+
+    // Body changed below the heading (typo fix, paragraph rewrite, …).
+    // Keep the "Edited" headline and append a character delta to the
+    // sub so viewers get a quick signal of how big the edit was.
+    let title = title_after
+        .or(title_before)
+        .unwrap_or_else(|| fallback_id_label(entity_id));
     let body_changed = match (body_before, body_after) {
         (Some(a), Some(b)) => a != b,
         (None, Some(_)) | (Some(_), None) => true,
         _ => false,
     };
 
-    let headline = if column_changed {
-        format!("Moved card {}", quoted(&title))
-    } else if body_changed {
+    let headline = if body_changed {
         format!("Edited card {}", quoted(&title))
     } else {
         format!("Updated card {}", quoted(&title))
     };
 
+    let card_n = card_sub(after, before);
+    let body_delta = if body_changed {
+        body_delta_label(body_before.unwrap_or(""), body_after.unwrap_or(""))
+    } else {
+        None
+    };
+    let sub = match (card_n, body_delta) {
+        (Some(n), Some(d)) => Some(format!("{n} · {d}")),
+        (Some(n), None) => Some(n),
+        (None, Some(d)) => Some(d),
+        (None, None) => None,
+    };
     let mut s = Summary::new(headline);
-    if let Some(sub) = card_sub(after, before) {
+    if let Some(sub) = sub {
         s = s.with_sub(sub);
     }
     s
 }
 
 fn card_move(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -> Summary {
-    let title_after = str_field(after, "body").map(card_title_from_body);
-    let title = title_after
-        .clone()
+    let title = str_field(after, "body")
+        .map(card_title_from_body)
         .or_else(|| str_field(before, "body").map(card_title_from_body))
         .unwrap_or_else(|| fallback_id_label(entity_id));
     let mut s = Summary::new(format!("Moved card {}", quoted(&title)));
@@ -277,6 +318,31 @@ fn card_move(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -> 
         s = s.with_sub(sub);
     }
     s
+}
+
+/// Compact size delta for a card-body edit: `+12 chars`, `−3 chars`, or
+/// `body changed` when the length is unchanged but the content differs
+/// (typo fix that swaps characters of equal width). Returns `None` only
+/// when the strings are byte-identical.
+///
+/// Counts are in Unicode scalar values rather than bytes so multi-byte
+/// emoji / accented characters count as one. We don't compute precise
+/// added/removed pairs (that would need a real diff algorithm) — the
+/// sub-line is meant as a quick signal, not a forensic record.
+fn body_delta_label(before: &str, after: &str) -> Option<String> {
+    if before == after {
+        return None;
+    }
+    let bn = before.chars().count() as i64;
+    let an = after.chars().count() as i64;
+    let delta = an - bn;
+    if delta > 0 {
+        Some(format!("+{delta} chars"))
+    } else if delta < 0 {
+        Some(format!("\u{2212}{} chars", delta.unsigned_abs()))
+    } else {
+        Some("body changed".to_string())
+    }
 }
 
 fn card_delete(before: Option<&Value>, entity_id: &str) -> Summary {
@@ -390,12 +456,42 @@ mod tests {
     }
 
     #[test]
-    fn card_update_with_body_change_says_edited() {
-        let before = card_snap("# Old title", "col-a", 7);
-        let after = card_snap("# New title", "col-a", 7);
+    fn card_update_with_body_growth_appends_char_delta() {
+        // Title unchanged, body grew by 11 chars (" extended.." padding).
+        let before = card_snap("# Title\n\nshort body", "col-a", 7);
+        let after = card_snap("# Title\n\nshort body extended..", "col-a", 7);
         let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
-        assert_eq!(s.headline, "Edited card «New title»");
-        assert_eq!(s.sub.as_deref(), Some("Card #7"));
+        assert_eq!(s.headline, "Edited card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · +11 chars"));
+    }
+
+    #[test]
+    fn card_update_with_body_shrink_uses_unicode_minus() {
+        let before = card_snap("# Title\n\nlong body content", "col-a", 7);
+        let after = card_snap("# Title\n\nlong body", "col-a", 7);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Edited card «Title»");
+        // Note: the sign is a Unicode minus (U+2212), not ASCII hyphen.
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · \u{2212}8 chars"));
+    }
+
+    #[test]
+    fn card_update_with_body_swap_says_body_changed() {
+        // Same length, different content (typo fix).
+        let before = card_snap("# Title\n\nteh quick", "col-a", 7);
+        let after = card_snap("# Title\n\nthe quick", "col-a", 7);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Edited card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · body changed"));
+    }
+
+    #[test]
+    fn card_update_with_title_change_says_renamed_with_was() {
+        let before = card_snap("# Old title\n\nbody", "col-a", 7);
+        let after = card_snap("# New title\n\nbody", "col-a", 7);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Renamed card to «New title»");
+        assert_eq!(s.sub.as_deref(), Some("was «Old title» · Card #7"));
     }
 
     #[test]
@@ -404,6 +500,27 @@ mod tests {
         let after = card_snap("# Title", "col-b", 7);
         let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
         assert_eq!(s.headline, "Moved card «Title»");
+    }
+
+    #[test]
+    fn card_update_move_wins_over_rename_when_both_change() {
+        // Column change AND title change in one update → move framing
+        // takes priority because it's the more salient operation.
+        let before = card_snap("# Old", "col-a", 7);
+        let after = card_snap("# New", "col-b", 7);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Moved card «New»");
+    }
+
+    #[test]
+    fn card_update_with_no_diff_falls_back_to_updated() {
+        // Same body, same column — exotic but possible (e.g. position-only
+        // update). No body delta, so the sub is just the card number.
+        let before = card_snap("# Title", "col-a", 7);
+        let after = card_snap("# Title", "col-a", 7);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Updated card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7"));
     }
 
     #[test]
