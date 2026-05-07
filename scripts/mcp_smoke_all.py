@@ -8,7 +8,7 @@ tools/call get_card_by_number → tools/call list_boards.
 Requires OAuth client-credentials in the environment (same as bored-mcp):
   OIDC_TOKEN_URL=https://auth.desync.link/application/o/token/
   MCP_CLIENT_ID / MCP_CLIENT_SECRET — from Authentik OAuth2 provider for MCP (slug issuer …/bored-mcp/)
-  Optional: MCP_SCOPE=bored:dev:access (must satisfy bored-dev REQUIRED_SCOPE)
+  Optional: MCP_SCOPE=bored:prod:access (must satisfy prod REQUIRED_SCOPE)
 
 Optional: repo-root .env (gitignored) with those keys — pass --env-file.
 
@@ -78,7 +78,7 @@ def main() -> int:
         env_file = candidate if candidate.is_file() else None
 
     child_env = os.environ.copy()
-    child_env.setdefault("BORED_API_URL", "https://bored-dev.desync.link")
+    child_env.setdefault("BORED_API_URL", "https://bored.desync.link")
     if env_file is not None:
         extra = load_env_file(env_file)
         child_env.update(extra)
