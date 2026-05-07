@@ -185,10 +185,12 @@ def main() -> int:
             print(f"  - {b.get('name')} ({b.get('id')})")
 
     finally:
-        assert proc.stdin
-        proc.stdin.close()
-        err = proc.stderr.read().decode(errors="replace")
-        proc.wait(timeout=20)
+        try:
+            _, err_bytes = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, err_bytes = proc.communicate()
+        err = err_bytes.decode(errors="replace") if err_bytes else ""
         if err.strip():
             print("\n--- bored-mcp stderr (tail) ---\n", err[-2000:], sep="")
 
