@@ -63,6 +63,8 @@ The PR pipeline ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml)) runs 
 
 ### Required secrets
 
+Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but values are **not** stored in Woodpecker itself: they are fetched from **OpenBao** via the Woodpecker secret extension ([`woodpecker-openbao-broker`](https://github.com/vcheesbrough/woodpecker-openbao-broker)). Add or rotate values in OpenBao under the paths your broker maps for this repo; the names below are the keys the pipeline expects after merge.
+
 | Secret | Used by |
 |---|---|
 | `zot_ci_user` / `zot_ci_password` | push to `registry.desync.link` |
