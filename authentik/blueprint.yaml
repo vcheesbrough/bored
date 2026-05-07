@@ -1,0 +1,178 @@
+version: 1
+metadata:
+  name: bored OIDC
+  labels:
+    blueprints.goauthentik.io/description: "bored OAuth2 providers (dev + prod), groups, scopes, and application bindings"
+
+entries:
+  - model: authentik_core.group
+    state: present
+    identifiers:
+      name: bored-dev-users
+    attrs:
+      name: bored-dev-users
+
+  - model: authentik_core.group
+    state: present
+    identifiers:
+      name: bored-prod-users
+    attrs:
+      name: bored-prod-users
+
+  - model: authentik_providers_oauth2.scopemapping
+    state: present
+    identifiers:
+      name: "bored:dev:access"
+    attrs:
+      name: "bored:dev:access"
+      scope_name: "bored:dev:access"
+      description: "Grants access to bored dev environment"
+      expression: |
+        return {}
+
+  - model: authentik_providers_oauth2.scopemapping
+    state: present
+    identifiers:
+      name: "bored:prod:access"
+    attrs:
+      name: "bored:prod:access"
+      scope_name: "bored:prod:access"
+      description: "Grants access to bored prod environment"
+      expression: |
+        return {}
+
+  - model: authentik_providers_oauth2.scopemapping
+    state: present
+    identifiers:
+      name: "bored:mcp:identity"
+    attrs:
+      name: "bored:mcp:identity"
+      scope_name: "bored:prod:access"
+      description: "Service identity claims for bored MCP"
+      expression: |
+        return {
+          "actor_type": "service",
+          "actor_id": "bored-mcp-prod",
+          "actor_display_name": "Agent MCP",
+        }
+
+  - model: authentik_providers_oauth2.oauth2provider
+    state: present
+    identifiers:
+      name: bored-browser-dev
+    attrs:
+      name: bored-browser-dev
+      client_id: bored-browser-dev
+      client_secret: ${AUTHENTIK_BORED_DEV_CLIENT_SECRET}
+      client_type: confidential
+      redirect_uris:
+        - url: "https://bored-dev.desync.link/auth/callback"
+          matching_mode: strict
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      sub_mode: hashed_user_id
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "bored:dev:access"]]
+
+  - model: authentik_providers_oauth2.oauth2provider
+    state: present
+    identifiers:
+      name: bored-browser-prod
+    attrs:
+      name: bored-browser-prod
+      client_id: bored-browser-prod
+      client_secret: ${AUTHENTIK_BORED_PROD_CLIENT_SECRET}
+      client_type: confidential
+      redirect_uris:
+        - url: "https://bored.desync.link/auth/callback"
+          matching_mode: strict
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      sub_mode: hashed_user_id
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "bored:prod:access"]]
+
+  # Machine-to-machine provider for the bored MCP server. Uses the
+  # client_credentials grant — no user redirect, no redirect_uris needed.
+  # Confidential client type is required for Authentik to accept the grant.
+  - model: authentik_providers_oauth2.oauth2provider
+    state: present
+    identifiers:
+      name: bored-mcp-prod
+    attrs:
+      name: bored-mcp-prod
+      client_id: bored-mcp-prod
+      client_secret: ${AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET}
+      client_type: confidential
+      redirect_uris: []
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      sub_mode: hashed_user_id
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "bored:prod:access"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "bored:mcp:identity"]]
+
+  - model: authentik_core.application
+    state: present
+    identifiers:
+      slug: bored-mcp
+    attrs:
+      name: bored (MCP)
+      slug: bored-mcp
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, bored-mcp-prod]]
+
+  - model: authentik_core.application
+    state: present
+    identifiers:
+      slug: bored-dev
+    attrs:
+      name: bored (dev)
+      slug: bored-dev
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, bored-browser-dev]]
+
+  - model: authentik_core.application
+    state: present
+    identifiers:
+      slug: bored-prod
+    attrs:
+      name: bored (prod)
+      slug: bored-prod
+      provider: !Find [authentik_providers_oauth2.oauth2provider, [name, bored-browser-prod]]
+
+  - model: authentik_policies.policybinding
+    state: present
+    identifiers:
+      target: !Find [authentik_core.application, [slug, bored-dev]]
+      group: !Find [authentik_core.group, [name, bored-dev-users]]
+      order: 0
+    attrs:
+      target: !Find [authentik_core.application, [slug, bored-dev]]
+      group: !Find [authentik_core.group, [name, bored-dev-users]]
+      order: 0
+      enabled: true
+      negate: false
+      timeout: 30
+
+  - model: authentik_policies.policybinding
+    state: present
+    identifiers:
+      target: !Find [authentik_core.application, [slug, bored-prod]]
+      group: !Find [authentik_core.group, [name, bored-prod-users]]
+      order: 0
+    attrs:
+      target: !Find [authentik_core.application, [slug, bored-prod]]
+      group: !Find [authentik_core.group, [name, bored-prod-users]]
+      order: 0
+      enabled: true
+      negate: false
+      timeout: 30

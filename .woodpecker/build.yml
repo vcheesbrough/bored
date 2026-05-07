@@ -54,6 +54,26 @@ steps:
       - echo "$$CARGO_VERSION.$$PATCH-$(echo $$CI_COMMIT_SHA | cut -c1-7)" > .version-dev
       - echo "Version $(cat .version), dev $(cat .version-dev)"
 
+  apply-authentik-blueprint:
+    when:
+      - event: deployment
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.1.2
+    settings:
+      api_url: https://auth.desync.link
+      api_token:
+        from_secret: authentik_api_token
+      file: authentik/blueprint.yaml
+      instance_name: bored
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_BORED_DEV_CLIENT_SECRET:
+          from_secret: bored_dev_oidc_client_secret
+        AUTHENTIK_BORED_PROD_CLIENT_SECRET:
+          from_secret: bored_prod_oidc_client_secret
+        AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET:
+          from_secret: bored_mcp_prod_client_secret
+
   push:
     when:
       - event: deployment
