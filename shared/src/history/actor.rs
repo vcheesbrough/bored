@@ -109,10 +109,11 @@ mod tests {
     }
 
     #[test]
-    fn me_name_does_not_force_anonymous_to_you() {
-        // Anonymous mode injects display="anonymous". If `me_name` was
-        // somehow also "anonymous" the «You» rule would fire first — that's
-        // fine, both are the same actor in that mode. Verify ordering.
+    fn me_name_match_takes_priority_over_anonymous_rule() {
+        // Rule ordering: when `me_name` matches `actor_display_name`, the
+        // first («You») rule fires before the second (anonymous → «Someone»)
+        // rule even when `actor_sub == "anonymous"`. Both are the same actor
+        // in that case so the result is correct.
         assert_eq!(
             label_actor("anonymous", "anonymous", Some("anonymous")),
             "You"

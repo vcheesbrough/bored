@@ -5,6 +5,7 @@ import {
   apiCreateColumn,
   apiDeleteCard,
   apiMoveCard,
+  apiUpdateCard,
   gotoBoardView,
 } from './helpers';
 
@@ -125,6 +126,7 @@ test.describe('Audit history drawer — polished UX', () => {
     const colA = await apiCreateColumn(request, board.name, 'A');
     const colB = await apiCreateColumn(request, board.name, 'B');
     const card = await apiCreateCard(request, colA.id, '# Badge tour');
+    await apiUpdateCard(request, card.id, { body: '# Badge tour edited' });
     await apiMoveCard(request, card.id, colB.id, 0);
     await apiDeleteCard(request, card.id);
 
@@ -136,7 +138,7 @@ test.describe('Audit history drawer — polished UX', () => {
     await page.locator('.history-toggle input[type="checkbox"]').check();
 
     // Each badge class should appear at least once.
-    for (const action of ['create', 'delete', 'move']) {
+    for (const action of ['create', 'update', 'move', 'delete']) {
       await expect(
         page.locator(`.history-badge-${action}`).first(),
         `expected at least one .history-badge-${action} row`
