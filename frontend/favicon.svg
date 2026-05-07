@@ -1,8 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="12" fill="#18181b" />
-  <rect x="12" y="14" width="40" height="36" rx="6" fill="#27272a" stroke="#3f3f46" />
-  <circle cx="22" cy="24" r="3" fill="#facc15" />
-  <rect x="28" y="22" width="18" height="4" rx="2" fill="#e4e4e7" />
-  <rect x="18" y="31" width="28" height="4" rx="2" fill="#a1a1aa" />
-  <rect x="18" y="39" width="20" height="4" rx="2" fill="#a1a1aa" />
+  <!-- Colours match frontend/style.css :root — UBC navy + indigo accent + amber highlights -->
+  <rect width="64" height="64" rx="12" fill="#002145" />
+  <rect x="11" y="13" width="42" height="38" rx="6" fill="#002d5e" stroke="#1a5299" stroke-width="1" />
+  <!-- Indigo accent stripe (buttons / interactive affordances) -->
+  <rect x="11" y="13" width="4" height="38" rx="1" fill="#6366f1" />
+  <!-- Card number chip -->
+  <circle cx="23" cy="24" r="3.25" fill="#fbbf24" />
+  <!-- Title + body lines -->
+  <rect x="29" y="21.5" width="18" height="4" rx="2" fill="#e8f3ff" />
+  <rect x="18" y="31" width="28" height="4" rx="2" fill="#6fa8db" />
+  <rect x="18" y="39" width="20" height="4" rx="2" fill="#6fa8db" opacity="0.85" />
 </svg>

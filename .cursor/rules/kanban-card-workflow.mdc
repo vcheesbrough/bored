@@ -1,0 +1,26 @@
+---
+description: Kanban card workflow — one card at a time, branches, columns
+alwaysApply: true
+---
+
+# Kanban / bored card workflow
+
+When this project (or you) uses **Kanban cards** (e.g. bored) as the task queue:
+
+1. **One card at a time** unless the user explicitly says otherwise (no parallel cards unless told).
+
+2. **Start work:** As soon as you pick up a card, **move it to the In Progress column** using **bored MCP** (`list_columns` → **`move_card`**). Resolve the card with **`get_card_by_number`** when you only know `#N`.
+
+3. **Reconcile with reality:** **Compare the card body to the current source tree**, **replan** if scope or facts drifted, then **`update_card`** so the card stays accurate (acceptance, files, out-of-scope notes).
+
+4. **Branches:** Implement each card on its **own feature branch** whose name includes the **next consecutive iteration number** for that repo (e.g. `feat/iteration-22-short-slug`).  
+   **Never** create follow-on branches **from** the feature branch — always branch from **`main`** (or the repo’s agreed default trunk), one iteration branch per card.
+
+5. **Ship:** When the **PR is merged**, **move the card to Done** via bored MCP (**`move_card`** into the Done column).
+
+## Bored — MCP only
+
+- Use **bored MCP tools** for **all** board/column/card reads and writes: `list_boards`, `get_board`, `list_columns`, `list_cards`, `get_card`, **`get_card_by_number`**, `create_card`, **`update_card`**, **`move_card`**, `delete_*`, `reorder_columns`, etc.
+- **Do not** call the bored HTTP API with `curl`, scripts, or ad-hoc clients unless MCP is broken or unavailable — then say so once, fall back briefly, and still obey **one card**, trunk-based branches, **no stacking branches**.
+- **Global (all projects):** **`~/.cursor/mcp.json`** mirrors Claude Code **`~/.claude.json`** → **`mcpServers`**. Secrets live in **`~/.cursor/mcp.env`** (**chmod 600**, never commit). Resync from Claude when MCP env changes (flatten server env blocks into **`mcp.env`**).
+- **This repo:** **`.cursor/mcp.json`** defines **`bored-dev`** only (launcher + dev URL/scope + **`envFile`**); prod **`bored`** is global.
