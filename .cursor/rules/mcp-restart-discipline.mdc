@@ -4,6 +4,15 @@ description: >-
 alwaysApply: true
 ---
 
+# Assistant obligations — MCP (non‑negotiable, permanent)
+
+- **First move on MCP failure:** execute the **canonical fix checklist** below **before** improvising (no partial env merges, no guess‑and‑check JSON churn).
+- **No restart theatre:** batch related edits; give **one** explicit outcome — **MCP reload** *or* **full quit Cursor** — not a vague loop of both.
+- **No contradicting this file** unless the user **explicitly** overrides (e.g. another API host or scope).
+- **Never paste secrets** from **`~/.cursor/mcp.json`** / **`~/.claude.json`** into chat.
+
+---
+
 # Cursor MCP — canonical fix (remember forever)
 
 **When Cursor MCP fails** (e.g. `bored` won’t connect, `MCP_CLIENT_ID required when OIDC_TOKEN_URL is set`, tools missing after spawn):
@@ -18,7 +27,7 @@ alwaysApply: true
 
 5. **One reload boundary:** After changing MCP JSON, tell the user **once** whether **MCP reload** vs **full quit Cursor** is needed; batch edits so they aren’t restart-looping for the same incident.
 
-**Other machines / other clones:** Sync **`~/.cursor/rules/`** + **`~/.cursor/mcp.json`** via dotfiles or manual copy. This committed copy matches **`~/.cursor/rules/mcp-restart-discipline.mdc`** — keep them in sync when editing.
+**Other machines / other clones:** Sync **`~/.cursor/rules/`** (this file) + **`~/.cursor/mcp.json`** via dotfiles or manual copy. The **`bored`** repo also ships the same rule at **`.cursor/rules/mcp-restart-discipline.mdc`** so any clone gets MCP discipline before dotfiles exist.
 
 ---
 
