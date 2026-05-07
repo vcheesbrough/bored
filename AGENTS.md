@@ -95,3 +95,74 @@ These files are intentionally per-tool and stay where they are. AGENTS.md just p
 | [`.claude/watch-woodpecker.js`](.claude/watch-woodpecker.js) | Claude Code | PostToolUse hook that polls the latest Woodpecker pipeline after a push and emits a summary as `additionalContext`. Implements §2 automatically. Set `WOODPECKER_TOKEN` for authenticated log access. |
 
 The `.claude/` folder itself is gitignored apart from this hook script; per-machine Claude Code settings live in `.claude/settings.local.json` (also gitignored).
+
+---
+
+## 6. PR comment loop
+
+When the user asks to **raise a PR**, or when a PR on the current branch has **unresolved review comments** (from the [`pr-review.yml`](.woodpecker/pr-review.yml) Claude PR agent or a human reviewer), enter the loop below.
+
+### Workflow
+
+1. **Detect / open the PR.**
+   - Asked to raise a PR: push the feature branch (per §1, branched from `main`), open with `gh pr create`, then enter the loop.
+   - PR already exists on the current branch: list unresolved review threads and enter the loop.
+   - No PR, none requested: do nothing.
+
+2. **Fetch unresolved review threads.** Use the GraphQL `pullRequest.reviewThreads` query and filter `isResolved == false`. Process **bot and human comments equally**.
+
+   ```bash
+   gh api graphql -f query='
+     query($owner:String!,$repo:String!,$num:Int!) {
+       repository(owner:$owner, name:$repo) {
+         pullRequest(number:$num) {
+           reviewThreads(first:100) {
+             nodes { id isResolved
+               comments(first:50) { nodes { id author{login} path line body url } }
+             }
+           }
+         }
+       }
+     }' -F owner=vcheesbrough -F repo=bored -F num=$PR
+   ```
+
+3. **Present one comment at a time.** For each unresolved thread:
+   - Show file + line, author, full comment body.
+   - Provide your **analysis** (what they meant, why it matters or doesn't).
+   - Provide **suggested fix(es)** as concrete code changes; offer multiple options when there are real alternatives.
+   - Prompt with `AskQuestion` using **A/B/C…** or **yes/no**. Always include an "ignore / push back" option. **The user makes every final decision.**
+
+4. **Apply the chosen resolution locally.** Make the edits, run a quick sanity check (`cargo check -p <crate>` for Rust, `trunk build` for frontend, etc.), but **do not commit yet** — accumulate edits across the batch.
+
+5. **Reply on the PR thread.** Post a short reply summarising what was done or why it was rejected:
+
+   ```bash
+   gh api repos/vcheesbrough/bored/pulls/$PR/comments/$COMMENT_ID/replies \
+     -f body="<resolution summary>"
+   ```
+
+   **Resolve the thread** when the user picked a fix or an explicit "won't do":
+
+   ```bash
+   gh api graphql -f query='
+     mutation($id:ID!) { resolveReviewThread(input:{threadId:$id}) { thread { id } } }' \
+     -F id=$THREAD_ID
+   ```
+
+   If the user picked "discuss further", leave the thread open.
+
+6. **End-of-batch commit + push.** Once every comment in the current batch has a decision:
+   - **One** commit, message naming the PR and summarising the comments addressed.
+   - `git push` to the same feature branch.
+   - Verify CI per §2; surface any failure before declaring the batch done.
+
+7. **Re-enter the loop** when the user asks for the next round, or when polling reveals new unresolved threads (the Claude PR agent reruns on each push).
+
+### Hard rules
+
+- **User decides every comment.** Never apply a code change without an explicit A/B/yes/no choice.
+- **One comment per prompt.** Don't batch multiple comments into a single decision.
+- **One commit per batch.** Never one-commit-per-comment, never a force-push (consistent with the global git-safety rules).
+- **Don't auto-resolve threads** the user marked "discuss further" or "skip".
+- **All resolution explanations go on the PR**, not back-channel — the reply on the thread is the audit trail.
+- **Respect §§1–3:** trunk-based branches, post-push CI verification, MCP discipline. Reaching the end of a batch with the user's decisions is the explicit commit consent for *that* batch only.
