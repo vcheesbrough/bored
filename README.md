@@ -54,9 +54,10 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 
 1. **validate-deployment** — refuse anything other than `dev` or `prod`; refuse `prod` from non-`main` branches.
 2. **compute-version** — derive `MAJOR.MINOR` from `Cargo.toml`, count `vMAJOR.MINOR.*` tags on GitHub, write `.version` and `.version-dev`.
-3. **push** — rebuild and push `:MAJOR.MINOR.PATCH` (and the `-<sha>` dev variant) to `registry.desync.link`.
-4. **tag-release** — *(prod only)* `git tag vMAJOR.MINOR.PATCH` pushed to GitHub.
-5. **deploy-dev / deploy-prod** — run `docker compose -f deploy/docker-compose.yml up -d --pull always` against the host's docker socket, with the OIDC client secret, image tag, host name, and DB volume injected as env. There is no SSH or `scp` step.
+3. **apply-authentik-blueprint** — runs [`woodpecker-plugin-authentik-blueprint`](https://github.com/vcheesbrough/woodpecker-plugin-authentik-blueprint) against [`authentik/blueprint.yaml`](authentik/blueprint.yaml) so Authentik OAuth providers stay in sync before the app rolls out.
+4. **push** — rebuild and push `:MAJOR.MINOR.PATCH` (and the `-<sha>` dev variant) to `registry.desync.link`.
+5. **tag-release** — *(prod only)* `git tag vMAJOR.MINOR.PATCH` pushed to GitHub.
+6. **deploy-dev / deploy-prod** — run `docker compose -f deploy/docker-compose.yml up -d --pull always` against the host's docker socket, with the OIDC client secret, image tag, host name, and DB volume injected as env. There is no SSH or `scp` step.
 
 The PR pipeline ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml)) runs the Claude PR review agent on every pull request.
 
@@ -66,8 +67,10 @@ The PR pipeline ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml)) runs 
 |---|---|
 | `zot_ci_user` / `zot_ci_password` | push to `registry.desync.link` |
 | `github_token` | tag-count lookup + `git push` of release tags |
-| `bored_dev_oidc_client_secret` | deploy-dev (passed through to the container) |
-| `bored_prod_oidc_client_secret` | deploy-prod (passed through to the container) |
+| `authentik_api_token` | apply-authentik-blueprint (Authentik admin API) |
+| `bored_dev_oidc_client_secret` | deploy-dev + blueprint var `AUTHENTIK_BORED_DEV_CLIENT_SECRET` |
+| `bored_prod_oidc_client_secret` | deploy-prod + blueprint var `AUTHENTIK_BORED_PROD_CLIENT_SECRET` |
+| `bored_mcp_prod_client_secret` | blueprint var `AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET` (MCP OAuth client) |
 | `claude_oauth_token` | PR review agent |
 | `pr_reviewer_gh_app_id` | PR review agent |
 | `pr_reviewer_gh_app_installation_id` | PR review agent |
