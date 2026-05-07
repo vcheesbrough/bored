@@ -38,6 +38,16 @@ export async function apiDeleteCard(request: APIRequestContext, cardId: string) 
   if (!res.ok()) throw new Error(`DELETE /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);
 }
 
+export async function apiUpdateCard(
+  request: APIRequestContext,
+  cardId: string,
+  patch: { body?: string; position?: number; column_id?: string }
+) {
+  const res = await request.put(`/api/cards/${cardId}`, { data: patch });
+  if (!res.ok()) throw new Error(`PUT /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);
+  return await res.json() as { id: string; body: string; column_id: string; number: number };
+}
+
 export async function apiMoveCard(
   request: APIRequestContext,
   cardId: string,

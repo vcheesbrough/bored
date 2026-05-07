@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+pub mod history;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
     pub id: String,

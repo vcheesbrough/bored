@@ -48,6 +48,22 @@ pub fn HistoryPanel(
     let entries = RwSignal::new(Vec::<shared::AuditLogEntry>::new());
     let loading = RwSignal::new(false);
     let show_moves = RwSignal::new(false);
+    // Filled once when /api/me resolves; powers the «You» rule in label_actor.
+    let me_name = RwSignal::new(None::<String>);
+
+    // Fetch the current user's display name once on first mount of the
+    // drawer — `label_actor` consults it case-insensitively to label the
+    // current actor's rows as «You».
+    Effect::new(move |_| {
+        if me_name.get_untracked().is_some() {
+            return;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(user) = crate::api::fetch_me().await {
+                me_name.set(Some(user.name));
+            }
+        });
+    });
 
     let reload = Callback::new(move |_: ()| {
         let slug = board_slug.get_untracked();
@@ -165,29 +181,55 @@ pub fn HistoryPanel(
                             }
                             key=|e: &shared::AuditLogEntry| e.id.clone()
                             children=move |e: shared::AuditLogEntry| {
+                                // Snapshot the runtime context at render time
+                                // (re-rendered when entries / show_moves / me_name change).
+                                let me = me_name.get();
+                                let now = current_now_ms();
+                                let offset = current_local_offset_minutes();
+                                let tz = current_tz_label();
+                                let then = parse_audit_ts(&e.created_at);
+
+                                let actor_label = shared::history::label_actor(
+                                    &e.actor_sub,
+                                    &e.actor_display_name,
+                                    me.as_deref(),
+                                );
+                                let time_label =
+                                    shared::history::format_history_time(now, then, offset);
+                                let tooltip =
+                                    shared::history::format_history_tooltip(then, offset, &tz);
+                                let summary = shared::history::derive_summary(&e);
+
                                 let aid = e.id.clone();
                                 let action = e.action.clone();
+                                let entity_id = e.entity_id.clone();
                                 let badge_class = format!("history-badge history-badge-{action}");
                                 let can_restore = e.action == "delete";
-                                let line1 = format!("{} {}", e.entity_type, e.entity_id);
-                                let line2 = format!("{} · {}", e.actor_display_name, e.created_at);
+                                let headline = summary.headline;
+                                let sub = summary.sub;
                                 view! {
-                                    <li class="history-row">
+                                    <li class="history-row" data-entity-id=entity_id>
                                         <div class="history-row-meta">
                                             <span class=badge_class>{action}</span>
-                                            <span class="history-entity">{line1}</span>
+                                            <span class="history-headline">{headline}</span>
                                         </div>
-                                        <div class="history-actor">{line2}</div>
+                                        {sub.map(|s| view! {
+                                            <div class="history-sub">{s}</div>
+                                        })}
+                                        <div class="history-meta-line" title=tooltip>
+                                            <span class="history-actor">{actor_label}</span>
+                                            <span class="history-meta-sep">" · "</span>
+                                            <span class="history-time">{time_label}</span>
+                                        </div>
                                         <Show when=move || can_restore fallback=|| ()>
                                             <button
                                                 type="button"
                                                 class="btn btn-restore"
                                                 on:click={
-                                                    let reload = reload.clone();
+                                                    let reload = reload;
                                                     let audit_id = aid.clone();
                                                     move |_| {
                                                         let id = audit_id.clone();
-                                                        let reload = reload.clone();
                                                         wasm_bindgen_futures::spawn_local(async move {
                                                             match crate::api::restore_audit_entry(&id).await {
                                                                 Ok(_) => reload.run(()),
@@ -207,4 +249,142 @@ pub fn HistoryPanel(
             </aside>
         </Show>
     }
+}
+
+// ── JS bridge helpers ────────────────────────────────────────────────────
+//
+// These wrap the small slice of `js_sys` / `Intl.DateTimeFormat` that the
+// pure helpers in `shared::history` cannot reach. Kept here (rather than
+// in the shared crate) so the shared crate stays target-agnostic and can
+// be tested with `cargo test -p shared --lib` from CI.
+
+fn current_now_ms() -> i64 {
+    js_sys::Date::new_0().get_time() as i64
+}
+
+/// Local UTC offset in minutes, **east-positive** (BST = +60, PST = -480).
+/// `Date.getTimezoneOffset()` returns the opposite sign convention; we
+/// negate it so the value matches the contract of `format_history_time`.
+fn current_local_offset_minutes() -> i32 {
+    -(js_sys::Date::new_0().get_timezone_offset() as i32)
+}
+
+/// Short timezone abbreviation for the user's locale (e.g. "BST", "PDT").
+/// Sourced from `Intl.DateTimeFormat` so we don't ship a tz table.
+/// Returns an empty string when `Intl` is unavailable in the host engine
+/// (the tooltip falls back to the un-suffixed form in that case).
+fn current_tz_label() -> String {
+    use js_sys::{Array, Function, Object, Reflect};
+    use wasm_bindgen::JsValue;
+
+    let opts = Object::new();
+    if Reflect::set(
+        &opts,
+        &JsValue::from_str("timeZoneName"),
+        &JsValue::from_str("short"),
+    )
+    .is_err()
+    {
+        return String::new();
+    }
+
+    // Resolve `Intl.DateTimeFormat` constructor dynamically; using
+    // `js_sys::Intl::DateTimeFormat` directly would couple us to a
+    // particular wasm-bindgen feature subset and the Reflect path is
+    // sufficient and stable.
+    let global = js_sys::global();
+    let intl = match Reflect::get(&global, &JsValue::from_str("Intl")) {
+        Ok(v) if !v.is_undefined() => v,
+        _ => return String::new(),
+    };
+    let dtf_ctor = match Reflect::get(&intl, &JsValue::from_str("DateTimeFormat")) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let dtf_ctor: Function = match dtf_ctor.dyn_into::<Function>() {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
+
+    let args = Array::of2(&JsValue::UNDEFINED, &opts.into());
+    let dtf = match Reflect::construct(&dtf_ctor, &args) {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+
+    let format_to_parts = match Reflect::get(&dtf, &JsValue::from_str("formatToParts")) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let format_to_parts: Function = match format_to_parts.dyn_into::<Function>() {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
+
+    let date = js_sys::Date::new_0();
+    let parts = match format_to_parts.call1(&dtf, &date.into()) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let parts: Array = match parts.dyn_into::<Array>() {
+        Ok(a) => a,
+        Err(_) => return String::new(),
+    };
+
+    for i in 0..parts.length() {
+        let part = parts.get(i);
+        let ty = Reflect::get(&part, &JsValue::from_str("type"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        if ty == "timeZoneName" {
+            return Reflect::get(&part, &JsValue::from_str("value"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+        }
+    }
+    String::new()
+}
+
+/// Parse a Surreal-emitted timestamp string (e.g. `"d'2026-05-07T01:27:04.823026281Z'"`)
+/// into milliseconds since the Unix epoch.
+///
+/// Strips the `d'…'` wrapper first, then trims fractional seconds to three
+/// digits (JS `Date.parse` is permissive about trailing fractional digits
+/// in modern engines, but trimming keeps the input portable).
+///
+/// Falls back to the current time when parsing fails so a malformed row
+/// still renders rather than blowing up the whole drawer.
+fn parse_audit_ts(raw: &str) -> i64 {
+    let inner = shared::history::strip_surreal_wrapper(raw);
+    let normalised = trim_fractional_seconds(inner);
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(&normalised));
+    let ms = date.get_time();
+    if ms.is_nan() {
+        current_now_ms()
+    } else {
+        ms as i64
+    }
+}
+
+/// Truncate the fractional-seconds part of an ISO-8601 string to at most
+/// three digits, e.g. `"2026-05-07T01:27:04.823026281Z"` →
+/// `"2026-05-07T01:27:04.823Z"`. Returns the input unchanged when there's
+/// no fractional part or no trailing `Z`.
+fn trim_fractional_seconds(s: &str) -> String {
+    let Some(dot_at) = s.find('.') else {
+        return s.to_string();
+    };
+    let after_dot = &s[dot_at + 1..];
+    let Some(z_at) = after_dot.find('Z') else {
+        return s.to_string();
+    };
+    let fractional = &after_dot[..z_at];
+    let truncated: String = fractional.chars().take(3).collect();
+    format!(
+        "{prefix}.{truncated}{suffix}",
+        prefix = &s[..dot_at],
+        suffix = &after_dot[z_at..]
+    )
 }
