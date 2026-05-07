@@ -111,11 +111,11 @@ test.describe('Audit history drawer — polished UX', () => {
 
     const tooltip = await meta.getAttribute('title');
     expect(tooltip, 'meta-line should have a title attribute').not.toBeNull();
-    // YYYY-MM-DD HH:MM, optionally followed by a tz abbreviation. Headless
-    // Chromium always reports `Intl.DateTimeFormat` so we expect the
-    // suffix in CI; we still tolerate absence (different host engines)
-    // by matching either form.
-    expect(tooltip ?? '').toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}( [A-Z]{2,5})?$/);
+    // YYYY-MM-DD HH:MM, optionally followed by a tz token. Accepts both
+    // alphabetic abbreviations (BST, PDT, UTC) and the offset-style strings
+    // Intl returns for some IANA zones (GMT-8, GMT+5:30) so devs running
+    // the suite under those system timezones don't get a false failure.
+    expect(tooltip ?? '').toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}( \S+)?$/);
   });
 
   test('badge classes appear for create / update / move / delete operations', async ({
