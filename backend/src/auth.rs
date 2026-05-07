@@ -329,6 +329,11 @@ pub struct Claims {
     /// Display name — falls back to `sub` if absent.
     #[serde(default)]
     pub preferred_username: Option<String>,
+    /// Service/display identity from custom scope mappings (for MCP-style
+    /// machine tokens). When present, this should win over username/email for
+    /// audit attribution.
+    #[serde(default)]
+    pub actor_display_name: Option<String>,
     /// IdP-provided avatar URL when available. Frontend falls back to Gravatar.
     #[serde(default)]
     pub picture: Option<String>,
@@ -344,8 +349,9 @@ pub struct Claims {
 impl Claims {
     /// Display name with sensible fallback. Used by `/api/me` and tracing.
     pub fn display_name(&self) -> String {
-        self.preferred_username
+        self.actor_display_name
             .clone()
+            .or_else(|| self.preferred_username.clone())
             .or_else(|| self.email.clone())
             .unwrap_or_else(|| self.sub.clone())
     }
@@ -437,6 +443,7 @@ pub async fn auth_middleware(
             sub: "anonymous".to_string(),
             email: None,
             preferred_username: Some("anonymous".to_string()),
+            actor_display_name: None,
             picture: None,
             scope: None,
             iss: "auth-disabled".to_string(),
