@@ -11,12 +11,14 @@ When this project (or you) uses **Kanban cards** (e.g. bored) as the task queue:
 
 2. **Start work:** As soon as you pick up a card, **move it to the In Progress column** using **bored MCP** (`list_columns` → **`move_card`**). Resolve the card with **`get_card_by_number`** when you only know `#N`.
 
-3. **Reconcile with reality:** **Compare the card body to the current source tree**, **replan** if scope or facts drifted, then **`update_card`** so the card stays accurate (acceptance, files, out-of-scope notes).
+3. **Iteration in the card title (this repo):** Bored cards have **no separate title field** — the board shows the **first markdown `#` heading** in **`body`**. When you are **analyzing or implementing** a card here, set that heading to include **`Iteration N`** (same **N** as **`feat/iteration-N-…`** and the workspace **`Cargo.toml`** minor version **1.N.x**). Preferred form: **`# Iteration N — …`** (one prefix; avoid doubling if already correct). Apply with **`update_card`** as soon as **N** is known.
 
-4. **Branches:** Implement each card on its **own feature branch** whose name includes the **next consecutive iteration number** for that repo (e.g. `feat/iteration-22-short-slug`).  
+4. **Reconcile with reality:** **Compare the card body to the current source tree**, **replan** if scope or facts drifted, then **`update_card`** so the card stays accurate (acceptance, files, out-of-scope notes). Preserve the **`# Iteration N — …`** heading unless **N** changes.
+
+5. **Branches:** Implement each card on its **own feature branch** whose name includes the **next consecutive iteration number** for this repo (e.g. `feat/iteration-22-short-slug`).  
    **Never** create follow-on branches **from** the feature branch — always branch from **`main`** (or the repo’s agreed default trunk), one iteration branch per card.
 
-5. **Ship:** When the **PR is merged**, **move the card to Done** via bored MCP (**`move_card`** into the Done column).
+6. **Ship:** When the **PR is merged**, **move the card to Done** via bored MCP (**`move_card`** into the Done column).
 
 ## Bored — MCP only
 
