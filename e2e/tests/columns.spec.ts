@@ -16,8 +16,8 @@ test.describe('Columns', () => {
 
     await closeChooser(page);
 
-    // The new column should appear in the board view.
-    await expect(page.locator('.column-name').filter({ hasText: name })).toBeVisible();
+    // The new column should appear in the board view (scope to the kanban row — avoids strict-mode collisions).
+    await expect(page.locator('.columns-row .column-name').filter({ hasText: name })).toBeVisible();
   });
 
   test('rename column via board chooser', async ({ page, request }) => {
@@ -42,8 +42,8 @@ test.describe('Columns', () => {
     await closeChooser(page);
 
     // Board view should show the updated name.
-    await expect(page.locator('.column-name').filter({ hasText: newName })).toBeVisible();
-    await expect(page.locator('.column-name').filter({ hasText: col.name })).not.toBeVisible();
+    await expect(page.locator('.columns-row .column-name').filter({ hasText: newName })).toBeVisible();
+    await expect(page.locator('.columns-row .column-name').filter({ hasText: col.name })).not.toBeVisible();
   });
 
   test('delete column via board chooser', async ({ page, request }) => {
@@ -64,6 +64,6 @@ test.describe('Columns', () => {
     await closeChooser(page);
 
     // Column should be gone from the board view.
-    await expect(page.locator('.column-name').filter({ hasText: col.name })).not.toBeVisible();
+    await expect(page.locator('.columns-row .column-name').filter({ hasText: col.name })).not.toBeVisible();
   });
 });
