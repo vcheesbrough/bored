@@ -179,7 +179,11 @@ def main() -> int:
             print("list_boards failed:", r4, file=sys.stderr)
             return 1
         boards_raw = extract_text_content(r4.get("result") or {})
-        boards = json.loads(boards_raw)
+        try:
+            boards = json.loads(boards_raw)
+        except json.JSONDecodeError:
+            print("list_boards bad JSON:", boards_raw[:500], file=sys.stderr)
+            return 1
         print(f"list_boards: ok — {len(boards)} board(s)")
         for b in boards[:5]:
             print(f"  - {b.get('name')} ({b.get('id')})")
