@@ -31,7 +31,7 @@ test.describe('Audit history & restore', () => {
     await page.locator('.navbar-history-btn').click();
     await expect(page.locator('.history-drawer')).toBeVisible();
 
-    const row = page.locator('.history-row').filter({ hasText: card.id });
+    const row = page.locator(`.history-row[data-entity-id="${card.id}"]`);
     await expect(row).toBeVisible();
     await expect(row.locator('.history-badge-create')).toBeVisible();
   });
@@ -48,9 +48,9 @@ test.describe('Audit history & restore', () => {
     await page.locator('.navbar-history-btn').click();
     await expect(page.locator('.history-drawer')).toBeVisible();
 
-    const deleteRow = page.locator('.history-row').filter({ hasText: card.id }).filter({
-      has: page.locator('.history-badge-delete'),
-    });
+    const deleteRow = page
+      .locator(`.history-row[data-entity-id="${card.id}"]`)
+      .filter({ has: page.locator('.history-badge-delete') });
     await expect(deleteRow).toBeVisible();
     await deleteRow.getByRole('button', { name: 'Restore' }).click();
 
@@ -124,7 +124,7 @@ test.describe('Audit history & restore', () => {
     await expect(page.locator('.history-drawer')).toBeVisible();
     await expect(page.locator('.history-drawer-title')).toHaveText('Column history');
 
-    const cardRow = page.locator('.history-row').filter({ hasText: card.id });
+    const cardRow = page.locator(`.history-row[data-entity-id="${card.id}"]`);
     await expect(cardRow).toBeVisible();
     await expect(cardRow.locator('.history-badge-create')).toBeVisible();
   });
@@ -142,7 +142,7 @@ test.describe('Audit history & restore', () => {
     await expect(page.locator('.history-drawer')).toBeVisible();
     await expect(page.locator('.history-drawer-title')).toHaveText('Card history');
 
-    const cardRow = page.locator('.history-row').filter({ hasText: card.id });
+    const cardRow = page.locator(`.history-row[data-entity-id="${card.id}"]`);
     await expect(cardRow).toBeVisible();
   });
 
@@ -160,7 +160,7 @@ test.describe('Audit history & restore', () => {
     await expect(page.locator('.history-drawer')).toBeVisible();
     await expect(page.locator('.history-drawer-title')).toHaveText('Card history');
 
-    const cardRow = page.locator('.history-row').filter({ hasText: card.id });
+    const cardRow = page.locator(`.history-row[data-entity-id="${card.id}"]`);
     await expect(cardRow).toBeVisible();
 
     await page.locator('.history-drawer-close').click();

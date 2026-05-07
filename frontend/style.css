@@ -1122,16 +1122,56 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .history-badge-move { background: rgba(99, 102, 241, 0.18); color: #a5b4fc; }
 .history-badge-restore { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
 
-.history-entity {
-  font-family: var(--mono);
+/* Bold first line: action verb + entity + headline derived from snapshot_after.
+   Stays on one line where possible; ellipsis avoids the row growing tall on
+   multi-line bodies (the headline already truncates in shared::history at
+   60 chars). */
+.history-headline {
   color: var(--text);
-  font-size: 11px;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.history-actor {
+/* Optional second muted line carrying delta context — e.g. `Card #42`,
+   `was «old name»` for renames. */
+.history-sub {
+  margin-top: 2px;
+  margin-left: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* Third line: actor + relative time with a separator dot. The whole line
+   gets the absolute-datetime tooltip via `title=` on the wrapping div. */
+.history-meta-line {
   margin-top: 4px;
   color: var(--text-muted);
   font-size: 11px;
+  line-height: 1.4;
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  flex-wrap: wrap;
+}
+
+.history-actor {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.history-meta-sep {
+  color: var(--text-muted);
+}
+
+.history-time {
+  color: var(--text-muted);
 }
 
 .btn-restore {
