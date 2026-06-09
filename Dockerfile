@@ -1,8 +1,4 @@
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS frontend-builder
-# Release tag burned into the WASM bundle (see shared::app_version). Empty for
-# local builds — the code then falls back to CARGO_PKG_VERSION.
-ARG RELEASE_TAG=""
-ENV RELEASE_TAG=${RELEASE_TAG}
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -14,13 +10,14 @@ COPY agent/Cargo.toml agent/Cargo.toml
 RUN mkdir -p backend/src && touch backend/src/main.rs \
  && mkdir -p mcp/src && touch mcp/src/main.rs \
  && mkdir -p agent/src && touch agent/src/main.rs
+# Release tag burned into the WASM bundle (see shared::app_version). Empty for
+# local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
+# toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
+ARG RELEASE_TAG=""
+ENV RELEASE_TAG=${RELEASE_TAG}
 RUN cd frontend && trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
-# Release tag burned into the backend binary (see shared::app_version). Empty for
-# local builds — the code then falls back to CARGO_PKG_VERSION.
-ARG RELEASE_TAG=""
-ENV RELEASE_TAG=${RELEASE_TAG}
 RUN rustup component add rustfmt clippy
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -34,6 +31,11 @@ RUN mkdir -p frontend/src && touch frontend/src/lib.rs \
 RUN cargo fmt -p backend -p shared -p agent --check
 RUN cargo clippy -p backend -p shared -p agent -- -D warnings
 RUN cargo test -p backend -p shared -p agent --lib
+# Release tag burned into the backend binary (see shared::app_version). Empty for
+# local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
+# fmt/clippy/test layers so a tag change only recompiles the crates that read it.
+ARG RELEASE_TAG=""
+ENV RELEASE_TAG=${RELEASE_TAG}
 RUN cargo build --release -p backend -p agent
 
 FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
