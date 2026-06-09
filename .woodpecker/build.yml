@@ -1,19 +1,54 @@
+# Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
+# Push:   compute-version → build → e2e
+# Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → push → deploy-* → tag-release-*
+#
+# Release mechanics (see card #176):
+#   - compute-version (plugin) allocates/reuses ONE semver per commit, before build.
+#   - RELEASE_TAG is burned into the image (build-arg) and used as the single
+#     docker tag; the git tag pushed after deploy is byte-identical.
+#   - Git tagging happens after a successful dev OR prod deploy.
+
 when:
   - event: [push, deployment]
 
 steps:
+  compute-version:
+    when:
+      - event: [push, deployment]
+    depends_on: []
+    pull: true
+    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
   build:
     when:
       - event: push
+    depends_on:
+      - compute-version
     image: &docker-image docker:27-cli@sha256:f56779b4e86550493153cc8642c9c8e40b5d934e43cb5b4ea463aea5245c5c01
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
-      - docker build -t registry.desync.link/bored:$$CI_COMMIT_SHA .
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        docker build \
+          --build-arg RELEASE_TAG="$$RELEASE_TAG" \
+          --label org.opencontainers.image.version="$$RELEASE_TAG" \
+          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
+          --label org.opencontainers.image.created="$$CREATED" \
+          -t registry.desync.link/bored:$$CI_COMMIT_SHA .
+        ./scripts/check-image-metadata.sh registry.desync.link/bored:$$CI_COMMIT_SHA "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
   e2e:
     when:
       - event: push
+    depends_on:
+      - build
     image: *docker-image
     volumes: *docker-socket
     commands:
@@ -27,6 +62,7 @@ steps:
   validate-deployment:
     when:
       - event: deployment
+    depends_on: []
     image: alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
     commands:
       - |
@@ -40,23 +76,11 @@ steps:
           exit 1
         fi
 
-  compute-version:
-    when:
-      - event: deployment
-    image: &alpine-git alpine/git:latest@sha256:970dba879f3c60fd3d1286788fdc8107dceb541d8569e3f2b1745e8e5199664d
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-    commands:
-      - CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)\.[0-9]*"/\1/')
-      - PATCH=$(git ls-remote --tags --refs https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git "refs/tags/v$$CARGO_VERSION.*" | wc -l | tr -d ' ')
-      - echo "$$CARGO_VERSION.$$PATCH" > .version
-      - echo "$$CARGO_VERSION.$$PATCH-$(echo $$CI_COMMIT_SHA | cut -c1-7)" > .version-dev
-      - echo "Version $(cat .version), dev $(cat .version-dev)"
-
   apply-authentik-blueprint:
     when:
       - event: deployment
+    depends_on:
+      - validate-deployment
     pull: true
     image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
     settings:
@@ -77,6 +101,9 @@ steps:
   push:
     when:
       - event: deployment
+    depends_on:
+      - compute-version
+      - validate-deployment
     image: *docker-image
     volumes: *docker-socket
     environment: &registry-creds
@@ -86,26 +113,26 @@ steps:
         from_secret: zot_ci_password
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker build -t registry.desync.link/bored:$(cat .version) -t registry.desync.link/bored:$(cat .version-dev) .
-      - docker push registry.desync.link/bored:$(cat .version)
-      - docker push registry.desync.link/bored:$(cat .version-dev)
-
-  tag-release:
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    image: *alpine-git
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-    commands:
-      - git tag v$(cat .version)
-      - git push https://x-token:$$GITHUB_TOKEN@github.com/$$CI_REPO.git v$(cat .version)
+      - |
+        RELEASE_TAG=$$(cat .release-tag)
+        CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        IMAGE=registry.desync.link/bored:$$RELEASE_TAG
+        docker build \
+          --build-arg RELEASE_TAG="$$RELEASE_TAG" \
+          --label org.opencontainers.image.version="$$RELEASE_TAG" \
+          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
+          --label org.opencontainers.image.created="$$CREATED" \
+          -t "$$IMAGE" .
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        docker push "$$IMAGE"
 
   deploy-dev:
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - push
+      - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
     environment:
@@ -119,7 +146,7 @@ steps:
       - *docker-login
       - docker volume create bored-dev-db
       - |
-        BORED_IMAGE_TAG=$(cat .version-dev) APP_VERSION=$(cat .version-dev) \
+        BORED_IMAGE_TAG=$(cat .release-tag) \
         APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
         BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
         OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-dev/ \
@@ -134,6 +161,9 @@ steps:
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - push
+      - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
     environment:
@@ -147,7 +177,7 @@ steps:
       - *docker-login
       - docker volume create bored-prod-db
       - |
-        BORED_IMAGE_TAG=$(cat .version) APP_VERSION=$(cat .version) \
+        BORED_IMAGE_TAG=$(cat .release-tag) \
         APP_ENV=production BORED_HOST=bored.desync.link \
         BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db \
         OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-prod/ \
@@ -159,3 +189,27 @@ steps:
         OIDC_MCP_ISSUER_URL=https://auth.desync.link/application/o/bored-mcp/ \
         OIDC_MCP_CLIENT_ID=bored-mcp-prod \
         docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
+
+  tag-release-dev:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - deploy-dev
+    pull: true
+    image: *version-plugin
+    settings: &push-tag-settings
+      mode: push-tag
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
+  tag-release-prod:
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - deploy-prod
+    pull: true
+    image: *version-plugin
+    settings: *push-tag-settings

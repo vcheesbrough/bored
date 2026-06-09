@@ -1,4 +1,8 @@
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS frontend-builder
+# Release tag burned into the WASM bundle (see shared::app_version). Empty for
+# local builds — the code then falls back to CARGO_PKG_VERSION.
+ARG RELEASE_TAG=""
+ENV RELEASE_TAG=${RELEASE_TAG}
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -13,6 +17,10 @@ RUN mkdir -p backend/src && touch backend/src/main.rs \
 RUN cd frontend && trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
+# Release tag burned into the backend binary (see shared::app_version). Empty for
+# local builds — the code then falls back to CARGO_PKG_VERSION.
+ARG RELEASE_TAG=""
+ENV RELEASE_TAG=${RELEASE_TAG}
 RUN rustup component add rustfmt clippy
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -29,6 +37,18 @@ RUN cargo test -p backend -p shared -p agent --lib
 RUN cargo build --release -p backend -p agent
 
 FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
+# Static OCI image metadata. Dynamic labels (version, revision, created) are set
+# at build time via `docker build --label` in .woodpecker/build.yml.
+LABEL org.opencontainers.image.title="bored" \
+      org.opencontainers.image.description="bored — full-stack Rust Kanban board (Axum API + Leptos WASM SPA)" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
+      org.opencontainers.image.url="https://github.com/vcheesbrough/bored" \
+      org.opencontainers.image.source="https://github.com/vcheesbrough/bored" \
+      org.opencontainers.image.documentation="https://github.com/vcheesbrough/bored/blob/main/README.md" \
+      org.opencontainers.image.authors="Vincent Cheesbrough" \
+      org.opencontainers.image.vendor="Vincent Cheesbrough" \
+      org.opencontainers.image.base.name="debian:trixie-slim" \
+      org.opencontainers.image.base.digest="sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a"
 RUN apt-get update \
     && apt-get install -y ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
