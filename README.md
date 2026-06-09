@@ -32,7 +32,7 @@ bored/
 ├── Dockerfile
 └── .woodpecker/
     ├── build.yml          # CI: build + e2e on push; manual deployment pipeline
-    └── pr-review.yml      # Claude PR review agent
+    └── pr-review.yml.disabled  # Claude PR review agent (disabled; see below)
 ```
 
 ## Versioning
@@ -67,7 +67,7 @@ Plain push runs create **no** git tag.
 5. **deploy-dev / deploy-prod** — run `docker compose -f deploy/docker-compose.yml up -d --pull always` against the host's docker socket, with the OIDC client secret, image tag, host name, and DB volume injected as env. There is no SSH or `scp` step.
 6. **tag-release-dev / tag-release-prod** — *after* a successful deploy, `woodpecker-plugin-release-versions` (`push-tag` mode) creates and pushes the annotated git tag matching `.release-tag` (idempotent: no-op if the commit is already tagged). Runs for **both** dev and prod.
 
-The PR pipeline ([`.woodpecker/pr-review.yml`](.woodpecker/pr-review.yml)) runs the Claude PR review agent on every pull request.
+The PR pipeline (`.woodpecker/pr-review.yml.disabled`) runs the Claude PR review agent on every pull request. It is **currently disabled** (renamed to `*.disabled`) because the agent image fails to pull; PR review is handled manually for now (see [`AGENTS.md`](AGENTS.md) §7). Re-enable by renaming back to `pr-review.yml`.
 
 ### Required secrets
 
