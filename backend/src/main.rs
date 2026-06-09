@@ -265,12 +265,17 @@ async fn health() -> &'static str {
     "ok"
 }
 
-// Returns runtime version and environment — read from env vars injected by the deploy pipeline.
-// Falls back to the compile-time crate version and "dev" when running locally.
+// Returns runtime version and environment.
+// Version: the release tag burned into the image at build time (see
+// `shared::app_version`). `APP_VERSION` remains an optional runtime override
+// (used by tests and ad-hoc runs); when unset the burned-in tag is reported.
+// Env falls back to "dev" when running locally.
 async fn info() -> axum::Json<shared::AppInfo> {
     axum::Json(shared::AppInfo {
         version: std::env::var("APP_VERSION")
-            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| shared::app_version().to_string()),
         env: std::env::var("APP_ENV").unwrap_or_else(|_| "dev".to_string()),
     })
 }
@@ -1183,7 +1188,8 @@ mod tests {
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
         let info: shared::AppInfo = resp.json();
-        // Falls back to compile-time CARGO_PKG_VERSION when APP_VERSION is unset.
+        // Falls back to shared::app_version (burned-in RELEASE_TAG, else
+        // CARGO_PKG_VERSION) when APP_VERSION is unset.
         assert!(!info.version.is_empty());
         // Falls back to "dev" when APP_ENV is unset.
         assert_eq!(info.env, "dev");

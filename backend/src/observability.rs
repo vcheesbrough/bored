@@ -14,7 +14,11 @@ pub fn init() -> ObservabilityGuard {
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
     let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
     let loki_url = std::env::var("LOKI_URL").ok();
-    let version = env!("CARGO_PKG_VERSION");
+    // Burned-in release tag (see shared::app_version); APP_VERSION can override.
+    let version = std::env::var("APP_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| shared::app_version().to_string());
 
     // Each layer gets its own EnvFilter via .with_filter() so that
     // register_callsite interest is correctly computed per-layer. A shared

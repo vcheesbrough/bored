@@ -32,7 +32,7 @@ pub fn BoardView() -> impl IntoView {
     let columns: RwSignal<Vec<RwSignal<shared::Column>>> = RwSignal::new(Vec::new());
     let loading = RwSignal::new(true);
 
-    let watermark = RwSignal::new(format!("v{}", env!("CARGO_PKG_VERSION")));
+    let watermark = RwSignal::new(format!("v{}", shared::app_version()));
 
     // ── Context signals ────────────────────────────────────────────────────
     let sse_event: RwSignal<Option<BoardSseEvent>> = RwSignal::new(None);
