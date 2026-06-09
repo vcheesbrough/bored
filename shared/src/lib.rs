@@ -3,6 +3,19 @@ use serde_json::Value as JsonValue;
 
 pub mod history;
 
+/// Deployed application version.
+///
+/// The release pipeline passes `RELEASE_TAG` as a build arg and exports it as an
+/// environment variable for the compile, so `option_env!` captures the exact
+/// semver that was tagged in git and pushed to the registry. Local/dev builds
+/// (no `RELEASE_TAG`) fall back to the crate version.
+pub fn app_version() -> &'static str {
+    match option_env!("RELEASE_TAG") {
+        Some(tag) if !tag.is_empty() => tag,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
     pub id: String,

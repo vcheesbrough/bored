@@ -817,6 +817,12 @@ impl BoredMcp {
 impl ServerHandler for BoredMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("bored", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "bored",
+                match option_env!("RELEASE_TAG") {
+                    Some(tag) if !tag.is_empty() => tag,
+                    _ => env!("CARGO_PKG_VERSION"),
+                },
+            ))
     }
 }
