@@ -1,3 +1,8 @@
+# DISABLED — renamed to *.disabled so Woodpecker ignores it.
+# The claude-pr-agent image currently fails to pull (registry auth), and PR
+# review is handled manually for now (see AGENTS.md §7). Re-enable by renaming
+# back to pr-review.yml.
+#
 # Automated PR review agent.
 # See https://github.com/vcheesbrough/claude-pr-agent for details.
 
