@@ -166,3 +166,20 @@ When the user asks to **raise a PR**, or when a PR on the current branch has **u
 - **Don't auto-resolve threads** the user marked "discuss further" or "skip".
 - **All resolution explanations go on the PR**, not back-channel — the reply on the thread is the audit trail.
 - **Respect §§1–3:** trunk-based branches, post-push CI verification, MCP discipline. Reaching the end of a batch with the user's decisions is the explicit commit consent for *that* batch only.
+
+---
+
+## 7. Self-review every PR you raise
+
+When you (an AI agent) open a PR in this repo, **immediately act as the PR review agent** using the prompt at [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md) — the same rubric the Woodpecker `pr-review` pipeline runs. Do this regardless of whether the automated [`pr-review.yml`](.woodpecker/pr-review.yml) pipeline succeeded (it may be unavailable).
+
+### Workflow
+
+1. After `gh pr create`, fetch the PR diff (`git diff <base>...HEAD`).
+2. Apply [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md) **verbatim** as the review rubric (Correctness, Security, OWASP Top 10, Tests, Versioning, General). Read touched files for context as the prompt allows.
+3. Post the result as a GitHub PR review via `gh pr review` / `gh api`:
+   - `APPROVE` only when there are truly no issues; `REQUEST_CHANGES` for blockers; `COMMENT` for minor/informational.
+   - Inline comments must reference real lines on the **RIGHT** side of the diff; include GitHub suggestion blocks where possible.
+4. Surface the verdict to the user, then drive fixes through the **§6 PR comment loop** — the user decides each comment before any change is applied.
+
+This is **in addition to**, not a replacement for, §6.
