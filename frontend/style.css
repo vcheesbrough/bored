@@ -159,6 +159,15 @@ body {
   color: var(--text);
 }
 
+.navbar-search-input {
+  width: 260px;
+  height: 32px;
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 6px 10px;
+}
+
 .chooser-backdrop {
   position: fixed;
   inset: 0;
