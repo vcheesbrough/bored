@@ -34,6 +34,20 @@ test.describe('simple search', () => {
     await expect(page.locator('.card-item')).toHaveCount(3);
   });
 
+  test('hash-prefixed numbers match only the card number', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-number-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const target = await apiCreateCard(request, col.id, 'The actual numbered card');
+    await apiCreateCard(request, col.id, `Body mentions #${target.number} but is not that card`);
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.navbar-search-input').fill(`#${target.number}`);
+
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    await expect(page.locator('.card-item')).toContainText('The actual numbered card');
+    await expect(page.locator('.card-item')).not.toContainText('Body mentions');
+  });
+
   test('is scoped to the current board', async ({ page, request }) => {
     const boardA = await apiCreateBoard(request, `search-scope-a-${Date.now()}`);
     const boardB = await apiCreateBoard(request, `search-scope-b-${Date.now()}`);

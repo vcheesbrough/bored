@@ -9,10 +9,15 @@ pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
         return true;
     }
 
-    let number_query = query.strip_prefix('#').unwrap_or(query);
-    if !number_query.is_empty()
-        && number_query.chars().all(|c| c.is_ascii_digit())
-        && number_query
+    if let Some(number_query) = query.strip_prefix('#') {
+        if !number_query.is_empty() && number_query.chars().all(|c| c.is_ascii_digit()) {
+            return number_query
+                .parse::<u32>()
+                .is_ok_and(|number| number == card.number);
+        }
+    }
+    if query.chars().all(|c| c.is_ascii_digit())
+        && query
             .parse::<u32>()
             .is_ok_and(|number| number == card.number)
     {
@@ -85,6 +90,11 @@ mod tests {
         assert!(card_matches_query(&c, "#42"));
         assert!(card_matches_query(&c, "42"));
         assert!(!card_matches_query(&c, "#41"));
+    }
+
+    #[test]
+    fn hash_prefixed_number_does_not_match_body_text() {
+        assert!(!card_matches_query(&card(7, "See #42 in the notes"), "#42"));
     }
 
     #[test]
