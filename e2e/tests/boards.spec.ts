@@ -81,6 +81,30 @@ test.describe('Boards', () => {
     await expect(page.locator('.navbar-board-btn')).toContainText(boardB.name);
   });
 
+  test('direct board URLs and reload keep the URL board selected', async ({ page, request }) => {
+    const boardA = await apiCreateBoard(request, `direct-a-${Date.now()}`);
+    const boardB = await apiCreateBoard(request, `direct-b-${Date.now()}`);
+    const colA = await apiCreateColumn(request, boardA.name, 'Only A');
+    const colB = await apiCreateColumn(request, boardB.name, 'Only B');
+    await apiCreateCard(request, colA.id, 'Card from board A');
+    await apiCreateCard(request, colB.id, 'Card from board B');
+
+    await gotoBoardView(page, boardA.name);
+    await expect(page.locator('.navbar-board-btn')).toContainText(boardA.name);
+    await expect(page.locator('.card-item')).toContainText('Card from board A');
+
+    await page.goto(`/boards/${boardB.name}`);
+    await expect(page.locator('.navbar-board-btn')).toContainText(boardB.name);
+    await expect(page.locator('.card-item')).toContainText('Card from board B');
+    await expect(page.locator('.card-item')).not.toContainText('Card from board A');
+
+    await page.reload();
+    await expect(page).toHaveURL(new RegExp(`/boards/${boardB.name}`));
+    await expect(page.locator('.navbar-board-btn')).toContainText(boardB.name);
+    await expect(page.locator('.card-item')).toContainText('Card from board B');
+    await expect(page.locator('.card-item')).not.toContainText('Card from board A');
+  });
+
   test('delete board with columns and cards navigates away', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `full-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
