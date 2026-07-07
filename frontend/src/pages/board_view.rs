@@ -180,24 +180,38 @@ pub fn BoardView() -> impl IntoView {
         let slug = board_slug();
         if slug.is_empty() {
             board_ulid.set(String::new());
+            board_name.set(String::new());
+            columns.set(Vec::new());
             return;
         }
         // Clear ULID immediately so the SSE effect closes any stale connection.
         board_ulid.set(String::new());
+        // Reflect the URL immediately and clear stale cards/columns while the
+        // async board load resolves. Without this, a direct navigation from one
+        // board URL to another can briefly show the previous board, and a slow
+        // older request can overwrite the newer route.
+        board_name.set(slug.clone());
+        columns.set(Vec::new());
         loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(board) = crate::api::fetch_board(&slug).await {
-                board_name.set(board.name);
-                // Set the ULID after fetch — triggers the SSE effect to connect.
-                board_ulid.set(board.id);
+                if board_slug() == slug {
+                    board_name.set(board.name);
+                    // Set the ULID after fetch — triggers the SSE effect to connect.
+                    board_ulid.set(board.id);
+                }
             }
             match crate::api::fetch_columns(&slug).await {
                 Ok(fetched) => {
-                    columns.set(fetched.into_iter().map(RwSignal::new).collect());
+                    if board_slug() == slug {
+                        columns.set(fetched.into_iter().map(RwSignal::new).collect());
+                    }
                 }
                 Err(e) => leptos::logging::error!("failed to fetch columns: {e}"),
             }
-            loading.set(false);
+            if board_slug() == slug {
+                loading.set(false);
+            }
         });
     });
 
