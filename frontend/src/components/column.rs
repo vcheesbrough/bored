@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::components::card::CardItem;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
+use crate::search::{card_matches_query, BoardSearchQuery};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -36,6 +37,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
     let columns_ctx =
         use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>().expect("columns context missing");
+    let search_query = use_context::<BoardSearchQuery>()
+        .expect("BoardSearchQuery context missing")
+        .0;
     // Tracks which column a dragged column is hovering over (drives ghost).
     // DragOverColId wrapper avoids colliding with the bare RwSignal<Option<String>>
     // that ColumnView itself provides as drag_over_card_id context.
@@ -389,7 +393,17 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                 on:drop=on_cardlist_drop
             >
                 <For
-                    each=move || cards.get()
+                    each=move || {
+                        let query = search_query.get();
+                        cards
+                            .get()
+                            .into_iter()
+                            .filter(|sig| {
+                                let card = sig.get();
+                                card_matches_query(&card, &query)
+                            })
+                            .collect::<Vec<_>>()
+                    }
                     key=|sig| sig.get_untracked().id.clone()
                     children={
                         move |sig| {

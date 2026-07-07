@@ -9,6 +9,7 @@ use crate::components::column::ColumnView;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel, HistoryScope};
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
+use crate::search::BoardSearchQuery;
 
 #[component]
 pub fn BoardView() -> impl IntoView {
@@ -31,6 +32,7 @@ pub fn BoardView() -> impl IntoView {
     let board_name = RwSignal::new(String::new());
     let columns: RwSignal<Vec<RwSignal<shared::Column>>> = RwSignal::new(Vec::new());
     let loading = RwSignal::new(true);
+    let search_query = RwSignal::new(String::new());
 
     let watermark = RwSignal::new(format!("v{}", shared::app_version()));
 
@@ -45,6 +47,7 @@ pub fn BoardView() -> impl IntoView {
     provide_context(columns);
     provide_context(ExpandedCardId(expanded_card_id));
     provide_context(DragOverColId(drag_over_col_id));
+    provide_context(BoardSearchQuery(search_query));
 
     let history_scope = RwSignal::new(None::<HistoryScope>);
     provide_context(HistoryDrawer(history_scope));
@@ -253,6 +256,13 @@ pub fn BoardView() -> impl IntoView {
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
             <BoardChooser board_name=board_name columns=columns />
+            <input
+                class="navbar-search-input"
+                type="text"
+                placeholder="Search"
+                prop:value=move || search_query.get()
+                on:input=move |ev| search_query.set(event_target_value(&ev))
+            />
             <button
                 class="card-toolbar-btn navbar-history-btn"
                 type="button"

@@ -3,6 +3,7 @@ pub(crate) mod audit_edit_session;
 mod components;
 mod events;
 mod pages;
+mod search;
 
 use leptos::prelude::*;
 use leptos_router::{
