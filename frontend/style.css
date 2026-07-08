@@ -680,7 +680,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 }
 
 /* Floating panel: number badge + Win11-style buttons, sits at the top-right
-   corner of the card absolutely so body content flows underneath it. */
+   corner of the expanded card absolutely so body content flows underneath it. */
 .card-float-panel {
   position: absolute;
   top: 0;
@@ -691,6 +691,13 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   z-index: 1;
   background: var(--surface-2);
   border-bottom-left-radius: var(--radius);
+}
+
+.card-editing .card-float-panel {
+  position: static;
+  justify-content: flex-end;
+  margin: -10px -12px 8px;
+  border-bottom-left-radius: 0;
 }
 
 /* Number badge inside the floating panel — inline rather than absolute. */
@@ -753,6 +760,9 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   min-height: 120px;
   overflow: hidden;
   padding-top: 32px;
+}
+.card-editing .card-body-wrapper {
+  padding-top: 0;
 }
 .card-body-rendered,
 .card-body-textarea {
