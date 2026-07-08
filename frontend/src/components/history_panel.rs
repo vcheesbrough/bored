@@ -179,7 +179,9 @@ pub fn HistoryPanel(
                                     .filter(|e| show_moves.get() || e.action != "move")
                                     .collect::<Vec<shared::AuditLogEntry>>()
                             }
-                            key=|e: &shared::AuditLogEntry| e.id.clone()
+                            key=|e: &shared::AuditLogEntry| {
+                                (e.id.clone(), e.created_at.clone())
+                            }
                             children=move |e: shared::AuditLogEntry| {
                                 // Snapshot the runtime context at render time
                                 // (re-rendered when entries / show_moves / me_name change).
