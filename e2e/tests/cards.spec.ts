@@ -39,6 +39,34 @@ test.describe('Cards', () => {
     await expect(page.locator('.card-markdown').first()).toBeVisible();
   });
 
+  test('markdown tables render in previews, expanded cards, and modal', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `card-table-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(
+      request,
+      col.id,
+      '| Name | State |\n| --- | --- |\n| Search | Done |\n| Tables | Fixed |'
+    );
+    await gotoBoardView(page, board.name);
+
+    const preview = page.locator('.card-preview').first();
+    await expect(preview.locator('table')).toBeVisible();
+    await expect(preview.locator('th')).toContainText(['Name', 'State']);
+    await expect(preview.locator('td')).toContainText(['Search', 'Done', 'Tables', 'Fixed']);
+
+    await page.locator('.card-item').first().click();
+    const expanded = page.locator('.card-markdown').first();
+    await expect(expanded.locator('table')).toBeVisible();
+    await expect(expanded.locator('th')).toContainText(['Name', 'State']);
+    await expect(expanded.locator('td')).toContainText(['Search', 'Done', 'Tables', 'Fixed']);
+
+    await page.locator('[title="Maximise"]').first().click();
+    const modal = page.locator('.modal-markdown');
+    await expect(modal.locator('table')).toBeVisible();
+    await expect(modal.locator('th')).toContainText(['Name', 'State']);
+    await expect(modal.locator('td')).toContainText(['Search', 'Done', 'Tables', 'Fixed']);
+  });
+
   test('open card in maximised modal', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `card-modal-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
