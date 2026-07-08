@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use pulldown_cmark::{html, Event, Parser, TagEnd};
+use pulldown_cmark::{html, Event, Options, Parser, TagEnd};
 
 fn to_html(md: &str) -> String {
     // Strip raw HTML and dangerous URI schemes to prevent stored XSS via `inner_html`.
@@ -8,7 +8,7 @@ fn to_html(md: &str) -> String {
     // needed because images can nest inside links — e.g. [![alt](js:src)](js:href)
     // produces two Start events before the first End.
     let mut skip_depth: u32 = 0;
-    let parser = Parser::new(md).filter(|event| match event {
+    let parser = Parser::new_ext(md, Options::ENABLE_TABLES).filter(|event| match event {
         // Raw HTML blocks and inline HTML inject verbatim into the DOM.
         Event::Html(_) | Event::InlineHtml(_) => false,
         // Block dangerous URI schemes in link/image destinations.
@@ -93,6 +93,17 @@ mod tests {
             1,
             "exactly one </a> for the one safe link"
         );
+    }
+
+    #[test]
+    fn markdown_tables_render_as_tables() {
+        let out = to_html("| Name | State |\n| --- | --- |\n| Search | Done |");
+
+        assert!(out.contains("<table>"));
+        assert!(out.contains("<thead>"));
+        assert!(out.contains("<tbody>"));
+        assert!(out.contains("<th>Name</th>"));
+        assert!(out.contains("<td>Search</td>"));
     }
 }
 
