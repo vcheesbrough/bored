@@ -39,7 +39,7 @@ test.describe('Cards', () => {
     await expect(page.locator('.card-markdown').first()).toBeVisible();
   });
 
-  test('long first line in edit mode starts below floating controls', async ({ page, request }) => {
+  test('edit mode uses in-flow controls above a long first line', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `card-edit-layout-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
     await apiCreateCard(
@@ -60,15 +60,20 @@ test.describe('Cards', () => {
     const layout = await textarea.evaluate((el) => {
       const rect = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
+      const toolbarStyle = window.getComputedStyle(
+        document.querySelector('.card-float-panel')!
+      );
       return {
         top: rect.top,
         paddingTop: parseFloat(style.paddingTop),
         borderTopWidth: parseFloat(style.borderTopWidth),
+        toolbarPosition: toolbarStyle.position,
       };
     });
     const toolbarBox = await toolbar.boundingBox();
 
     expect(toolbarBox).not.toBeNull();
+    expect(layout.toolbarPosition).toBe('static');
     expect(layout.top + layout.borderTopWidth + layout.paddingTop).toBeGreaterThanOrEqual(
       toolbarBox!.y + toolbarBox!.height
     );
