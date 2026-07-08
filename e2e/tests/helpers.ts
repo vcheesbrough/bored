@@ -41,7 +41,12 @@ export async function apiDeleteCard(request: APIRequestContext, cardId: string) 
 export async function apiUpdateCard(
   request: APIRequestContext,
   cardId: string,
-  patch: { body?: string; position?: number; column_id?: string }
+  patch: {
+    body?: string;
+    position?: number;
+    column_id?: string;
+    audit_edit_session?: string;
+  }
 ) {
   const res = await request.put(`/api/cards/${cardId}`, { data: patch });
   if (!res.ok()) throw new Error(`PUT /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);

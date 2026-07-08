@@ -144,6 +144,51 @@ test.describe('Audit history drawer — polished UX', () => {
     );
   });
 
+  test('open history row refreshes when an autosave merge updates the same audit id', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `audit-live-merge-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, '# Live merge\n\nstart');
+    const session = `e2e-live-merge-${Date.now()}`;
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.card-item').first().click();
+    const historyRespPromise = page.waitForResponse(
+      res =>
+        res.url().includes(`/api/cards/${card.id}/history`) &&
+        res.request().method() === 'GET'
+    );
+    await page.locator('.card-float-panel [title="Card history"]').click();
+    const historyResp = await historyRespPromise;
+    expect(historyResp.ok()).toBeTruthy();
+    await expect(page.locator('.history-drawer')).toBeVisible();
+
+    const updateRow = page
+      .locator(`.history-row[data-entity-id="${card.id}"]`)
+      .filter({ has: page.locator('.history-badge-update') });
+    await expect(updateRow).toHaveCount(0);
+
+    await apiUpdateCard(request, card.id, {
+      body: '# Live merge\n\nstart plus',
+      audit_edit_session: session,
+    });
+    await expect(updateRow.locator('.history-sub')).toHaveText(
+      `Card #${card.number} · +5 chars`,
+      { timeout: 5000 }
+    );
+
+    await apiUpdateCard(request, card.id, {
+      body: '# Live merge\n\nstart plus more text',
+      audit_edit_session: session,
+    });
+    await expect(updateRow.locator('.history-sub')).toHaveText(
+      `Card #${card.number} · +15 chars`,
+      { timeout: 5000 }
+    );
+  });
+
   test('card title rename surfaces as «Renamed card to …» with old title', async ({
     page,
     request,
