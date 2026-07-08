@@ -155,7 +155,14 @@ test.describe('Audit history drawer — polished UX', () => {
 
     await gotoBoardView(page, board.name);
     await page.locator('.card-item').first().click();
+    const historyRespPromise = page.waitForResponse(
+      res =>
+        res.url().includes(`/api/cards/${card.id}/history`) &&
+        res.request().method() === 'GET'
+    );
     await page.locator('.card-float-panel [title="Card history"]').click();
+    const historyResp = await historyRespPromise;
+    expect(historyResp.ok()).toBeTruthy();
     await expect(page.locator('.history-drawer')).toBeVisible();
 
     const updateRow = page
