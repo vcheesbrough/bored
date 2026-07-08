@@ -752,6 +752,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   grid-template-columns: 1fr;
   min-height: 120px;
   overflow: hidden;
+  padding-top: 32px;
 }
 .card-body-rendered,
 .card-body-textarea {

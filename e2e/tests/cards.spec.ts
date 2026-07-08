@@ -39,6 +39,41 @@ test.describe('Cards', () => {
     await expect(page.locator('.card-markdown').first()).toBeVisible();
   });
 
+  test('long first line in edit mode starts below floating controls', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `card-edit-layout-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(
+      request,
+      col.id,
+      'This is a deliberately long first line that should not run underneath the edit toolbar buttons when the card is open for editing.'
+    );
+    await gotoBoardView(page, board.name);
+
+    await page.locator('.card-item').first().click();
+    await page.locator('.card-body-rendered').first().click();
+
+    const toolbar = page.locator('.card-float-panel').first();
+    const textarea = page.locator('.card-body-textarea').first();
+    await expect(toolbar).toBeVisible();
+    await expect(textarea).toBeVisible();
+
+    const layout = await textarea.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return {
+        top: rect.top,
+        paddingTop: parseFloat(style.paddingTop),
+        borderTopWidth: parseFloat(style.borderTopWidth),
+      };
+    });
+    const toolbarBox = await toolbar.boundingBox();
+
+    expect(toolbarBox).not.toBeNull();
+    expect(layout.top + layout.borderTopWidth + layout.paddingTop).toBeGreaterThanOrEqual(
+      toolbarBox!.y + toolbarBox!.height
+    );
+  });
+
   test('markdown tables render in previews, expanded cards, and modal', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `card-table-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
