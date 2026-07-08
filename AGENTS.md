@@ -16,7 +16,8 @@ When this project (or you) uses **Kanban cards** (e.g. bored) as the task queue:
 
 3. **Iteration in the card title (this repo):** Bored cards have **no separate title field** — the board shows the **first markdown `#` heading** in **`body`**.
    - **Todo / backlog:** Use a **plain descriptive** heading only — **do not** write **`# Iteration N — …`** yet (**N** is unknown until work starts).
-   - **In progress:** Right after **`move_card`** into **In progress**, **`update_card`** so the first `#` line becomes **`# Iteration N — …`** where **N** is the iteration you are committing to for this card (same **N** as **`feat/iteration-N-…`** / workspace **`Cargo.toml`** minor **1.N.x** at **start of work**). One prefix; avoid doubling.
+   - **Iteration number:** Unless the user explicitly states otherwise, each card gets the next incremented iteration number. That **N** must match the second digit / minor component of the workspace semver (**`1.N.x`**) at **start of work**.
+   - **In progress:** Right after **`move_card`** into **In progress**, **`update_card`** so the first `#` line becomes **`# Iteration N — …`** where **N** is the iteration you are committing to for this card (same **N** as **`feat/iteration-N-…`** / workspace **`Cargo.toml`** minor **`1.N.x`** at **start of work**). One prefix; avoid doubling.
 
 4. **Reconcile with reality:** **Compare the card body to the current source tree**, **replan** if scope or facts drifted, then **`update_card`** so the card stays accurate (acceptance, files, out-of-scope notes). Preserve **`# Iteration N — …`** once set; if **N** changes mid-flight, **`update_card`** with the new heading.
 
