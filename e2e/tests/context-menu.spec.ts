@@ -36,6 +36,7 @@ test.describe('Card context menu', () => {
     await openCardMenu(page, 'First');
     await page.getByRole('menuitem', { name: 'Move to top' }).click();
     await expect(page.locator('.card-item').first()).toContainText('First');
+    await expect(page.locator('.card-item', { hasText: 'First' })).not.toHaveClass(/card-expanded/);
 
     await openCardMenu(page, 'First');
     await page.getByRole('menuitem', { name: 'Move to bottom' }).click();

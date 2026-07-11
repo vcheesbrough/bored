@@ -490,12 +490,16 @@ pub fn CardItem(
                     <button
                         type="button"
                         role="menuitem"
-                        on:click=move |_| move_card(card.get_untracked().column_id.clone(), 0)
+                        on:click=move |e: leptos::ev::MouseEvent| {
+                            e.stop_propagation();
+                            move_card(card.get_untracked().column_id.clone(), 0);
+                        }
                     >"Move to top"</button>
                     <button
                         type="button"
                         role="menuitem"
-                        on:click=move |_| {
+                        on:click=move |e: leptos::ev::MouseEvent| {
+                            e.stop_propagation();
                             let column_id = card.get_untracked().column_id.clone();
                             let position = column_cards.0.with_untracked(|cards| cards.len() as i32);
                             move_card(column_id, position);
@@ -531,7 +535,10 @@ pub fn CardItem(
                                             <button
                                                 type="button"
                                                 role="menuitem"
-                                                on:click=move |_| move_card(target_id.clone(), 0)
+                                                on:click=move |e: leptos::ev::MouseEvent| {
+                                                    e.stop_propagation();
+                                                    move_card(target_id.clone(), 0);
+                                                }
                                             >{target_name}</button>
                                         }
                                     }
@@ -543,7 +550,8 @@ pub fn CardItem(
                         type="button"
                         class="card-context-menu-danger"
                         role="menuitem"
-                        on:click=move |_| {
+                        on:click=move |e: leptos::ev::MouseEvent| {
+                            e.stop_propagation();
                             context_menu_position.set(None);
                             show_move_submenu.set(false);
                             show_confirm.set(true);

@@ -38,7 +38,7 @@ When this project (or you) uses **Kanban cards** (e.g. bored) as the task queue:
 
 When this repo has just been pushed (or the user asks to verify CI):
 
-1. **Confirm pipeline outcome for that commit** (Woodpecker reports to GitHub status).
+1. **Monitor the pipeline through completion for that commit** (Woodpecker reports to GitHub status). Do this after **every** code push; do not stop after the initial status check or report a pending pipeline as the final result.
    - From repo root, after push:
      - `SHA=$(git rev-parse HEAD)` and
        `gh api repos/vcheesbrough/bored/commits/$SHA/status --jq '.state'`
