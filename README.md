@@ -54,7 +54,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 1. **compute-version** — `woodpecker-plugin-release-versions` (`compute` mode) writes `.release-tag`.
 2. **build** — builds, verifies, and pushes the production image tagged with `.release-tag`. Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test --lib`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
 3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC + the freshly-built image + Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
-4. **apply-authentik-blueprint-auto-dev** — synchronises the Authentik OAuth providers before rollout.
+4. **apply-authentik-blueprint-auto-dev** — synchronises the development-only Authentik configuration from [`authentik/blueprint-dev.yaml`](authentik/blueprint-dev.yaml) before rollout; the full dev-and-prod blueprint remains deployment-only.
 5. **auto-deploy-dev** — deploys the tested image to the development environment.
 6. **tag-release-auto-dev-1.30.0** — creates and pushes the git tag matching `.release-tag` after the successful dev deployment.
 
