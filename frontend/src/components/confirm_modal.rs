@@ -10,18 +10,28 @@ pub fn ConfirmModal(show: RwSignal<bool>, on_confirm: Callback<()>) -> impl Into
 
     view! {
         <Show when=move || show.get() fallback=|| ()>
-            <div class="confirm-backdrop" on:click=move |_| cancel()>
+            <div
+                class="confirm-backdrop"
+                on:click=move |ev: leptos::ev::MouseEvent| {
+                    ev.stop_propagation();
+                    cancel();
+                }
+            >
                 <div class="confirm-dialog" on:click=|ev| ev.stop_propagation()>
                     <p class="confirm-title">"Delete this card?"</p>
                     <p class="confirm-body">"This cannot be undone."</p>
                     <div class="confirm-actions">
                         <button
                             class="btn-ghost"
-                            on:click=move |_| cancel()
+                            on:click=move |ev: leptos::ev::MouseEvent| {
+                                ev.stop_propagation();
+                                cancel();
+                            }
                         >"Cancel"</button>
                         <button
                             class="btn-danger"
-                            on:click=move |_| {
+                            on:click=move |ev: leptos::ev::MouseEvent| {
+                                ev.stop_propagation();
                                 show.set(false);
                                 on_confirm.run(());
                             }
