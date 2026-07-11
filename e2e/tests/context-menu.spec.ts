@@ -24,6 +24,34 @@ test.describe('Card context menu', () => {
     await expect(page.locator('.card-item')).toHaveCount(1);
   });
 
+  test('keeps the menu and submenu inside the viewport', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `context-menu-bounds-${Date.now()}`);
+    const source = await apiCreateColumn(request, board.name, 'Source', 0);
+    await apiCreateColumn(request, board.name, 'Target', 1);
+    await apiCreateCard(request, source.id, 'Viewport target');
+    await gotoBoardView(page, board.name);
+
+    const card = page.locator('.card-item', { hasText: 'Viewport target' });
+    const viewport = page.viewportSize()!;
+    await card.dispatchEvent('contextmenu', {
+      clientX: viewport.width - 1,
+      clientY: viewport.height - 1,
+      button: 2,
+    });
+    await page.getByRole('menuitem', { name: 'Move to column' }).click();
+
+    const menus = page.locator('.card-context-menu');
+    await expect(menus).toHaveCount(2);
+    for (const menu of await menus.all()) {
+      const menuBox = await menu.boundingBox();
+      expect(menuBox).not.toBeNull();
+      expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+      expect(menuBox!.y).toBeGreaterThanOrEqual(0);
+      expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(viewport.width);
+      expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(viewport.height);
+    }
+  });
+
   test('moves a card to the top and bottom of its column', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `context-menu-order-${Date.now()}`);
     const column = await apiCreateColumn(request, board.name, 'Column');
@@ -76,5 +104,24 @@ test.describe('Card context menu', () => {
     await page.locator('.btn-danger').click();
 
     await expect(page.locator('.card-item')).toHaveCount(0);
+  });
+
+  test('does not collapse a different expanded card when deleting from the menu', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `context-menu-preserve-expand-${Date.now()}`);
+    const column = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(request, column.id, 'Keep open');
+    await apiCreateCard(request, column.id, 'Delete me');
+    await gotoBoardView(page, board.name);
+
+    const openCard = page.locator('.card-item', { hasText: 'Keep open' });
+    await openCard.click();
+    await expect(openCard).toHaveClass(/card-expanded/);
+
+    await openCardMenu(page, 'Delete me');
+    await page.getByRole('menuitem', { name: 'Delete' }).click();
+    await page.locator('.btn-danger').click();
+
+    await expect(page.locator('.card-item', { hasText: 'Delete me' })).toHaveCount(0);
+    await expect(openCard).toHaveClass(/card-expanded/);
   });
 });
