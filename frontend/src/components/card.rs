@@ -470,7 +470,8 @@ pub fn CardItem(
             <Show when=move || context_menu_position.get().is_some()>
                 <div
                     class="card-context-menu-backdrop"
-                    on:click=move |_| {
+                    on:click=move |e: leptos::ev::MouseEvent| {
+                        e.stop_propagation();
                         context_menu_position.set(None);
                         show_move_submenu.set(false);
                     }

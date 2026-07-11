@@ -683,6 +683,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 
 .card-context-menu-submenu-wrap { position: relative; }
 .card-context-menu-submenu {
+  position: absolute;
   top: -4px;
   left: calc(100% + 4px);
 }
