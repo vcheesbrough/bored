@@ -635,6 +635,58 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   pointer-events: none;
 }
 
+/* ── Card context menu ───────────────────────────── */
+.card-context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+}
+
+.card-context-menu {
+  position: fixed;
+  z-index: 111;
+  min-width: 176px;
+  padding: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.card-context-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 3px;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.card-context-menu button:hover,
+.card-context-menu button:focus-visible {
+  color: var(--text);
+  background: var(--surface-3);
+  outline: none;
+}
+
+.card-context-menu-danger { color: var(--danger) !important; }
+.card-context-menu-danger:hover,
+.card-context-menu-danger:focus-visible { background: rgba(239, 68, 68, 0.15) !important; }
+
+.card-context-menu-submenu-wrap { position: relative; }
+.card-context-menu-submenu {
+  top: -4px;
+  left: calc(100% + 4px);
+}
+
 /* Clipped markdown preview — default 2-line min, up to ~8 lines max before hiding. */
 .card-preview {
   font-size: 13px;
