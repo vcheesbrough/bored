@@ -1,5 +1,5 @@
 use gloo_timers::future::TimeoutFuture;
-use leptos::leptos_dom::helpers::window_event_listener;
+use leptos::leptos_dom::helpers::{window_event_listener, WindowListenerHandle};
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use leptos_router::NavigateOptions;
@@ -87,14 +87,33 @@ pub fn CardItem(
     // Coordinates are viewport-relative because the menu is fixed above the board.
     let context_menu_position: RwSignal<Option<(i32, i32)>> = RwSignal::new(None);
     let show_move_submenu = RwSignal::new(false);
+    let move_submenu_opens_left = RwSignal::new(false);
 
-    let escape_listener = window_event_listener(leptos::ev::keydown, move |ev| {
-        if ev.key() == "Escape" {
-            context_menu_position.set(None);
-            show_move_submenu.set(false);
-        }
+    let escape_listener = StoredValue::new(None::<WindowListenerHandle>);
+    Effect::new(move |_| {
+        let menu_open = context_menu_position.get().is_some();
+        escape_listener.update_value(|listener| {
+            if menu_open && listener.is_none() {
+                *listener = Some(window_event_listener(leptos::ev::keydown, move |ev| {
+                    if ev.key() == "Escape" {
+                        context_menu_position.set(None);
+                        show_move_submenu.set(false);
+                    }
+                }));
+            } else if !menu_open {
+                if let Some(listener) = listener.take() {
+                    listener.remove();
+                }
+            }
+        });
     });
-    on_cleanup(move || escape_listener.remove());
+    on_cleanup(move || {
+        escape_listener.update_value(|listener| {
+            if let Some(listener) = listener.take() {
+                listener.remove();
+            }
+        });
+    });
 
     // Sync local body from SSE updates while not actively editing.
     Effect::new(move |_| {
@@ -242,7 +261,9 @@ pub fn CardItem(
     let on_confirmed = Callback::new(move |_: ()| {
         let card_id = card.get_untracked().id.clone();
         let card_id_cb = card_id.clone();
-        expanded_card_id.set(None);
+        if expanded_card_id.get_untracked().as_deref() == Some(card_id.as_str()) {
+            expanded_card_id.set(None);
+        }
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::delete_card(&card_id).await {
                 Ok(()) => on_delete.run(card_id_cb),
@@ -344,8 +365,34 @@ pub fn CardItem(
                 }
                 e.prevent_default();
                 e.stop_propagation();
+                const MENU_WIDTH: i32 = 176;
+                const MENU_HEIGHT: i32 = 138;
+                const VIEWPORT_GUTTER: i32 = 4;
+                let viewport_width = window()
+                    .inner_width()
+                    .ok()
+                    .and_then(|width| width.as_f64())
+                    .map(|width| width as i32)
+                    .unwrap_or(e.client_x() + MENU_WIDTH + VIEWPORT_GUTTER);
+                let viewport_height = window()
+                    .inner_height()
+                    .ok()
+                    .and_then(|height| height.as_f64())
+                    .map(|height| height as i32)
+                    .unwrap_or(e.client_y() + MENU_HEIGHT + VIEWPORT_GUTTER);
+                let x = e.client_x().clamp(
+                    VIEWPORT_GUTTER,
+                    (viewport_width - MENU_WIDTH - VIEWPORT_GUTTER).max(VIEWPORT_GUTTER),
+                );
+                let y = e.client_y().clamp(
+                    VIEWPORT_GUTTER,
+                    (viewport_height - MENU_HEIGHT - VIEWPORT_GUTTER).max(VIEWPORT_GUTTER),
+                );
                 show_move_submenu.set(false);
-                context_menu_position.set(Some((e.client_x(), e.client_y())));
+                move_submenu_opens_left.set(
+                    x + (MENU_WIDTH * 2) + VIEWPORT_GUTTER > viewport_width,
+                );
+                context_menu_position.set(Some((x, y)));
             }
 
             // Advance Collapsed → Expanded and claim the board-level lock.
@@ -514,7 +561,11 @@ pub fn CardItem(
                             on:click=move |_| show_move_submenu.update(|open| *open = !*open)
                         >"Move to column"<span aria-hidden="true">"›"</span></button>
                         <Show when=move || show_move_submenu.get()>
-                            <div class="card-context-menu card-context-menu-submenu" role="menu">
+                            <div
+                                class="card-context-menu card-context-menu-submenu"
+                                class:card-context-menu-submenu-left=move || move_submenu_opens_left.get()
+                                role="menu"
+                            >
                                 <For
                                     each=move || {
                                         let current_column_id = card.get().column_id;
