@@ -30,21 +30,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent"
-version = "1.29.0"
-dependencies = [
- "anyhow",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "shared",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -583,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "axum",
  "axum-extra",
@@ -1540,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -2863,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4841,7 +4826,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "serde",
  "serde_json",

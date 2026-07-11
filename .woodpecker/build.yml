@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push:   compute-version → build → e2e
+# Push/manual: compute-version → build → e2e → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev-1.30.0
 # Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → push → deploy-* → tag-release-*
 #
 # Release mechanics (see card #176):
@@ -9,12 +9,12 @@
 #   - Git tagging happens after a successful dev OR prod deploy.
 
 when:
-  - event: [push, deployment]
+  - event: [push, deployment, manual]
 
 steps:
   compute-version:
     when:
-      - event: [push, deployment]
+      - event: [push, deployment, manual]
     depends_on: []
     pull: true
     image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
@@ -26,36 +26,45 @@ steps:
 
   build:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on:
       - compute-version
     image: &docker-image docker:27-cli@sha256:f56779b4e86550493153cc8642c9c8e40b5d934e43cb5b4ea463aea5245c5c01
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
+    environment: &registry-creds
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
     commands:
+      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
         RELEASE_TAG=$$(cat .release-tag)
         CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        IMAGE=registry.desync.link/bored:$$RELEASE_TAG
         docker build \
           --build-arg RELEASE_TAG="$$RELEASE_TAG" \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
           --label org.opencontainers.image.created="$$CREATED" \
-          -t registry.desync.link/bored:$$CI_COMMIT_SHA .
-        ./scripts/check-image-metadata.sh registry.desync.link/bored:$$CI_COMMIT_SHA "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+          -t "$$IMAGE" .
+        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
+        docker push "$$IMAGE"
 
   e2e:
     when:
-      - event: push
+      - event: [push, manual]
     depends_on:
       - build
     image: *docker-image
     volumes: *docker-socket
     commands:
       - |
+        RELEASE_TAG=$$(cat .release-tag)
         REPORT=/srv/dev/playwright-reports/pipeline-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$CI_COMMIT_SHA docker compose -f e2e/docker-compose.test.yml down --volumes
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
@@ -98,6 +107,24 @@ steps:
         AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET:
           from_secret: bored_mcp_prod_client_secret
 
+  apply-authentik-blueprint-auto-dev:
+    when:
+      - event: [push, manual]
+    depends_on:
+      - e2e
+    pull: true
+    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
+    settings:
+      api_url: https://auth.desync.link
+      api_token:
+        from_secret: authentik_api_token
+      file: authentik/blueprint-dev.yaml
+      instance_name: bored
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_BORED_DEV_CLIENT_SECRET:
+          from_secret: bored_dev_oidc_client_secret
+
   push:
     when:
       - event: deployment
@@ -106,13 +133,9 @@ steps:
       - validate-deployment
     image: *docker-image
     volumes: *docker-socket
-    environment: &registry-creds
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
+    environment: *registry-creds
     commands:
-      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - *docker-login
       - |
         RELEASE_TAG=$$(cat .release-tag)
         CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -189,6 +212,49 @@ steps:
         OIDC_MCP_ISSUER_URL=https://auth.desync.link/application/o/bored-mcp/ \
         OIDC_MCP_CLIENT_ID=bored-mcp-prod \
         docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
+
+  auto-deploy-dev:
+    when:
+      - event: [push, manual]
+    depends_on:
+      - compute-version
+      - apply-authentik-blueprint-auto-dev
+    image: *docker-image
+    volumes: *docker-socket
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      OIDC_CLIENT_SECRET:
+        from_secret: bored_dev_oidc_client_secret
+    commands:
+      - *docker-login
+      - docker volume create bored-dev-db
+      - |
+        BORED_IMAGE_TAG=$(cat .release-tag) \
+        APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
+        BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
+        OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-dev/ \
+        OIDC_CLIENT_ID=bored-browser-dev \
+        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
+        OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
+        REQUIRED_SCOPE=bored:dev:access \
+        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
+        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+
+  tag-release-auto-dev-1.30.0:
+    when:
+      - event: [push, manual]
+    depends_on:
+      - auto-deploy-dev
+    pull: true
+    image: *version-plugin
+    settings:
+      mode: push-tag
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
 
   tag-release-dev:
     when:
