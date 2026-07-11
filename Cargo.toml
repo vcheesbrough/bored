@@ -1,5 +1,5 @@
 [workspace]
-members = ["shared", "backend", "frontend", "mcp", "agent"]
+members = ["shared", "backend", "frontend", "mcp"]
 default-members = ["shared", "backend"]
 resolver = "2"
 

@@ -8,10 +8,8 @@ COPY frontend/ frontend/
 COPY shared/ shared/
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY mcp/Cargo.toml mcp/Cargo.toml
-COPY agent/Cargo.toml agent/Cargo.toml
 RUN mkdir -p backend/src && touch backend/src/main.rs \
- && mkdir -p mcp/src && touch mcp/src/main.rs \
- && mkdir -p agent/src && touch agent/src/main.rs
+ && mkdir -p mcp/src && touch mcp/src/main.rs
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
@@ -29,22 +27,21 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY shared/ shared/
-COPY agent/ agent/
 COPY frontend/Cargo.toml frontend/Cargo.toml
 COPY mcp/Cargo.toml mcp/Cargo.toml
 RUN mkdir -p frontend/src && touch frontend/src/lib.rs \
  && mkdir -p mcp/src && touch mcp/src/main.rs
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo fmt -p backend -p shared -p agent --check
+    cargo fmt -p backend -p shared --check
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
-    cargo clippy -p backend -p shared -p agent -- -D warnings
+    cargo clippy -p backend -p shared -- -D warnings
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
-    cargo test -p backend -p shared -p agent --lib
+    cargo test -p backend -p shared --lib
 # Release tag burned into the backend binary (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # fmt/clippy/test layers so a tag change only recompiles the crates that read it.
@@ -53,7 +50,7 @@ ENV RELEASE_TAG=${RELEASE_TAG}
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
-    cargo build --release -p backend -p agent \
+    cargo build --release -p backend \
     && cp /app/target/release/backend /tmp/backend
 
 FROM debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
@@ -74,8 +71,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend-builder /tmp/backend ./backend
-# agent-poc is built above for CI validation but not copied here — it requires
-# the claude CLI on PATH and is deployed/run separately outside this image.
 COPY --from=frontend-builder /app/frontend/dist ./dist
 RUN openssl req -x509 -newkey rsa:4096 \
         -keyout /app/key.pem \
