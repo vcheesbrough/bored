@@ -19,12 +19,11 @@ A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, SurrealD
 
 ```
 bored/
-├── Cargo.toml          # workspace: [shared, backend, frontend, mcp, agent]
+├── Cargo.toml          # workspace: [shared, backend, frontend, mcp]
 ├── backend/            # Axum API server
 ├── frontend/           # Leptos WASM SPA
 ├── shared/             # request/response types (serde)
 ├── mcp/                # MCP server (bored-mcp) exposing the bored API as tools
-├── agent/              # agent-poc: autonomous card annotation agent
 ├── e2e/                # Playwright suite + mock OIDC compose for CI
 ├── scripts/            # one-off ops scripts (e.g. mcp_smoke_all.py)
 ├── deploy/
@@ -50,13 +49,14 @@ Legacy `v1.x` tags from the old scheme remain in history on earlier release line
 
 Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpecker/build.yml):
 
-**On every push** (no deploy):
+**On every push or manual run**:
 
 1. **compute-version** — `woodpecker-plugin-release-versions` (`compute` mode) writes `.release-tag`.
-2. **build** — `docker build` the production image (`--build-arg RELEASE_TAG`, OCI labels) tagged with the commit SHA, then `scripts/check-image-metadata.sh` enforces the labels. Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test --lib`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
+2. **build** — builds, verifies, and pushes the production image tagged with `.release-tag`. Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test --lib`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
 3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC + the freshly-built image + Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
-
-Plain push runs create **no** git tag.
+4. **apply-authentik-blueprint-auto-dev** — synchronises the Authentik OAuth providers before rollout.
+5. **auto-deploy-dev** — deploys the tested image to the development environment.
+6. **tag-release-auto-dev-1.30.0** — creates and pushes the git tag matching `.release-tag` after the successful dev deployment.
 
 **On a manual deployment event** (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`):
 
@@ -118,42 +118,6 @@ OIDC_MCP_CLIENT_ID      # bored-mcp-prod
 ```
 
 When `OIDC_ISSUER_URL` is unset (local dev / tests) the auth middleware short-circuits and injects a synthetic `anonymous` claim, so the API stays usable without an IdP.
-
-## agent-poc
-
-`agent-poc` watches the bored SSE stream and automatically appends a transition blockquote to a card's body whenever it is moved between columns. Inference is handled by shelling out to the `claude` CLI, so it draws from your Claude Max subscription quota rather than a separate API key. The binary is built in CI but **not** shipped in the production image (it requires `claude` on `PATH` and is run separately).
-
-### Prerequisites
-
-- The `claude` CLI installed and authenticated (`claude --version` should work).
-- A running bored instance (local or remote).
-
-### Environment variables
-
-| Variable | Description |
-|---|---|
-| `BORED_API_URL` | Base URL of the bored API, e.g. `https://bored.desync.link` (no trailing slash) |
-| `BOARD_ID` | ULID of the board to watch |
-| `BORED_API_TOKEN` | Optional Bearer token for auth-gated deployments (matches the MCP server convention) |
-| `RUST_LOG` | Log level — `info` is a good default |
-
-### Running locally
-
-```bash
-BORED_API_URL=https://bored-dev.desync.link \
-BOARD_ID=<your-board-id> \
-RUST_LOG=info \
-cargo run -p agent --bin agent-poc
-```
-
-A RustRover run configuration is provided in `.run/Run Agent (dev).run.xml` pre-filled for the dev instance.
-
-### How it works
-
-1. On startup the agent fetches all columns for the board into an in-memory cache so column IDs can be resolved to names quickly.
-2. It opens the SSE event stream at `/api/events?board_id=<id>` and processes events forever, reconnecting automatically after any network failure.
-3. On each `card_moved` event it calls `claude --print` with the card body and column transition as context. Claude returns the original body with a single blockquote appended.
-4. The updated body is written back via `PUT /api/cards/:id`.
 
 ## Local development
 
