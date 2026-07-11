@@ -18,6 +18,10 @@ test.describe('Card context menu', () => {
     await expect(page.locator('.card-context-menu')).toHaveCount(0);
 
     await openCardMenu(page, 'Context target');
+    await page.locator('.card-context-menu-backdrop').click({ button: 'right' });
+    await expect(page.locator('.card-context-menu')).toHaveCount(0);
+
+    await openCardMenu(page, 'Context target');
     await page.locator('.card-context-menu-backdrop').click({ position: { x: 4, y: 4 } });
 
     await expect(page.locator('.card-context-menu')).toHaveCount(0);

@@ -522,6 +522,12 @@ pub fn CardItem(
                         context_menu_position.set(None);
                         show_move_submenu.set(false);
                     }
+                    on:contextmenu=move |e: web_sys::MouseEvent| {
+                        e.prevent_default();
+                        e.stop_propagation();
+                        context_menu_position.set(None);
+                        show_move_submenu.set(false);
+                    }
                 ></div>
                 <div
                     class="card-context-menu"
