@@ -1,5 +1,5 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push/manual: compute-version → build → e2e → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev-1.30.0
+# Push/manual: compute-version → build → e2e → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev-1.31.0
 # Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → push → deploy-* → tag-release-*
 #
 # Release mechanics (see card #176):
@@ -178,7 +178,7 @@ steps:
         OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
         REQUIRED_SCOPE=bored:dev:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
-        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
   deploy-prod:
     when:
@@ -211,7 +211,7 @@ steps:
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-prod/end-session/ \
         OIDC_MCP_ISSUER_URL=https://auth.desync.link/application/o/bored-mcp/ \
         OIDC_MCP_CLIENT_ID=bored-mcp-prod \
-        docker compose -p bored -f deploy/docker-compose.yml up -d --pull always
+        docker compose -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
   auto-deploy-dev:
     when:
@@ -241,9 +241,9 @@ steps:
         OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
         REQUIRED_SCOPE=bored:dev:access \
         OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
-        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always
+        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
-  tag-release-auto-dev-1.30.0:
+  tag-release-auto-dev-1.31.0:
     when:
       - event: [push, manual]
     depends_on:

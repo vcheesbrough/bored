@@ -56,7 +56,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC + the freshly-built image + Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
 4. **apply-authentik-blueprint-auto-dev** — synchronises the development-only Authentik configuration from [`authentik/blueprint-dev.yaml`](authentik/blueprint-dev.yaml) before rollout; the full dev-and-prod blueprint remains deployment-only.
 5. **auto-deploy-dev** — deploys the tested image to the development environment.
-6. **tag-release-auto-dev-1.30.0** — creates and pushes the git tag matching `.release-tag` after the successful dev deployment.
+6. **tag-release-auto-dev-1.31.0** — creates and pushes the git tag matching `.release-tag` after the successful dev deployment.
 
 **On a manual deployment event** (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`):
 
@@ -64,7 +64,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 2. **compute-version** — `woodpecker-plugin-release-versions` (`compute` mode) allocates/reuses the semver and writes `.release-tag`.
 3. **apply-authentik-blueprint** — runs [`woodpecker-plugin-authentik-blueprint`](https://github.com/vcheesbrough/woodpecker-plugin-authentik-blueprint) against [`authentik/blueprint.yaml`](authentik/blueprint.yaml) so Authentik OAuth providers stay in sync before the app rolls out.
 4. **push** — build with `--build-arg RELEASE_TAG` + OCI labels, verify metadata, and push the single `:$(cat .release-tag)` image to `registry.desync.link`.
-5. **deploy-dev / deploy-prod** — run `docker compose -f deploy/docker-compose.yml up -d --pull always` against the host's docker socket, with the OIDC client secret, image tag, host name, and DB volume injected as env. There is no SSH or `scp` step.
+5. **deploy-dev / deploy-prod** — run `docker compose -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120` against the host's docker socket, with the OIDC client secret, image tag, host name, and DB volume injected as env. The step succeeds only after the container is healthy. There is no SSH or `scp` step.
 6. **tag-release-dev / tag-release-prod** — *after* a successful deploy, `woodpecker-plugin-release-versions` (`push-tag` mode) creates and pushes the annotated git tag matching `.release-tag` (idempotent: no-op if the commit is already tagged). Runs for **both** dev and prod.
 
 The PR pipeline (`.woodpecker/pr-review.yml.disabled`) runs the Claude PR review agent on every pull request. It is **currently disabled** (renamed to `*.disabled`) because the agent image fails to pull; PR review is handled manually for now (see [`AGENTS.md`](AGENTS.md) §7). Re-enable by renaming back to `pr-review.yml`.
@@ -95,7 +95,7 @@ Two environments share the same compose file:
 | dev | `https://bored-dev.desync.link` | `bored-dev` | `bored-dev-db` | `bored:dev:access` |
 | prod | `https://bored.desync.link` | `bored` | `bored-prod-db` | `bored:prod:access` |
 
-The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Logs are shipped to Loki at `monitor-loki:3100`.
+The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Docker probes `GET /health` on the internal listener every 10 seconds, allowing only that loopback probe to accept the self-signed certificate. After a 15-second startup grace period, three consecutive 3-second failures mark the container unhealthy. Logs are shipped to Loki at `monitor-loki:3100`.
 
 ### Environment variables
 
