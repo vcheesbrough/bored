@@ -10,11 +10,19 @@ use gloo_net::http::{Request, Response};
 /// returns an error for 401 to short-circuit the caller.
 fn check_auth(resp: Response) -> Result<Response, gloo_net::Error> {
     if resp.status() == 401 {
+        let location = leptos::prelude::window().location();
+        let path = location.pathname().unwrap_or_else(|_| "/".into());
+        let search = location.search().unwrap_or_default();
+        let hash = location.hash().unwrap_or_default();
+        let return_to = format!("{path}{search}{hash}");
+        let encoded = js_sys::encode_uri_component(&return_to)
+            .as_string()
+            .unwrap_or_default();
         // `set_href` triggers a top-level navigation; the SPA will tear down
         // and the browser will load the new URL. This is intentional: the
         // login route is server-side and any in-flight requests no longer
         // matter once the session is gone.
-        let _ = leptos::prelude::window().location().set_href("/auth/login");
+        let _ = location.set_href(&format!("/auth/login?return_to={encoded}"));
         return Err(gloo_net::Error::GlooError(
             "redirecting to /auth/login".into(),
         ));

@@ -360,6 +360,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>) -> impl IntoView {
                 <span class="card-count-badge">{card_count}</span>
                 <button
                     class="add-card-btn"
+                    type="button"
                     title="Add card"
                     on:click=move |_| {
                         // Immediately create an empty card at the top of the

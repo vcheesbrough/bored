@@ -23,7 +23,7 @@
 
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{StatusCode, Uri},
     response::{IntoResponse, Redirect, Response},
     Extension, Json,
 };
@@ -46,14 +46,53 @@ const STATE_COOKIE_MAX_AGE_SECS: i64 = 300;
 /// the JWT exactly is a refresh-token-tier improvement.)
 const AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24;
 
+#[derive(Debug, Default, Deserialize)]
+pub struct LoginQuery {
+    return_to: Option<String>,
+}
+
+fn safe_return_to(candidate: Option<&str>) -> String {
+    let Some(candidate) = candidate else {
+        return "/".to_string();
+    };
+    if !candidate.starts_with('/')
+        || candidate.starts_with("//")
+        || candidate.contains('\\')
+        || candidate.chars().any(char::is_control)
+    {
+        return "/".to_string();
+    }
+    match candidate.parse::<Uri>() {
+        Ok(uri) if uri.scheme().is_none() && uri.authority().is_none() => candidate.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+fn state_return_to(state: &str) -> String {
+    let decoded = state
+        .split_once('.')
+        .and_then(|(_, encoded)| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .ok()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    safe_return_to(decoded.as_deref())
+}
+
 /// `GET /auth/login` — start the OIDC authorization-code flow.
 /// Generates a random state nonce, stores it in a short-lived httpOnly
 /// cookie, and redirects the browser to Authentik's authorize endpoint.
-pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
+pub async fn login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<LoginQuery>,
+) -> Response {
+    let return_to = safe_return_to(params.return_to.as_deref());
     let Some(auth) = state.auth.as_ref() else {
-        // Auth disabled — just bounce back to /. The middleware will inject
+        // Auth disabled — bounce back directly. The middleware will inject
         // the synthetic anonymous claim for any subsequent API call.
-        return Redirect::to("/").into_response();
+        return Redirect::to(&return_to).into_response();
     };
 
     // 32 random bytes → base64url, no padding. ~256 bits of entropy is
@@ -61,6 +100,11 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
     let mut nonce_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes);
+    let encoded_return_to =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(return_to.as_bytes());
+    // The cookie and IdP both receive the complete value, so the existing
+    // equality check protects the return path along with the random nonce.
+    let oauth_state = format!("{nonce}.{encoded_return_to}");
 
     // Build the authorize URL. We request the standard openid+profile+email
     // scopes plus the env-specific access scope so the issued token will
@@ -75,7 +119,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
                 "scope",
                 &format!("openid profile email {}", auth.required_scope),
             ),
-            ("state", &nonce),
+            ("state", &oauth_state),
         ],
     ) {
         Ok(u) => u,
@@ -89,7 +133,7 @@ pub async fn login(State(state): State<AppState>, jar: CookieJar) -> Response {
         }
     };
 
-    let state_cookie = Cookie::build((STATE_COOKIE, nonce))
+    let state_cookie = Cookie::build((STATE_COOKIE, oauth_state))
         .path("/auth")
         .http_only(true)
         .secure(true)
@@ -155,6 +199,7 @@ pub async fn callback(
     if cookie_state != params.state {
         return (StatusCode::BAD_REQUEST, "state mismatch").into_response();
     }
+    let return_to = state_return_to(&params.state);
 
     // `code` is `Option` to keep the error-path deserialise-able; on the
     // success path it must be present, so reject the callback otherwise.
@@ -229,7 +274,7 @@ pub async fn callback(
         .build();
     let jar = jar.add(session).add(clear_state);
 
-    (jar, Redirect::to("/")).into_response()
+    (jar, Redirect::to(&return_to)).into_response()
 }
 
 /// `GET /auth/logout` — clear the session cookie and (optionally) bounce to
@@ -258,4 +303,39 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
 /// data endpoints; the navbar uses it to populate username + avatar.
 pub async fn me(claims: Extension<Claims>) -> Json<shared::UserInfo> {
     Json(claims.to_user_info())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{safe_return_to, state_return_to};
+    use base64::Engine;
+
+    #[test]
+    fn accepts_same_origin_return_paths() {
+        assert_eq!(
+            safe_return_to(Some("/boards/old-board?card=42#details")),
+            "/boards/old-board?card=42#details"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_return_targets() {
+        for target in [
+            "https://example.com/boards/a",
+            "//example.com/boards/a",
+            "/\\example.com/boards/a",
+            "boards/a",
+            "/boards/a\r\nlocation: https://example.com",
+        ] {
+            assert_eq!(safe_return_to(Some(target)), "/", "target: {target:?}");
+        }
+    }
+
+    #[test]
+    fn restores_return_path_from_oauth_state() {
+        let path = "/boards/old-board?card=42";
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path);
+        assert_eq!(state_return_to(&format!("nonce.{encoded}")), path);
+        assert_eq!(state_return_to("invalid"), "/");
+    }
 }
