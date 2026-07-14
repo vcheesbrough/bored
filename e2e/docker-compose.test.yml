@@ -79,8 +79,10 @@ services:
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
     depends_on:
-      - app
-      - mock-oidc
+      app:
+        condition: service_healthy
+      mock-oidc:
+        condition: service_started
     networks:
       - e2e-net
 
