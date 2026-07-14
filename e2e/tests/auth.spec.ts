@@ -101,4 +101,19 @@ test.describe('auth — public routes', () => {
     expect(location).toContain('state=');
     await ctx.dispose();
   });
+
+  test('GET /auth/login binds the return path into OAuth state', async () => {
+    const ctx = await request.newContext({
+      ...unauthOptions,
+      maxRedirects: 0,
+    });
+    const returnTo = '/boards/old-board?card=42';
+    const res = await ctx.get(`/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+    const location = new URL(res.headers()['location']);
+    const state = location.searchParams.get('state') ?? '';
+    const encodedReturnTo = state.split('.')[1] ?? '';
+
+    expect(Buffer.from(encodedReturnTo, 'base64url').toString()).toBe(returnTo);
+    await ctx.dispose();
+  });
 });
