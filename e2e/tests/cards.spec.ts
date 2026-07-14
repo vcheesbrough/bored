@@ -14,6 +14,30 @@ test.describe('Cards', () => {
     await expect(page.locator('.card-item.card-expanded')).toBeVisible();
   });
 
+  test('expired auth preserves the board URL when adding a card', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `auth-return-board-${Date.now()}`);
+    await apiCreateColumn(request, board.name, 'Column');
+    await gotoBoardView(page, board.name);
+
+    await page.route('**/api/columns/*/cards', async (route) => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({ status: 401, body: 'expired session' });
+      } else {
+        await route.continue();
+      }
+    });
+
+    const loginRequestPromise = page.waitForRequest((req) =>
+      new URL(req.url()).pathname === '/auth/login'
+    );
+    await page.locator('[title="Add card"]').first().click();
+    const loginRequest = await loginRequestPromise;
+
+    expect(new URL(loginRequest.url()).searchParams.get('return_to')).toBe(
+      `/boards/${board.name}`
+    );
+  });
+
   test('edit card body and see markdown preview update', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `card-edit-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
