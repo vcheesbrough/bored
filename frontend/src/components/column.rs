@@ -48,7 +48,10 @@ fn persist_column_collapsed(board_id: &str, column_id: &str, collapsed: bool) {
 }
 
 #[component]
-pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>) -> impl IntoView {
+pub fn ColumnView(
+    column: RwSignal<shared::Column>,
+    on_column_drop: Callback<String>,
+) -> impl IntoView {
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
     // Tracks which card ID (if any) should open in editing mode on mount.
     // Set just before inserting the card into `cards` so the matching
@@ -73,8 +76,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
         use_context::<RwSignal<Option<BoardSseEvent>>>().expect("sse_event context missing");
     let drag_payload =
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
-    let columns_ctx =
-        use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>().expect("columns context missing");
     let search_query = use_context::<BoardSearchQuery>()
         .expect("BoardSearchQuery context missing")
         .0;
@@ -325,49 +326,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
         let target_id = col_id_col_drop.clone();
         move |e: web_sys::DragEvent| {
             e.prevent_default();
-            if let DragPayload::Column {
-                column_id: dragged_id,
-            } = drag_payload.get_untracked()
-            {
-                if dragged_id == target_id {
-                    drag_payload.set(DragPayload::None);
-                    return;
-                }
-                let new_order: Vec<String> = columns_ctx.with_untracked(|cs| {
-                    let mut ids: Vec<String> =
-                        cs.iter().map(|s| s.get_untracked().id.clone()).collect();
-                    if let Some(drag_idx) = ids.iter().position(|id| *id == dragged_id) {
-                        if let Some(tgt_idx) = ids.iter().position(|id| *id == target_id) {
-                            ids.remove(drag_idx);
-                            // `tgt_idx` is captured before removal. Moving right
-                            // shifts the target left, so reinserting at its old
-                            // index places the dragged column after the target;
-                            // moving left places it before the target.
-                            ids.insert(tgt_idx, dragged_id.clone());
-                        }
-                    }
-                    ids
-                });
-                columns_ctx.update(|cs| {
-                    if let Some(drag_idx) =
-                        cs.iter().position(|s| s.get_untracked().id == dragged_id)
-                    {
-                        if let Some(tgt_idx) =
-                            cs.iter().position(|s| s.get_untracked().id == target_id)
-                        {
-                            let removed = cs.remove(drag_idx);
-                            cs.insert(tgt_idx, removed);
-                        }
-                    }
-                });
-                let slug = board_slug.get_untracked();
-                wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(err) = crate::api::reorder_columns(&slug, new_order).await {
-                        leptos::logging::error!("reorder_columns failed: {err}");
-                    }
-                });
-                drag_payload.set(DragPayload::None);
-                drag_over_col_id.set(None);
+            e.stop_propagation();
+            if matches!(drag_payload.get_untracked(), DragPayload::Column { .. }) {
+                on_column_drop.run(target_id.clone());
             }
         }
     };

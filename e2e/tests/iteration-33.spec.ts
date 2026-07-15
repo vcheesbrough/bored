@@ -23,6 +23,70 @@ test.describe('Iteration 33 - minimise columns', () => {
     await expect(columns.nth(1)).toHaveAttribute('data-column-id', first.id);
   });
 
+  test('dropping on the visible column ghost completes the reorder', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `column-ghost-drop-${Date.now()}`);
+    const first = await apiCreateColumn(request, board.name, 'First', 0);
+    const second = await apiCreateColumn(request, board.name, 'Second', 1);
+    await gotoBoardView(page, board.name);
+
+    const firstGrip = page.locator(`[data-column-id="${first.id}"] .column-grip`);
+    const secondColumn = page.locator(`[data-column-id="${second.id}"]`);
+    await firstGrip.dispatchEvent('dragstart');
+    await secondColumn.dispatchEvent('dragover');
+
+    const ghost = page.locator('.column-ghost');
+    await expect(ghost).toBeVisible();
+    await ghost.dispatchEvent('dragover');
+    await ghost.dispatchEvent('drop');
+    await firstGrip.dispatchEvent('dragend');
+
+    const columns = page.locator('.columns-row .column-view');
+    await expect(columns.nth(0)).toHaveAttribute('data-column-id', second.id);
+    await expect(columns.nth(1)).toHaveAttribute('data-column-id', first.id);
+
+    await page.reload();
+    await expect(columns.nth(0)).toHaveAttribute('data-column-id', second.id);
+    await expect(columns.nth(1)).toHaveAttribute('data-column-id', first.id);
+  });
+
+  test('repeated bidirectional column drags persist their final order', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `column-drag-repeat-${Date.now()}`);
+    const first = await apiCreateColumn(request, board.name, 'First', 0);
+    const second = await apiCreateColumn(request, board.name, 'Second', 1);
+    const third = await apiCreateColumn(request, board.name, 'Third', 2);
+    await gotoBoardView(page, board.name);
+
+    const columns = page.locator('.columns-row .column-view');
+    const expectOrder = async (ids: string[]) => {
+      for (const [index, id] of ids.entries()) {
+        await expect(columns.nth(index)).toHaveAttribute('data-column-id', id);
+      }
+    };
+
+    await page
+      .locator(`[data-column-id="${first.id}"] .column-grip`)
+      .dragTo(page.locator(`[data-column-id="${second.id}"] .column-header`));
+    await expectOrder([second.id, first.id, third.id]);
+
+    await page
+      .locator(`[data-column-id="${third.id}"] .column-grip`)
+      .dragTo(page.locator(`[data-column-id="${first.id}"] .card-list`));
+    await expectOrder([second.id, third.id, first.id]);
+
+    await page
+      .locator(`[data-column-id="${second.id}"] .column-grip`)
+      .dragTo(page.locator(`[data-column-id="${third.id}"] .column-header`));
+    await expectOrder([third.id, second.id, first.id]);
+
+    await page
+      .locator(`[data-column-id="${first.id}"] .column-grip`)
+      .dragTo(page.locator(`[data-column-id="${third.id}"] .card-list`));
+    await expectOrder([first.id, third.id, second.id]);
+
+    await page.reload();
+    await expectOrder([first.id, third.id, second.id]);
+  });
+
   test('collapsed columns persist per board and remain valid drag targets', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `collapsed-columns-${Date.now()}`);
     const source = await apiCreateColumn(request, board.name, 'Source', 0);

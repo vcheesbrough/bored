@@ -1222,7 +1222,7 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   border: 2px dashed var(--accent);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
-  pointer-events: none;
+  pointer-events: auto;
   display: flex;
   flex-direction: column;
 }
