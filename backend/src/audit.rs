@@ -562,7 +562,94 @@ async fn restore_batch(
     Ok(restored)
 }
 
-/// `POST /api/audit/:id/restore` — replays a `delete`.
+fn card_body_version(row: &DbAuditLog) -> Result<&str, StatusCode> {
+    if row.entity_type != "card"
+        || !matches!(
+            row.action.as_str(),
+            "create" | "baseline" | "update" | "restore"
+        )
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let snapshot = row
+        .snapshot_after
+        .as_ref()
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    if snapshot.get("id").and_then(Value::as_str) != Some(row.entity_id.as_str()) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    snapshot
+        .get("body")
+        .and_then(Value::as_str)
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)
+}
+
+/// Restore only the body of an active card from a historical `snapshot_after`.
+async fn restore_card_body(
+    db: &Surreal<Db>,
+    claims: &Claims,
+    events: &Sender<BroadcastEvent>,
+    row: &DbAuditLog,
+) -> Result<Vec<shared::AuditLogEntry>, StatusCode> {
+    let target_body = card_body_version(row)?.to_string();
+    let existing: Option<DbCard> = db
+        .select(("cards", &row.entity_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let existing = existing.ok_or(StatusCode::NOT_FOUND)?;
+    if existing.body == target_body {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let snapshot_before =
+        serde_json::to_value(existing.into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated: Option<DbCard> = db
+        .query(
+            "UPDATE type::thing('cards', $id) SET body = $body, last_edited_by = $editor RETURN AFTER",
+        )
+        .bind(("id", row.entity_id.clone()))
+        .bind(("body", target_body))
+        .bind(("editor", claims.sub.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated = updated.ok_or(StatusCode::NOT_FOUND)?.into_api();
+    let snapshot_after =
+        serde_json::to_value(updated.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let original_audit_id = row.id.id.to_raw();
+
+    let entry = record_and_broadcast(
+        db,
+        events,
+        AuditRecord {
+            claims,
+            board_id: row.board_id.clone(),
+            entity_type: "card",
+            entity_id: &row.entity_id,
+            action: "restore",
+            snapshot_before: Some(snapshot_before),
+            snapshot_after: Some(snapshot_after),
+            restored_from: Some(original_audit_id),
+            batch_group: None,
+            audit_edit_session: None,
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let _ = events.send(BroadcastEvent {
+        board_id: row.board_id.clone(),
+        event: BoardEvent::CardUpdated { card: updated },
+    });
+    Ok(vec![entry])
+}
+
+/// `POST /api/audit/:id/restore` — replays a delete or restores an active card body.
+///
+/// Card body restores read `snapshot_after.body` from a card create, baseline,
+/// update, or earlier restore row. Delete restores retain the cascade behavior below.
 ///
 /// When the referenced row is a **board** or **column** delete that was recorded as
 /// part of a cascade batch (`batch_group`), the entire batch is replayed in reverse
@@ -579,16 +666,16 @@ pub async fn restore_from_audit(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if row.action != "delete" {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    if let Some(ref bg) = row.batch_group {
-        match row.entity_type.as_str() {
-            "board" | "column" => restore_batch(db, claims, events, bg).await,
-            _ => restore_one_delete(db, claims, events, &row).await,
+    if row.action == "delete" {
+        if let Some(ref bg) = row.batch_group {
+            match row.entity_type.as_str() {
+                "board" | "column" => restore_batch(db, claims, events, bg).await,
+                _ => restore_one_delete(db, claims, events, &row).await,
+            }
+        } else {
+            restore_one_delete(db, claims, events, &row).await
         }
     } else {
-        restore_one_delete(db, claims, events, &row).await
+        restore_card_body(db, claims, events, &row).await
     }
 }

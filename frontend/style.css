@@ -1306,6 +1306,70 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   font-size: 12px;
 }
 
+.history-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.history-version-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  min-height: 30px;
+}
+
+.btn-history-version {
+  margin-top: 0;
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+.btn-history-version:disabled,
+.btn-history-version:disabled:hover {
+  background: var(--surface-3);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.history-current {
+  padding: 3px 7px;
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  border-radius: 4px;
+  color: #86efac;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.history-version-preview {
+  margin-top: 8px;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.history-version-markdown {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.history-version-markdown h1 {
+  font-size: 18px;
+}
+
+.history-version-markdown h2 {
+  font-size: 16px;
+}
+
 .chooser-history-btn {
   background: transparent;
   border: none;
