@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::components::markdown::StaticMarkdownPreview;
 use crate::events::BoardSseEvent;
 
 /// Where the user opened history from — drives drawer title and row filtering (no tabs).
@@ -48,6 +49,9 @@ pub fn HistoryPanel(
     let entries = RwSignal::new(Vec::<shared::AuditLogEntry>::new());
     let loading = RwSignal::new(false);
     let show_moves = RwSignal::new(false);
+    let expanded_version = RwSignal::new(None::<String>);
+    let restoring_version = RwSignal::new(None::<String>);
+    let restore_error = RwSignal::new(None::<String>);
     // Filled once when /api/me resolves; powers the «You» rule in label_actor.
     let me_name = RwSignal::new(None::<String>);
 
@@ -92,6 +96,8 @@ pub fn HistoryPanel(
     Effect::new(move |_| {
         drawer.0.get();
         board_slug.get();
+        expanded_version.set(None);
+        restore_error.set(None);
         if drawer.0.get_untracked().is_some() {
             reload.run(());
         }
@@ -126,6 +132,15 @@ pub fn HistoryPanel(
                 }
             });
         }
+    });
+
+    let current_card_version = Signal::derive(move || {
+        if !matches!(drawer.0.get(), Some(HistoryScope::Card(_))) {
+            return None;
+        }
+        entries.get().into_iter().find_map(|entry| {
+            card_body_version(&entry).map(|body| (entry.id.clone(), body.to_string()))
+        })
     });
 
     let drawer_title = Signal::derive(move || match drawer.0.get().as_ref() {
@@ -167,6 +182,10 @@ pub fn HistoryPanel(
                     <span>"Show moves"</span>
                 </label>
 
+                <Show when=move || restore_error.get().is_some() fallback=|| ()>
+                    <p class="history-error">{move || restore_error.get().unwrap_or_default()}</p>
+                </Show>
+
                 <Show when=move || !loading.get() fallback=move || view! {
                     <p class="loading-text">"Loading…"</p>
                 }>
@@ -203,10 +222,18 @@ pub fn HistoryPanel(
                                 let summary = shared::history::derive_summary(&e);
 
                                 let aid = e.id.clone();
+                                let delete_restore_aid = aid.clone();
                                 let action = e.action.clone();
                                 let entity_id = e.entity_id.clone();
                                 let badge_class = format!("history-badge history-badge-{action}");
                                 let can_restore = e.action == "delete";
+                                let is_card_scope = matches!(
+                                    drawer.0.get_untracked(),
+                                    Some(HistoryScope::Card(_))
+                                );
+                                let version_body = is_card_scope
+                                    .then(|| card_body_version(&e).map(str::to_string))
+                                    .flatten();
                                 let headline = summary.headline;
                                 let sub = summary.sub;
                                 view! {
@@ -229,7 +256,7 @@ pub fn HistoryPanel(
                                                 class="btn btn-restore"
                                                 on:click={
                                                     let reload = reload;
-                                                    let audit_id = aid.clone();
+                                                    let audit_id = delete_restore_aid.clone();
                                                     move |_| {
                                                         let id = audit_id.clone();
                                                         wasm_bindgen_futures::spawn_local(async move {
@@ -242,6 +269,118 @@ pub fn HistoryPanel(
                                                 }
                                             >"Restore"</button>
                                         </Show>
+                                        {version_body.map(|body| {
+                                            let preview_aid = aid.clone();
+                                            let preview_toggle_aid = aid.clone();
+                                            let preview_label_aid = aid.clone();
+                                            let preview_show_aid = aid.clone();
+                                            let restore_aid = aid.clone();
+                                            let restore_request_aid = aid.clone();
+                                            let current_aid = aid.clone();
+                                            let version_body_for_match = body.clone();
+                                            let version_body_for_title = body.clone();
+                                            let preview_body = body;
+                                            view! {
+                                                <div class="history-version-actions">
+                                                    <button
+                                                        type="button"
+                                                        class="btn btn-history-version"
+                                                        aria-expanded=move || (expanded_version
+                                                            .get()
+                                                            .as_deref()
+                                                            == Some(preview_aid.as_str()))
+                                                            .to_string()
+                                                        on:click=move |_| {
+                                                            expanded_version.update(|open| {
+                                                                if open.as_deref()
+                                                                    == Some(preview_toggle_aid.as_str())
+                                                                {
+                                                                    *open = None;
+                                                                } else {
+                                                                    *open = Some(preview_toggle_aid.clone());
+                                                                }
+                                                            });
+                                                        }
+                                                    >
+                                                        {move || if expanded_version.get().as_deref()
+                                                            == Some(preview_label_aid.as_str())
+                                                        {
+                                                            "Hide preview"
+                                                        } else {
+                                                            "Preview"
+                                                        }}
+                                                    </button>
+                                                    <Show
+                                                        when=move || current_card_version
+                                                            .get()
+                                                            .as_ref()
+                                                            .is_some_and(|(id, _)| id == &current_aid)
+                                                        fallback=|| ()
+                                                    >
+                                                        <span class="history-current">"Current"</span>
+                                                    </Show>
+                                                    <button
+                                                        type="button"
+                                                        class="btn btn-restore btn-history-version"
+                                                        disabled=move || {
+                                                            current_card_version
+                                                                .get()
+                                                                .as_ref()
+                                                                .is_some_and(|(_, current_body)| {
+                                                                    current_body == &version_body_for_match
+                                                                })
+                                                                || restoring_version.get().as_deref()
+                                                                    == Some(restore_aid.as_str())
+                                                        }
+                                                        title=move || if current_card_version
+                                                            .get()
+                                                            .as_ref()
+                                                            .is_some_and(|(_, current_body)| {
+                                                                current_body == &version_body_for_title
+                                                            })
+                                                        {
+                                                            "This body is already current"
+                                                        } else {
+                                                            "Restore this body version"
+                                                        }
+                                                        on:click={
+                                                            move |_| {
+                                                                let id = restore_request_aid.clone();
+                                                                restoring_version.set(Some(id.clone()));
+                                                                restore_error.set(None);
+                                                                wasm_bindgen_futures::spawn_local(async move {
+                                                                    match crate::api::restore_audit_entry(&id).await {
+                                                                        Ok(_) => reload.run(()),
+                                                                        Err(err) => {
+                                                                            leptos::logging::error!(
+                                                                                "body restore failed: {err}"
+                                                                            );
+                                                                            restore_error.set(Some(
+                                                                                "Could not restore this version. Refresh and try again."
+                                                                                    .to_string(),
+                                                                            ));
+                                                                        }
+                                                                    }
+                                                                    restoring_version.set(None);
+                                                                });
+                                                            }
+                                                        }
+                                                    >"Restore version"</button>
+                                                </div>
+                                                <Show
+                                                    when=move || expanded_version.get().as_deref()
+                                                        == Some(preview_show_aid.as_str())
+                                                    fallback=|| ()
+                                                >
+                                                    <div class="history-version-preview">
+                                                        <StaticMarkdownPreview
+                                                            body=preview_body.clone()
+                                                            class="card-markdown history-version-markdown"
+                                                        />
+                                                    </div>
+                                                </Show>
+                                            }
+                                        })}
                                     </li>
                                 }
                             }
@@ -251,6 +390,18 @@ pub fn HistoryPanel(
             </aside>
         </Show>
     }
+}
+
+fn card_body_version(entry: &shared::AuditLogEntry) -> Option<&str> {
+    if entry.entity_type != "card"
+        || !matches!(
+            entry.action.as_str(),
+            "create" | "baseline" | "update" | "restore"
+        )
+    {
+        return None;
+    }
+    entry.snapshot_after.as_ref()?.get("body")?.as_str()
 }
 
 // ── JS bridge helpers ────────────────────────────────────────────────────
