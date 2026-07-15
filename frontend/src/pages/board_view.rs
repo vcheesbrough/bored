@@ -322,7 +322,7 @@ pub fn BoardView() -> impl IntoView {
                                     </span>
                                 </div>
                             </Show>
-                            <ColumnView column=sig />
+                            <ColumnView column=sig board_slug=board_name />
                         }
                     }
                 />
