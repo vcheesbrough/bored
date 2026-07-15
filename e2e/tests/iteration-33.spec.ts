@@ -121,6 +121,18 @@ test.describe('Iteration 33 - minimise columns', () => {
       )
       .toBe(true);
 
+    await page
+      .locator(`[data-column-id="${final.id}"] .column-grip`)
+      .dragTo(targetColumn.locator('.collapsed-column-drop-target'));
+    await expect(columns.nth(0)).toHaveAttribute('data-column-id', source.id);
+    await expect(columns.nth(1)).toHaveAttribute('data-column-id', final.id);
+    await expect(columns.nth(2)).toHaveAttribute('data-column-id', target.id);
+
+    await page.reload();
+    await expect(columns.nth(0)).toHaveAttribute('data-column-id', source.id);
+    await expect(columns.nth(1)).toHaveAttribute('data-column-id', final.id);
+    await expect(columns.nth(2)).toHaveAttribute('data-column-id', target.id);
+
     await sourceColumn
       .locator('.card-item')
       .dragTo(targetColumn.locator('.collapsed-column-drop-target'));
