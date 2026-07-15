@@ -559,7 +559,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
                 on:drop=on_collapsed_drop
             >
                 <span
-                    class="column-grip collapsed-column-grip"
+                    class="collapsed-column-grip"
                     title="Drag to reorder"
                     draggable="true"
                     on:dragstart=move |_: web_sys::DragEvent| {
@@ -576,7 +576,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
                     }
                 >"⠿"</span>
                 <span class="collapsed-column-name">{move || column.get().name.clone()}</span>
-                <span class="card-count-badge collapsed-card-count">{card_count}</span>
+                <span class="collapsed-card-count">{card_count}</span>
                 <button
                     class="card-toolbar-btn column-expand-btn"
                     type="button"

@@ -539,9 +539,17 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .collapsed-column-grip {
   width: 100%;
   padding: 9px 0;
+  color: var(--text-muted);
+  cursor: grab;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 14px;
   text-align: center;
   border-bottom: 1px solid var(--border);
+  user-select: none;
 }
+
+.collapsed-column-grip:active { cursor: grabbing; }
 
 .collapsed-column-name {
   flex: 1;
@@ -563,6 +571,16 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
 .collapsed-card-count {
   margin: 8px 0;
   padding: 1px 4px;
+  min-width: 18px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .column-collapse-btn {
