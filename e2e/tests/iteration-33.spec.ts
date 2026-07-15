@@ -2,6 +2,27 @@ import { expect, test } from '@playwright/test';
 import { apiCreateBoard, apiCreateCard, apiCreateColumn, gotoBoardView } from './helpers';
 
 test.describe('Iteration 33 - minimise columns', () => {
+  test('expanded columns can be dragged one position to the right', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `column-drag-right-${Date.now()}`);
+    const first = await apiCreateColumn(request, board.name, 'First', 0);
+    const second = await apiCreateColumn(request, board.name, 'Second', 1);
+    const third = await apiCreateColumn(request, board.name, 'Third', 2);
+    await gotoBoardView(page, board.name);
+
+    const columns = page.locator('.columns-row .column-view');
+    await page
+      .locator(`[data-column-id="${first.id}"] .column-grip`)
+      .dragTo(page.locator(`[data-column-id="${second.id}"] .card-list`));
+
+    await expect(columns.nth(0)).toHaveAttribute('data-column-id', second.id);
+    await expect(columns.nth(1)).toHaveAttribute('data-column-id', first.id);
+    await expect(columns.nth(2)).toHaveAttribute('data-column-id', third.id);
+
+    await page.reload();
+    await expect(columns.nth(0)).toHaveAttribute('data-column-id', second.id);
+    await expect(columns.nth(1)).toHaveAttribute('data-column-id', first.id);
+  });
+
   test('collapsed columns persist per board and remain valid drag targets', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `collapsed-columns-${Date.now()}`);
     const source = await apiCreateColumn(request, board.name, 'Source', 0);

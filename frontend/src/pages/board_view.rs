@@ -11,6 +11,59 @@ use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::search::BoardSearchQuery;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColumnGhostSide {
+    Before,
+    After,
+}
+
+fn column_ghost_side(
+    columns: &[RwSignal<shared::Column>],
+    drag_payload: &DragPayload,
+    target_id: &str,
+) -> Option<ColumnGhostSide> {
+    let DragPayload::Column { column_id } = drag_payload else {
+        return None;
+    };
+    let dragged_index = columns
+        .iter()
+        .position(|column| column.get_untracked().id == *column_id)?;
+    let target_index = columns
+        .iter()
+        .position(|column| column.get_untracked().id == target_id)?;
+
+    match dragged_index.cmp(&target_index) {
+        std::cmp::Ordering::Less => Some(ColumnGhostSide::After),
+        std::cmp::Ordering::Greater => Some(ColumnGhostSide::Before),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+#[component]
+fn ColumnGhost(
+    columns: RwSignal<Vec<RwSignal<shared::Column>>>,
+    drag_payload: RwSignal<DragPayload>,
+) -> impl IntoView {
+    view! {
+        <div class="column-ghost">
+            <span class="column-ghost-name">
+                {move || {
+                    if let DragPayload::Column { column_id: ref id } = drag_payload.get() {
+                        columns
+                            .get()
+                            .iter()
+                            .find(|column| column.get_untracked().id == *id)
+                            .map(|column| column.get_untracked().name.clone())
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                }}
+            </span>
+        </div>
+    }
+}
+
 #[component]
 pub fn BoardView() -> impl IntoView {
     let params = use_params_map();
@@ -298,31 +351,30 @@ pub fn BoardView() -> impl IntoView {
                     key=|sig| sig.get_untracked().id.clone()
                     children=move |sig| {
                         let col_id = sig.get_untracked().id.clone();
+                        let col_id_before = col_id.clone();
+                        let col_id_after = col_id.clone();
                         view! {
                             <Show when=move || {
                                 drag_over_col_id.get().as_deref() == Some(col_id.as_str())
-                                    && matches!(drag_payload.get(), DragPayload::Column { .. })
+                                    && column_ghost_side(
+                                        &columns.get(),
+                                        &drag_payload.get(),
+                                        &col_id_before,
+                                    ) == Some(ColumnGhostSide::Before)
                             }>
-                                <div class="column-ghost">
-                                    <span class="column-ghost-name">
-                                        {move || {
-                                            if let DragPayload::Column { column_id: ref id } =
-                                                drag_payload.get()
-                                            {
-                                                columns
-                                                    .get()
-                                                    .iter()
-                                                    .find(|s| s.get_untracked().id == *id)
-                                                    .map(|s| s.get_untracked().name.clone())
-                                                    .unwrap_or_default()
-                                            } else {
-                                                String::new()
-                                            }
-                                        }}
-                                    </span>
-                                </div>
+                                <ColumnGhost columns=columns drag_payload=drag_payload />
                             </Show>
                             <ColumnView column=sig board_slug=board_name />
+                            <Show when=move || {
+                                drag_over_col_id.get().as_deref() == Some(col_id_after.as_str())
+                                    && column_ghost_side(
+                                        &columns.get(),
+                                        &drag_payload.get(),
+                                        &col_id_after,
+                                    ) == Some(ColumnGhostSide::After)
+                            }>
+                                <ColumnGhost columns=columns drag_payload=drag_payload />
+                            </Show>
                         }
                     }
                 />
