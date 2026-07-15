@@ -316,7 +316,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
         if matches!(drag_payload.get_untracked(), DragPayload::Column { .. }) {
             e.prevent_default();
             // Track which column the dragged column is hovering over so the
-            // ghost placeholder can appear before it.
+            // board can place the ghost on the matching insertion side.
             drag_over_col_id.set(Some(col_id_dragover.clone()));
         }
     };
@@ -339,12 +339,11 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
                     if let Some(drag_idx) = ids.iter().position(|id| *id == dragged_id) {
                         if let Some(tgt_idx) = ids.iter().position(|id| *id == target_id) {
                             ids.remove(drag_idx);
-                            let insert_at = if drag_idx < tgt_idx {
-                                tgt_idx - 1
-                            } else {
-                                tgt_idx
-                            };
-                            ids.insert(insert_at, dragged_id.clone());
+                            // `tgt_idx` is captured before removal. Moving right
+                            // shifts the target left, so reinserting at its old
+                            // index places the dragged column after the target;
+                            // moving left places it before the target.
+                            ids.insert(tgt_idx, dragged_id.clone());
                         }
                     }
                     ids
@@ -357,12 +356,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, board_slug: RwSignal<String>
                             cs.iter().position(|s| s.get_untracked().id == target_id)
                         {
                             let removed = cs.remove(drag_idx);
-                            let insert_at = if drag_idx < tgt_idx {
-                                tgt_idx - 1
-                            } else {
-                                tgt_idx
-                            };
-                            cs.insert(insert_at, removed);
+                            cs.insert(tgt_idx, removed);
                         }
                     }
                 });
