@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::markdown::MarkdownPreview;
+use crate::components::markdown::StaticMarkdownPreview;
 use crate::events::BoardSseEvent;
 
 /// Where the user opened history from — drives drawer title and row filtering (no tabs).
@@ -236,13 +236,6 @@ pub fn HistoryPanel(
                                     .flatten();
                                 let headline = summary.headline;
                                 let sub = summary.sub;
-                                let current_aid = aid.clone();
-                                let is_current_version = Signal::derive(move || {
-                                    current_card_version
-                                        .get()
-                                        .as_ref()
-                                        .is_some_and(|(id, _)| id == &current_aid)
-                                });
                                 view! {
                                     <li class="history-row" data-entity-id=entity_id>
                                         <div class="history-row-meta">
@@ -279,32 +272,24 @@ pub fn HistoryPanel(
                                         {version_body.map(|body| {
                                             let preview_aid = aid.clone();
                                             let preview_toggle_aid = aid.clone();
+                                            let preview_label_aid = aid.clone();
+                                            let preview_show_aid = aid.clone();
                                             let restore_aid = aid.clone();
                                             let restore_request_aid = aid.clone();
+                                            let current_aid = aid.clone();
                                             let version_body_for_match = body.clone();
-                                            let body_signal = Signal::derive(move || body.clone());
-                                            let preview_open = Signal::derive(move || {
-                                                expanded_version.get().as_deref()
-                                                    == Some(preview_aid.as_str())
-                                            });
-                                            let matches_current = Signal::derive(move || {
-                                                current_card_version
-                                                    .get()
-                                                    .as_ref()
-                                                    .is_some_and(|(_, current_body)| {
-                                                        current_body == &version_body_for_match
-                                                    })
-                                            });
-                                            let is_restoring = Signal::derive(move || {
-                                                restoring_version.get().as_deref()
-                                                    == Some(restore_aid.as_str())
-                                            });
+                                            let version_body_for_title = body.clone();
+                                            let preview_body = body;
                                             view! {
                                                 <div class="history-version-actions">
                                                     <button
                                                         type="button"
                                                         class="btn btn-history-version"
-                                                        aria-expanded=move || preview_open.get().to_string()
+                                                        aria-expanded=move || (expanded_version
+                                                            .get()
+                                                            .as_deref()
+                                                            == Some(preview_aid.as_str()))
+                                                            .to_string()
                                                         on:click=move |_| {
                                                             expanded_version.update(|open| {
                                                                 if open.as_deref()
@@ -317,20 +302,43 @@ pub fn HistoryPanel(
                                                             });
                                                         }
                                                     >
-                                                        {move || if preview_open.get() {
+                                                        {move || if expanded_version.get().as_deref()
+                                                            == Some(preview_label_aid.as_str())
+                                                        {
                                                             "Hide preview"
                                                         } else {
                                                             "Preview"
                                                         }}
                                                     </button>
-                                                    <Show when=move || is_current_version.get() fallback=|| ()>
+                                                    <Show
+                                                        when=move || current_card_version
+                                                            .get()
+                                                            .as_ref()
+                                                            .is_some_and(|(id, _)| id == &current_aid)
+                                                        fallback=|| ()
+                                                    >
                                                         <span class="history-current">"Current"</span>
                                                     </Show>
                                                     <button
                                                         type="button"
                                                         class="btn btn-restore btn-history-version"
-                                                        disabled=move || matches_current.get() || is_restoring.get()
-                                                        title=move || if matches_current.get() {
+                                                        disabled=move || {
+                                                            current_card_version
+                                                                .get()
+                                                                .as_ref()
+                                                                .is_some_and(|(_, current_body)| {
+                                                                    current_body == &version_body_for_match
+                                                                })
+                                                                || restoring_version.get().as_deref()
+                                                                    == Some(restore_aid.as_str())
+                                                        }
+                                                        title=move || if current_card_version
+                                                            .get()
+                                                            .as_ref()
+                                                            .is_some_and(|(_, current_body)| {
+                                                                current_body == &version_body_for_title
+                                                            })
+                                                        {
                                                             "This body is already current"
                                                         } else {
                                                             "Restore this body version"
@@ -359,10 +367,14 @@ pub fn HistoryPanel(
                                                         }
                                                     >"Restore version"</button>
                                                 </div>
-                                                <Show when=move || preview_open.get() fallback=|| ()>
+                                                <Show
+                                                    when=move || expanded_version.get().as_deref()
+                                                        == Some(preview_show_aid.as_str())
+                                                    fallback=|| ()
+                                                >
                                                     <div class="history-version-preview">
-                                                        <MarkdownPreview
-                                                            body=body_signal
+                                                        <StaticMarkdownPreview
+                                                            body=preview_body.clone()
                                                             class="card-markdown history-version-markdown"
                                                         />
                                                     </div>

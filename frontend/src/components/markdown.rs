@@ -120,3 +120,12 @@ pub fn MarkdownPreview(
         <div class=class inner_html=move || to_html(&body.get())></div>
     }
 }
+
+/// Renders markdown that does not change for the lifetime of the component.
+#[component]
+pub fn StaticMarkdownPreview(body: String, #[prop(optional)] class: &'static str) -> impl IntoView {
+    let rendered = to_html(&body);
+    view! {
+        <div class=class inner_html=rendered></div>
+    }
+}
