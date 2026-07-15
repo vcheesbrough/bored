@@ -1594,4 +1594,182 @@ mod tests {
             .await
             .assert_status_ok();
     }
+
+    #[tokio::test]
+    async fn audit_restore_prior_card_body_preserves_card_identity_and_layout() {
+        let server = test_app().await;
+        let (board, column) = setup_board_and_column(&server).await;
+
+        let original: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "# Version A".to_string(),
+            })
+            .await
+            .json();
+        server
+            .put(&format!("/api/cards/{}", original.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("# Version B".to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+        server
+            .put(&format!("/api/cards/{}", original.id))
+            .json(&shared::UpdateCardRequest {
+                body: Some("# Version C".to_string()),
+                ..Default::default()
+            })
+            .await
+            .assert_status_ok();
+
+        let history: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", original.id))
+            .await
+            .json();
+        let version_b = history
+            .iter()
+            .find(|entry| {
+                entry.action == "update"
+                    && entry
+                        .snapshot_after
+                        .as_ref()
+                        .and_then(|value| value.get("body"))
+                        .and_then(|value| value.as_str())
+                        == Some("# Version B")
+            })
+            .expect("Version B update present");
+
+        let restore_response = server
+            .post(&format!("/api/audit/{}/restore", version_b.id))
+            .await;
+        restore_response.assert_status_ok();
+        let restored_rows: Vec<shared::AuditLogEntry> = restore_response.json();
+        assert_eq!(restored_rows.len(), 1);
+        let restore = &restored_rows[0];
+        assert_eq!(restore.action, "restore");
+        assert_eq!(
+            restore.restored_from.as_deref(),
+            Some(version_b.id.as_str())
+        );
+        assert_eq!(
+            restore
+                .snapshot_before
+                .as_ref()
+                .and_then(|value| value.get("body"))
+                .and_then(|value| value.as_str()),
+            Some("# Version C")
+        );
+
+        let restored: shared::Card = server
+            .get(&format!("/api/cards/{}", original.id))
+            .await
+            .json();
+        assert_eq!(restored.body, "# Version B");
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.number, original.number);
+        assert_eq!(restored.column_id, original.column_id);
+        assert_eq!(restored.position, original.position);
+
+        let board_history: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/boards/{}/history", board.name))
+            .await
+            .json();
+        assert!(board_history.iter().any(|entry| entry.id == restore.id));
+    }
+
+    #[tokio::test]
+    async fn audit_body_restore_rejects_invalid_or_current_versions() {
+        let db = db::connect_mem().await.expect("failed to connect mem db");
+        let state = AppState::new(db.clone());
+        let server = TestServer::new(app(state).await).unwrap();
+        let (board, column) = setup_board_and_column(&server).await;
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: "current body".to_string(),
+            })
+            .await
+            .json();
+
+        let card_history: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+        let current = card_history
+            .iter()
+            .find(|entry| entry.action == "create")
+            .expect("current create version present");
+        server
+            .post(&format!("/api/audit/{}/restore", current.id))
+            .await
+            .assert_status(StatusCode::CONFLICT);
+
+        let malformed_id = ulid::Ulid::new().to_string().to_lowercase();
+        db.query(
+            "CREATE type::thing('audit_log', $id) SET \
+             actor_sub = 'test', actor_display_name = 'Test', \
+             entity_type = 'card', entity_id = $entity_id, board_id = $board_id, \
+             action = 'update', snapshot_before = NONE, snapshot_after = $snapshot_after, \
+             restored_from = NONE, batch_group = NONE, audit_edit_session = NONE",
+        )
+        .bind(("id", malformed_id.clone()))
+        .bind(("entity_id", card.id.clone()))
+        .bind(("board_id", board.id.clone()))
+        .bind(("snapshot_after", serde_json::json!({ "id": card.id })))
+        .await
+        .expect("insert malformed audit row")
+        .check()
+        .expect("malformed audit row accepted by storage");
+        server
+            .post(&format!("/api/audit/{malformed_id}/restore"))
+            .await
+            .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+
+        let board_history: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/boards/{}/history", board.name))
+            .await
+            .json();
+        let board_create = board_history
+            .iter()
+            .find(|entry| entry.entity_type == "board" && entry.action == "create")
+            .expect("board create row present");
+        server
+            .post(&format!("/api/audit/{}/restore", board_create.id))
+            .await
+            .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+
+        let other_column: shared::Column = server
+            .post(&format!("/api/boards/{}/columns", board.name))
+            .json(&shared::CreateColumnRequest {
+                name: "Other".to_string(),
+                position: 1,
+            })
+            .await
+            .json();
+        server
+            .post(&format!("/api/cards/{}/move", card.id))
+            .json(&shared::MoveCardRequest {
+                column_id: other_column.id,
+                position: 0,
+            })
+            .await
+            .assert_status_ok();
+        let history_after_move: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+        let move_row = history_after_move
+            .iter()
+            .find(|entry| entry.action == "move")
+            .expect("move row present");
+        server
+            .post(&format!("/api/audit/{}/restore", move_row.id))
+            .await
+            .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+
+        let unchanged: shared::Card = server.get(&format!("/api/cards/{}", card.id)).await.json();
+        assert_eq!(unchanged.body, "current body");
+    }
 }
