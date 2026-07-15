@@ -358,10 +358,10 @@ pub fn ColumnView(
     };
 
     let on_collapsed_drop = move |e: web_sys::DragEvent| {
-        e.prevent_default();
-        e.stop_propagation();
-        card_list_drag_over.set(false);
         if let DragPayload::Card { card_id, .. } = drag_payload.get_untracked() {
+            e.prevent_default();
+            e.stop_propagation();
+            card_list_drag_over.set(false);
             let target_col = col_id_collapsed_drop.clone();
             let position = cards.with_untracked(|cs| cs.len() as i32);
             wasm_bindgen_futures::spawn_local(async move {
