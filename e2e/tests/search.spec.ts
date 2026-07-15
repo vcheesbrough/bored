@@ -89,7 +89,14 @@ test.describe('simple search', () => {
 
     const context = await browser.newContext();
     const page = await context.newPage();
+    const eventsReady = page.waitForResponse(
+      response =>
+        response.request().method() === 'GET' &&
+        response.url().includes(`/api/events?board_id=${board.id}`) &&
+        response.ok()
+    );
     await gotoBoardView(page, board.name);
+    await eventsReady;
     await page.locator('.navbar-search-input').fill('updated match');
     await expect(page.locator('.card-item')).toHaveCount(0);
 
