@@ -20,7 +20,7 @@ use routes::boards::AppState;
 use std::net::SocketAddr;
 use tower_http::{services::ServeDir, trace::TraceLayer}; // Middleware: static files + request tracing
 
-use crate::auth::{auth_middleware, AuthConfig, JwksCache};
+use crate::auth::{auth_middleware, AuthConfig, AuthSessionManager, JwksCache};
 
 // Wraps ServeDir and replaces any 404 response with index.html so that SPA
 // deep-links (e.g. /boards/123) survive a browser reload.
@@ -225,7 +225,10 @@ async fn main() {
             "OIDC auth enabled"
         );
         let cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-        AppState::new(db).with_auth(Arc::new(auth), cache)
+        let sessions = Arc::new(
+            AuthSessionManager::load().expect("invalid browser session cookie configuration"),
+        );
+        AppState::new(db).with_auth(Arc::new(auth), cache, sessions)
     } else {
         tracing::warn!("OIDC_ISSUER_URL not set — auth middleware will inject anonymous claim");
         AppState::new(db)

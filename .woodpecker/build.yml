@@ -165,6 +165,8 @@ steps:
         from_secret: zot_ci_password
       OIDC_CLIENT_SECRET:
         from_secret: bored_dev_oidc_client_secret
+      SESSION_COOKIE_KEY:
+        from_secret: bored_dev_session_cookie_key
     commands:
       - *docker-login
       - docker volume create bored-dev-db
@@ -196,6 +198,8 @@ steps:
         from_secret: zot_ci_password
       OIDC_CLIENT_SECRET:
         from_secret: bored_prod_oidc_client_secret
+      SESSION_COOKIE_KEY:
+        from_secret: bored_prod_session_cookie_key
     commands:
       - *docker-login
       - docker volume create bored-prod-db
@@ -228,6 +232,8 @@ steps:
         from_secret: zot_ci_password
       OIDC_CLIENT_SECRET:
         from_secret: bored_dev_oidc_client_secret
+      SESSION_COOKIE_KEY:
+        from_secret: bored_dev_session_cookie_key
     commands:
       - *docker-login
       - docker volume create bored-dev-db
