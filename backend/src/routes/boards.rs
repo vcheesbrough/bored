@@ -9,7 +9,7 @@ use surrealdb::{engine::local::Db, Surreal};
 use tokio::sync::broadcast;
 
 use crate::audit;
-use crate::auth::{AuthConfig, Claims, JwksCache};
+use crate::auth::{AuthConfig, AuthSessionManager, Claims, JwksCache};
 use crate::events::{BoardEvent, BroadcastEvent, BROADCAST_CAPACITY};
 use crate::models::{DbBoard, DbCard, DbColumn};
 
@@ -39,6 +39,9 @@ pub struct AppState {
     /// alongside `auth` (created together at startup); kept as a separate
     /// field so handlers that only need verification don't pull in the secret.
     pub jwks_cache: Option<Arc<JwksCache>>,
+    /// Private-cookie cryptography, shared OIDC HTTP client, and refresh-token
+    /// rotation coordinator. Present exactly when browser OIDC auth is enabled.
+    pub auth_sessions: Option<Arc<AuthSessionManager>>,
 }
 
 impl AppState {
@@ -54,14 +57,21 @@ impl AppState {
             events: tx,
             auth: None,
             jwks_cache: None,
+            auth_sessions: None,
         }
     }
 
     /// Builder-style attach of OIDC configuration + JWKS cache. Called once
     /// from `main.rs` if the OIDC env vars are present.
-    pub fn with_auth(mut self, auth: Arc<AuthConfig>, jwks_cache: Arc<JwksCache>) -> Self {
+    pub fn with_auth(
+        mut self,
+        auth: Arc<AuthConfig>,
+        jwks_cache: Arc<JwksCache>,
+        auth_sessions: Arc<AuthSessionManager>,
+    ) -> Self {
         self.auth = Some(auth);
         self.jwks_cache = Some(jwks_cache);
+        self.auth_sessions = Some(auth_sessions);
         self
     }
 }

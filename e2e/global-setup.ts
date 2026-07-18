@@ -33,33 +33,30 @@ export default async function globalSetup() {
 
   await waitForMock(tokenUrl);
 
+  // Keep a client-credentials token for the explicit bearer regression. It is
+  // not installed globally: browser tests must genuinely exercise cookies.
   const token = await fetchToken(tokenUrl, clientId, clientSecret, requiredScope);
-  console.log(`Acquired test token (${token.length} chars) from ${tokenUrl}`);
-
-  // Write a Playwright storage state file with the `auth` cookie. The cookie
-  // domain MUST match the host the browser is hitting (app, in our compose
-  // network) — Playwright otherwise drops cross-origin cookies on the floor.
-  const baseHost = new URL(baseURL).hostname;
-  const storage = {
-    cookies: [
-      {
-        name: 'auth',
-        value: token,
-        domain: baseHost,
-        path: '/',
-        expires: -1,
-        httpOnly: true,
-        secure: true,
-        sameSite: 'Lax' as const,
-      },
-    ],
-    origins: [],
-  };
-  fs.writeFileSync(STORAGE_STATE, JSON.stringify(storage));
-
-  // Expose the token to test files that exercise the API directly via
-  // `request.newContext({ extraHTTPHeaders: { Authorization: ... } })`.
   process.env.AUTH_TOKEN = token;
+
+  // Exercise the real app -> IdP -> callback flow and persist the encrypted
+  // access, refresh, and ID cookies emitted by the backend.
+  const login = await request.newContext({ baseURL, ignoreHTTPSErrors: true });
+  try {
+    const response = await login.get('/auth/login');
+    if (!response.ok()) {
+      throw new Error(`browser login failed: ${response.status()} ${await response.text()}`);
+    }
+    const storage = await login.storageState();
+    const cookieNames = new Set(storage.cookies.map(cookie => cookie.name));
+    for (const name of ['auth', 'auth_refresh', 'auth_id']) {
+      if (!cookieNames.has(name)) {
+        throw new Error(`browser login did not set ${name} cookie`);
+      }
+    }
+    fs.writeFileSync(STORAGE_STATE, JSON.stringify(storage));
+  } finally {
+    await login.dispose();
+  }
 }
 
 function required(name: string): string {
