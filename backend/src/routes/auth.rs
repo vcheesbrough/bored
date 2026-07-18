@@ -23,7 +23,7 @@
 
 use axum::{
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{StatusCode, Uri},
     response::{IntoResponse, Redirect, Response},
     Extension, Json,
 };
@@ -32,13 +32,19 @@ use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
 
-use crate::auth::{Claims, STATE_COOKIE};
+use crate::auth::{Claims, AUTH_COOKIE, STATE_COOKIE};
 use crate::routes::boards::AppState;
 
 /// Cookie max-age (seconds) for the auth state nonce. Five minutes is more
 /// than enough time for a user to complete the redirect to Authentik, log in,
 /// and bounce back. Anything longer is just a wider attack window.
 const STATE_COOKIE_MAX_AGE_SECS: i64 = 300;
+
+/// Cookie max-age for the session token. We set this generously and let the
+/// JWT's own `exp` claim be the source of truth — the middleware enforces
+/// expiry, so an over-long cookie lifetime is harmless. (Tightening to match
+/// the JWT exactly is a refresh-token-tier improvement.)
+const AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct LoginQuery {
@@ -111,10 +117,7 @@ pub async fn login(
             ("redirect_uri", auth.redirect_uri.as_str()),
             (
                 "scope",
-                &format!(
-                    "openid profile email offline_access {}",
-                    auth.required_scope
-                ),
+                &format!("openid profile email {}", auth.required_scope),
             ),
             ("state", &oauth_state),
         ],
@@ -159,11 +162,19 @@ pub struct CallbackQuery {
     error: Option<String>,
 }
 
+/// Token-endpoint response shape. Only the fields we use are deserialised;
+/// other fields (refresh_token, id_token, token_type, …) are ignored. We
+/// rely on the access_token alone — id_token is not required for our model
+/// because all consumers use the access_token for `Authorization: Bearer`.
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+}
+
 /// `GET /auth/callback` — receive Authentik's redirect with the auth code,
 /// verify state, exchange code for tokens, and set the session cookie.
 pub async fn callback(
     State(state): State<AppState>,
-    headers: HeaderMap,
     jar: CookieJar,
     Query(params): Query<CallbackQuery>,
 ) -> Response {
@@ -196,15 +207,37 @@ pub async fn callback(
         return (StatusCode::BAD_REQUEST, "missing code").into_response();
     };
 
-    let sessions = state
-        .auth_sessions
-        .as_ref()
-        .expect("auth_sessions present when auth configured");
-    let token_set = match sessions.exchange_authorization_code(auth, &code).await {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            tracing::error!(error = %error, "authorization-code token exchange failed");
-            return (StatusCode::BAD_GATEWAY, "token exchange failed").into_response();
+    // Exchange the code for an access token via the token endpoint. Authentik
+    // expects `application/x-www-form-urlencoded` here per RFC 6749.
+    let http = reqwest::Client::new();
+    let token_response: TokenResponse = match http
+        .post(auth.token_url())
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", &auth.redirect_uri),
+            ("client_id", &auth.client_id),
+            ("client_secret", &auth.client_secret),
+        ])
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(ok) => match ok.json().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to parse token response");
+                    return (StatusCode::BAD_GATEWAY, "token parse failed").into_response();
+                }
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "token endpoint returned error");
+                return (StatusCode::BAD_GATEWAY, "token exchange failed").into_response();
+            }
+        },
+        Err(e) => {
+            tracing::error!(error = %e, "token endpoint unreachable");
+            return (StatusCode::BAD_GATEWAY, "token endpoint unreachable").into_response();
         }
     };
 
@@ -215,14 +248,23 @@ pub async fn callback(
         .jwks_cache
         .as_ref()
         .expect("jwks_cache present when auth configured");
-    if let Err(reason) = crate::auth::validate_jwt(&token_set.access_token, auth, jwks).await {
+    if let Err(reason) = crate::auth::validate_jwt(&token_response.access_token, auth, jwks).await {
         tracing::warn!(reason, "issued access token failed validation");
         return (StatusCode::FORBIDDEN, "issued token failed validation").into_response();
     }
 
-    // Store the complete token set in independently encrypted private cookies
-    // and clear the one-use state nonce.
-    let private_jar = sessions.write_session(sessions.cookie_jar(&headers), &token_set);
+    // Set the session cookie and clear the state nonce.
+    let session = Cookie::build((AUTH_COOKIE, token_response.access_token))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::seconds(AUTH_COOKIE_MAX_AGE_SECS))
+        .build();
+    // Mirror the security attributes from the original Set-Cookie so the
+    // deletion is treated identically by RFC 6265bis-conformant browsers.
+    // Mainstream browsers clear by (name, path) alone, but matching attrs
+    // is the spec-blessed form.
     let clear_state = Cookie::build((STATE_COOKIE, ""))
         .path("/auth")
         .http_only(true)
@@ -230,62 +272,30 @@ pub async fn callback(
         .same_site(SameSite::Lax)
         .max_age(time::Duration::ZERO)
         .build();
-    let jar = jar.add(clear_state);
+    let jar = jar.add(session).add(clear_state);
 
-    let response = (private_jar, Redirect::to(&return_to)).into_response();
-    (jar, response).into_response()
+    (jar, Redirect::to(&return_to)).into_response()
 }
 
 /// `GET /auth/logout` — clear the session cookie and (optionally) bounce to
 /// Authentik's RP-initiated logout endpoint to terminate the upstream session.
-pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: CookieJar) -> Response {
-    let clear_state = Cookie::build((STATE_COOKIE, ""))
-        .path("/auth")
+pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let clear = Cookie::build((AUTH_COOKIE, ""))
+        .path("/")
         .http_only(true)
         .secure(true)
         .same_site(SameSite::Lax)
         .max_age(time::Duration::ZERO)
         .build();
-    let jar = jar.add(clear_state);
+    let jar = jar.add(clear);
 
-    let Some(auth) = state.auth.as_ref() else {
-        return (jar, Redirect::to("/")).into_response();
-    };
-    let sessions = state
-        .auth_sessions
+    let target = state
+        .auth
         .as_ref()
-        .expect("auth_sessions present when auth configured");
-    let private_jar = sessions.cookie_jar(&headers);
-    let refresh_token = sessions.read_refresh_token(&private_jar);
-    let id_token = sessions.read_id_token(&private_jar);
-    let private_jar = sessions.clear_session(private_jar);
-
-    if let Some(refresh_token) = refresh_token.as_deref() {
-        let refresh_chain = sessions.invalidate_refresh_chain(refresh_token).await;
-        let sessions = std::sync::Arc::clone(sessions);
-        let auth = std::sync::Arc::clone(auth);
-        let _revocation_task = tokio::spawn(async move {
-            for refresh_token in refresh_chain {
-                if let Err(error) = sessions.revoke_refresh_token(&auth, &refresh_token).await {
-                    // Local logout must not be held hostage by provider availability.
-                    tracing::warn!(error = %error, "refresh-token revocation failed during logout");
-                }
-            }
-        });
-    }
-
-    let mut target = auth
-        .end_session_url
-        .clone()
+        .and_then(|a| a.end_session_url.clone())
         .unwrap_or_else(|| "/".to_string());
-    if let (Some(id_token), Ok(mut url)) = (id_token, url::Url::parse(&target)) {
-        url.query_pairs_mut()
-            .append_pair("id_token_hint", &id_token);
-        target = url.into();
-    }
 
-    let response = (private_jar, Redirect::to(&target)).into_response();
-    (jar, response).into_response()
+    (jar, Redirect::to(&target)).into_response()
 }
 
 /// `GET /api/me` — return the public-facing user identity to the SPA.
