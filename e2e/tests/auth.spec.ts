@@ -4,10 +4,39 @@ import { test, expect, request } from '@playwright/test';
 // stack, which configures the backend with a mock OIDC provider and
 // requires a valid bored:test:access scoped JWT on every /api/* call.
 //
-// `globalSetup` writes the cookie + bearer token before tests run, so the
-// "happy path" tests below execute as the authenticated test user.
+// `globalSetup` completes the authorization-code flow before tests run, so the
+// happy-path browser contexts start with the backend's encrypted cookie set.
 
 test.describe('auth — happy path', () => {
+  test('browser session cookies are encrypted and hardened', async ({ page }) => {
+    const cookies = await page.context().cookies();
+    for (const name of ['auth', 'auth_refresh', 'auth_id']) {
+      const cookie = cookies.find(candidate => candidate.name === name);
+      expect(cookie, `${name} cookie`).toBeDefined();
+      expect(cookie?.httpOnly).toBe(true);
+      expect(cookie?.secure).toBe(true);
+      expect(cookie?.sameSite).toBe('Lax');
+      expect(cookie?.path).toBe('/');
+      // JWTs have three dot-separated segments; private-cookie ciphertext does not.
+      expect(cookie?.value.split('.')).toHaveLength(1);
+    }
+  });
+
+  test('access token refreshes transparently near expiry', async ({ page }) => {
+    const before = (await page.context().cookies()).find(cookie => cookie.name === 'auth_refresh');
+    expect(before).toBeDefined();
+
+    // The E2E issuer uses a 65-second access lifetime and production refreshes
+    // inside 60 seconds. Crossing that boundary exercises the real grant.
+    await page.waitForTimeout(6_000);
+    const res = await page.request.get('/api/me');
+    expect(res.status()).toBe(200);
+
+    const after = (await page.context().cookies()).find(cookie => cookie.name === 'auth_refresh');
+    expect(after).toBeDefined();
+    expect(after?.value).not.toBe(before?.value);
+  });
+
   test('GET /api/me returns the test service account identity', async ({ request }) => {
     const res = await request.get('/api/me');
     expect(res.status()).toBe(200);
@@ -16,6 +45,89 @@ test.describe('auth — happy path', () => {
     // The mock-oauth2-server returns the client_id as `sub` for
     // client_credentials tokens; preferred_username falls back to that.
     expect(body.name.length).toBeGreaterThan(0);
+  });
+
+  test('missing access cookie recovers through the refresh token', async ({ page }) => {
+    await page.context().clearCookies({ name: /^auth$/ });
+    const res = await page.request.get('/api/me');
+    expect(res.status()).toBe(200);
+    const restored = (await page.context().cookies()).find(cookie => cookie.name === 'auth');
+    expect(restored).toBeDefined();
+  });
+
+  test('missing ID cookie does not prevent refresh recovery', async ({ page }) => {
+    await page.context().clearCookies({ name: /^auth$/ });
+    await page.context().clearCookies({ name: /^auth_id$/ });
+    const res = await page.request.get('/api/me');
+    expect(res.status()).toBe(200);
+    const restored = (await page.context().cookies()).find(cookie => cookie.name === 'auth');
+    expect(restored).toBeDefined();
+  });
+
+  test('bearer auth remains stateless and does not emit session cookies', async () => {
+    const token = process.env.AUTH_TOKEN;
+    expect(token).toBeTruthy();
+    const ctx = await request.newContext({
+      baseURL: process.env.BASE_URL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const res = await ctx.get('/api/me');
+    expect(res.status()).toBe(200);
+    expect(res.headers()['set-cookie']).toBeUndefined();
+    await ctx.dispose();
+  });
+
+  test('tampered refresh cookie clears the browser session', async ({ page }) => {
+    const cookies = await page.context().cookies();
+    const refresh = cookies.find(cookie => cookie.name === 'auth_refresh');
+    expect(refresh).toBeDefined();
+    if (!refresh) return;
+
+    await page.context().clearCookies({ name: /^auth$/ });
+    await page.context().clearCookies({ name: /^auth_refresh$/ });
+    await page.context().addCookies([
+      {
+        ...refresh,
+        value: `${refresh.value.slice(0, -1)}${refresh.value.endsWith('A') ? 'B' : 'A'}`,
+      },
+    ]);
+
+    const res = await page.request.get('/api/me');
+    expect(res.status()).toBe(401);
+    const remaining = await page.context().cookies();
+    expect(remaining.filter(cookie => cookie.name.startsWith('auth')).map(cookie => cookie.name))
+      .toEqual([]);
+  });
+
+  test('logout clears tokens and forwards an ID token hint', async () => {
+    // Logout invalidates the refresh-token chain, so this destructive test
+    // must not consume the storage state shared by the rest of the suite.
+    const ctx = await request.newContext({
+      baseURL: process.env.BASE_URL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+      extraHTTPHeaders: {},
+    });
+
+    try {
+      const login = await ctx.get('/auth/login');
+      expect(login.ok()).toBe(true);
+      expect((await ctx.storageState()).cookies.some(cookie => cookie.name === 'auth_refresh'))
+        .toBe(true);
+
+      const res = await ctx.get('/auth/logout', { maxRedirects: 0 });
+      expect([302, 303, 307]).toContain(res.status());
+      const location = new URL(res.headers()['location']);
+      expect(location.searchParams.get('id_token_hint')).toBeTruthy();
+
+      const remaining = (await ctx.storageState()).cookies;
+      expect(remaining.filter(cookie => cookie.name.startsWith('auth')).map(cookie => cookie.name))
+        .toEqual([]);
+    } finally {
+      await ctx.dispose();
+    }
   });
 
   test('GET /api/boards succeeds with the storage-state cookie', async ({ page }) => {
@@ -99,6 +211,7 @@ test.describe('auth — public routes', () => {
     expect(location).toContain('mock-oidc');
     expect(location).toContain('client_id=');
     expect(location).toContain('state=');
+    expect(new URL(location).searchParams.get('scope')).toContain('offline_access');
     await ctx.dispose();
   });
 

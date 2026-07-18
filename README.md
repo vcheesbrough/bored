@@ -81,6 +81,8 @@ Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but val
 | `bored_dev_oidc_client_secret` | deploy-dev + blueprint var `AUTHENTIK_BORED_DEV_CLIENT_SECRET` |
 | `bored_prod_oidc_client_secret` | deploy-prod + blueprint var `AUTHENTIK_BORED_PROD_CLIENT_SECRET` |
 | `bored_mcp_prod_client_secret` | blueprint var `AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET` (MCP OAuth client) |
+| `bored_dev_session_cookie_key` | dev AES-256-GCM private-cookie key (base64-encoded 64 random bytes) |
+| `bored_prod_session_cookie_key` | prod AES-256-GCM private-cookie key (base64-encoded 64 random bytes) |
 | `claude_oauth_token` | PR review agent |
 | `pr_reviewer_gh_app_id` | PR review agent |
 | `pr_reviewer_gh_app_installation_id` | PR review agent |
@@ -109,6 +111,7 @@ LOKI_URL=http://monitor-loki:3100
 OIDC_ISSUER_URL         # https://auth.desync.link/application/o/bored-{dev,prod}/
 OIDC_CLIENT_ID          # bored-browser-{dev,prod}
 OIDC_CLIENT_SECRET      # from Woodpecker secret
+SESSION_COOKIE_KEY      # environment-specific base64-encoded 64-byte random key
 OIDC_REDIRECT_URI       # https://<host>/auth/callback
 OIDC_END_SESSION_URL    # https://auth.desync.link/application/o/bored-{dev,prod}/end-session/
 REQUIRED_SCOPE          # bored:{dev,prod}:access
