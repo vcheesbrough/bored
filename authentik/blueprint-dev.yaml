@@ -32,8 +32,6 @@ entries:
       client_id: bored-browser-dev
       client_secret: ${AUTHENTIK_BORED_DEV_CLIENT_SECRET}
       client_type: confidential
-      access_token_validity: minutes=15
-      refresh_token_validity: days=30
       redirect_uris:
         - url: "https://bored-dev.desync.link/auth/callback"
           matching_mode: strict
@@ -45,7 +43,6 @@ entries:
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, openid]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, email]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
-        - !Find [authentik_providers_oauth2.scopemapping, [scope_name, offline_access]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "bored:dev:access"]]
 
   - model: authentik_core.application
