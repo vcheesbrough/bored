@@ -32,10 +32,9 @@ serde_json = "1"
 # httpOnly cookie handling, cryptographic state nonce generation.
 jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-axum-extra = { version = "0.9", features = ["cookie", "cookie-private"] }
+axum-extra = { version = "0.9", features = ["cookie"] }
 rand = "0.8"
 base64 = "0.22"
-sha2 = "0.10"
 # `time` is used for cookie max_age durations — the `cookie` crate (via
 # axum-extra) re-exports time::Duration but having it as an explicit dep
 # makes call sites easier to read and guarantees a consistent version.
