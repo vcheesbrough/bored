@@ -258,14 +258,21 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: Cook
     let private_jar = sessions.cookie_jar(&headers);
     let refresh_token = sessions.read_refresh_token(&private_jar);
     let id_token = sessions.read_id_token(&private_jar);
+    let private_jar = sessions.clear_session(private_jar);
 
     if let Some(refresh_token) = refresh_token.as_deref() {
-        if let Err(error) = sessions.revoke_refresh_token(auth, refresh_token).await {
-            // Local logout must not be held hostage by provider availability.
-            tracing::warn!(error = %error, "refresh-token revocation failed during logout");
-        }
+        let refresh_chain = sessions.invalidate_refresh_chain(refresh_token).await;
+        let sessions = std::sync::Arc::clone(sessions);
+        let auth = std::sync::Arc::clone(auth);
+        let _revocation_task = tokio::spawn(async move {
+            for refresh_token in refresh_chain {
+                if let Err(error) = sessions.revoke_refresh_token(&auth, &refresh_token).await {
+                    // Local logout must not be held hostage by provider availability.
+                    tracing::warn!(error = %error, "refresh-token revocation failed during logout");
+                }
+            }
+        });
     }
-    let private_jar = sessions.clear_session(private_jar);
 
     let mut target = auth
         .end_session_url

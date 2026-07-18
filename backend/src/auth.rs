@@ -27,6 +27,7 @@
 
 use std::{
     collections::HashMap,
+    sync::{Arc, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -63,6 +64,8 @@ const SESSION_COOKIE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 const REFRESH_WINDOW_SECS: u64 = 60;
 const REFRESH_CACHE_TTL: Duration = Duration::from_secs(120);
 const REFRESH_CACHE_MAX_ENTRIES: usize = 1024;
+const REFRESH_INVALIDATION_MAX_ENTRIES: usize = REFRESH_CACHE_MAX_ENTRIES * 2;
+const REFRESH_INVALIDATION_TTL: Duration = Duration::from_secs(SESSION_COOKIE_MAX_AGE_SECS as u64);
 
 /// Configuration sourced from environment variables at startup.
 ///
@@ -251,7 +254,7 @@ impl AuthConfig {
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: String,
-    pub id_token: String,
+    pub id_token: Option<String>,
     pub access_expires_in: i64,
 }
 
@@ -285,7 +288,7 @@ impl TokenEndpointResponse {
             refresh_token: self
                 .refresh_token
                 .ok_or("token response missing refresh_token")?,
-            id_token: self.id_token.ok_or("token response missing id_token")?,
+            id_token: Some(self.id_token.ok_or("token response missing id_token")?),
             access_expires_in: self
                 .expires_in
                 .unwrap_or(ACCESS_COOKIE_DEFAULT_AGE_SECS)
@@ -293,13 +296,13 @@ impl TokenEndpointResponse {
         })
     }
 
-    fn into_refreshed(self, previous_id_token: String) -> Result<TokenSet, &'static str> {
+    fn into_refreshed(self, previous_id_token: Option<String>) -> Result<TokenSet, &'static str> {
         Ok(TokenSet {
             access_token: self.access_token,
             refresh_token: self
                 .refresh_token
                 .ok_or("refresh response missing rotated refresh_token")?,
-            id_token: self.id_token.unwrap_or(previous_id_token),
+            id_token: self.id_token.or(previous_id_token),
             access_expires_in: self
                 .expires_in
                 .unwrap_or(ACCESS_COOKIE_DEFAULT_AGE_SECS)
@@ -315,16 +318,23 @@ struct CachedRefresh {
     expires_at: Instant,
 }
 
+#[derive(Default)]
+struct RefreshState {
+    cache: HashMap<[u8; 32], CachedRefresh>,
+    invalidated: HashMap<[u8; 32], Instant>,
+    gates: HashMap<[u8; 32], Weak<Mutex<()>>>,
+}
+
 /// Browser-session cryptography and refresh coordination.
 ///
-/// Authentik immediately invalidates a refresh token after use. The mutex is
-/// intentionally held across the token exchange so concurrent requests cannot
-/// race; the short cache lets waiters carrying the old cookie reuse the one
-/// successful rotated response.
+/// Authentik immediately invalidates a refresh token after use. Per-token gates
+/// collapse requests carrying the same old cookie without making unrelated
+/// browser sessions wait for each other's provider exchanges. The short cache
+/// lets same-token waiters reuse the one successful rotated response.
 pub struct AuthSessionManager {
     cookie_key: Key,
     http: reqwest::Client,
-    refresh_cache: Mutex<HashMap<[u8; 32], CachedRefresh>>,
+    refresh_state: Mutex<RefreshState>,
 }
 
 impl std::fmt::Debug for AuthSessionManager {
@@ -360,8 +370,12 @@ impl AuthSessionManager {
     fn from_key_bytes(bytes: &[u8]) -> Self {
         Self {
             cookie_key: Key::from(bytes),
-            http: reqwest::Client::new(),
-            refresh_cache: Mutex::new(HashMap::new()),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("failed to build OIDC HTTP client"),
+            refresh_state: Mutex::new(RefreshState::default()),
         }
     }
 
@@ -384,21 +398,25 @@ impl AuthSessionManager {
     }
 
     pub fn write_session(&self, jar: PrivateCookieJar, session: &TokenSet) -> PrivateCookieJar {
-        jar.add(session_cookie(
-            AUTH_COOKIE,
-            session.access_token.clone(),
-            session.access_expires_in,
-        ))
-        .add(session_cookie(
-            REFRESH_COOKIE,
-            session.refresh_token.clone(),
-            SESSION_COOKIE_MAX_AGE_SECS,
-        ))
-        .add(session_cookie(
-            ID_COOKIE,
-            session.id_token.clone(),
-            SESSION_COOKIE_MAX_AGE_SECS,
-        ))
+        let jar = jar
+            .add(session_cookie(
+                AUTH_COOKIE,
+                session.access_token.clone(),
+                session.access_expires_in,
+            ))
+            .add(session_cookie(
+                REFRESH_COOKIE,
+                session.refresh_token.clone(),
+                SESSION_COOKIE_MAX_AGE_SECS,
+            ));
+        match session.id_token.as_ref() {
+            Some(id_token) => jar.add(session_cookie(
+                ID_COOKIE,
+                id_token.clone(),
+                SESSION_COOKIE_MAX_AGE_SECS,
+            )),
+            None => jar.add(expired_session_cookie(ID_COOKIE)),
+        }
     }
 
     pub fn clear_session(&self, jar: PrivateCookieJar) -> PrivateCookieJar {
@@ -454,7 +472,7 @@ impl AuthSessionManager {
         auth: &AuthConfig,
         jwks: &JwksCache,
         old_refresh_token: &str,
-        id_token: String,
+        id_token: Option<String>,
     ) -> Result<(TokenSet, Claims), String> {
         self.coordinate_refresh(old_refresh_token, || async move {
             let response = self
@@ -484,26 +502,54 @@ impl AuthSessionManager {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<(TokenSet, Claims), String>>,
     {
-        let fingerprint: [u8; 32] = Sha256::digest(old_refresh_token.as_bytes()).into();
-        let mut cache = self.refresh_cache.lock().await;
-        let now = Instant::now();
-        cache.retain(|_, entry| entry.expires_at > now);
-        if let Some(entry) = cache.get(&fingerprint) {
-            return Ok((entry.session.clone(), entry.claims.clone()));
+        let fingerprint = refresh_fingerprint(old_refresh_token);
+        let gate = {
+            let mut state = self.refresh_state.lock().await;
+            prune_refresh_state(&mut state, Instant::now());
+            refresh_gate(&mut state, fingerprint)
+        };
+        let _gate = gate.lock().await;
+
+        // Recheck after acquiring the token-specific gate: another request may
+        // have completed the exchange, or logout may have tombstoned it, while
+        // this request waited.
+        {
+            let mut state = self.refresh_state.lock().await;
+            prune_refresh_state(&mut state, Instant::now());
+            if state.invalidated.contains_key(&fingerprint) {
+                return Err("refresh session was invalidated by logout".to_string());
+            }
+            if let Some(entry) = state.cache.get(&fingerprint) {
+                return Ok((entry.session.clone(), entry.claims.clone()));
+            }
         }
 
+        // Only this token's gate is held across provider I/O; unrelated
+        // refresh-token fingerprints can exchange concurrently.
         let (session, claims) = exchange().await?;
 
-        if cache.len() >= REFRESH_CACHE_MAX_ENTRIES {
-            if let Some(oldest) = cache
+        let now = Instant::now();
+        let mut state = self.refresh_state.lock().await;
+        prune_refresh_state(&mut state, now);
+        if state.invalidated.contains_key(&fingerprint)
+            || state
+                .invalidated
+                .contains_key(&refresh_fingerprint(&session.refresh_token))
+        {
+            return Err("rotated refresh session was invalidated by logout".to_string());
+        }
+
+        if state.cache.len() >= REFRESH_CACHE_MAX_ENTRIES {
+            if let Some(oldest) = state
+                .cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.expires_at)
                 .map(|(key, _)| *key)
             {
-                cache.remove(&oldest);
+                state.cache.remove(&oldest);
             }
         }
-        cache.insert(
+        state.cache.insert(
             fingerprint,
             CachedRefresh {
                 session: session.clone(),
@@ -512,6 +558,88 @@ impl AuthSessionManager {
             },
         );
         Ok((session, claims))
+    }
+
+    /// Remove and tombstone every cached rotation connected to a token being
+    /// logged out. Returns the raw tokens still available in cache so the
+    /// caller can best-effort revoke the active end of the rotation chain.
+    pub async fn invalidate_refresh_chain(&self, refresh_token: &str) -> Vec<String> {
+        let root_fingerprint = refresh_fingerprint(refresh_token);
+        let gate = {
+            let mut state = self.refresh_state.lock().await;
+            prune_refresh_state(&mut state, Instant::now());
+            refresh_gate(&mut state, root_fingerprint)
+        };
+        let _gate = gate.lock().await;
+
+        let now = Instant::now();
+        let expires_at = now + REFRESH_INVALIDATION_TTL;
+        let mut state = self.refresh_state.lock().await;
+        prune_refresh_state(&mut state, now);
+
+        let mut fingerprints = vec![root_fingerprint];
+        let mut revoke_tokens = vec![refresh_token.to_string()];
+
+        // Follow both directions: the supplied cookie may be the old token
+        // that keyed a cached rotation or the new token stored in its value.
+        loop {
+            let connected = fingerprints
+                .iter()
+                .find(|fingerprint| state.cache.contains_key(*fingerprint))
+                .copied()
+                .or_else(|| {
+                    state
+                        .cache
+                        .iter()
+                        .find(|(_, entry)| {
+                            fingerprints
+                                .contains(&refresh_fingerprint(&entry.session.refresh_token))
+                        })
+                        .map(|(fingerprint, _)| *fingerprint)
+                });
+            let Some(fingerprint) = connected else {
+                break;
+            };
+            let entry = state
+                .cache
+                .remove(&fingerprint)
+                .expect("connected refresh entry must still exist");
+            if !fingerprints.contains(&fingerprint) {
+                fingerprints.push(fingerprint);
+            }
+            let rotated_fingerprint = refresh_fingerprint(&entry.session.refresh_token);
+            if !fingerprints.contains(&rotated_fingerprint) {
+                fingerprints.push(rotated_fingerprint);
+            }
+            if !revoke_tokens.contains(&entry.session.refresh_token) {
+                revoke_tokens.push(entry.session.refresh_token);
+            }
+        }
+
+        for fingerprint in fingerprints {
+            if state.invalidated.len() >= REFRESH_INVALIDATION_MAX_ENTRIES {
+                if let Some(oldest) = state
+                    .invalidated
+                    .iter()
+                    .min_by_key(|(_, expiry)| *expiry)
+                    .map(|(fingerprint, _)| *fingerprint)
+                {
+                    state.invalidated.remove(&oldest);
+                }
+            }
+            state.invalidated.insert(fingerprint, expires_at);
+        }
+
+        revoke_tokens
+    }
+
+    pub async fn refresh_was_invalidated(&self, refresh_token: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.refresh_state.lock().await;
+        state.invalidated.retain(|_, expiry| *expiry > now);
+        state
+            .invalidated
+            .contains_key(&refresh_fingerprint(refresh_token))
     }
 
     pub async fn revoke_refresh_token(
@@ -543,6 +671,25 @@ impl AuthSessionManager {
             ))
         }
     }
+}
+
+fn refresh_fingerprint(refresh_token: &str) -> [u8; 32] {
+    Sha256::digest(refresh_token.as_bytes()).into()
+}
+
+fn prune_refresh_state(state: &mut RefreshState, now: Instant) {
+    state.cache.retain(|_, entry| entry.expires_at > now);
+    state.invalidated.retain(|_, expiry| *expiry > now);
+    state.gates.retain(|_, gate| gate.strong_count() > 0);
+}
+
+fn refresh_gate(state: &mut RefreshState, fingerprint: [u8; 32]) -> Arc<Mutex<()>> {
+    if let Some(gate) = state.gates.get(&fingerprint).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let gate = Arc::new(Mutex::new(()));
+    state.gates.insert(fingerprint, Arc::downgrade(&gate));
+    gate
 }
 
 fn session_cookie(name: &'static str, value: String, max_age_secs: i64) -> Cookie<'static> {
@@ -842,6 +989,25 @@ pub async fn auth_middleware(
         .expect("auth_sessions must be present when auth is configured");
     let jar = sessions.cookie_jar(&headers);
     let access_token = sessions.read_access_token(&jar);
+    let refresh_token = sessions.read_refresh_token(&jar);
+
+    // A response that was already in flight when logout ran may arrive after
+    // the browser processed the clear-cookie response. Refuse the tombstoned
+    // refresh chain even if that late response restored a still-valid access
+    // cookie, and clear it again immediately.
+    if let Some(refresh_token) = refresh_token.as_deref() {
+        if sessions.refresh_was_invalidated(refresh_token).await {
+            let jar = sessions.clear_session(jar);
+            return (
+                jar,
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "session was invalidated by logout",
+                ),
+            )
+                .into_response();
+        }
+    }
 
     // A healthy access token outside the refresh window remains on the fast
     // path: validate locally and serve without emitting Set-Cookie.
@@ -863,20 +1029,24 @@ pub async fn auth_middleware(
 
     // Access token is absent, expired, or close to expiry. A complete refresh
     // session can recover even after a long-idle browser has dropped `auth`.
-    let Some(refresh_token) = sessions.read_refresh_token(&jar) else {
+    let Some(refresh_token) = refresh_token else {
         let jar = sessions.clear_session(jar);
         return (jar, (StatusCode::UNAUTHORIZED, "missing refresh token")).into_response();
     };
-    let Some(id_token) = sessions.read_id_token(&jar) else {
-        let jar = sessions.clear_session(jar);
-        return (jar, (StatusCode::UNAUTHORIZED, "missing ID token")).into_response();
-    };
+    let id_token = sessions.read_id_token(&jar);
 
     match sessions.refresh(auth, jwks, &refresh_token, id_token).await {
         Ok((session, claims)) => {
             req.extensions_mut().insert(claims);
             let response = next.run(req).await;
-            let jar = sessions.write_session(jar, &session);
+            let jar = if sessions
+                .refresh_was_invalidated(&session.refresh_token)
+                .await
+            {
+                sessions.clear_session(jar)
+            } else {
+                sessions.write_session(jar, &session)
+            };
             (jar, response).into_response()
         }
         Err(error) => {
@@ -954,7 +1124,7 @@ mod tests {
         TokenSet {
             access_token: "access-token".to_string(),
             refresh_token: "rotated-refresh-token".to_string(),
-            id_token: "id-token".to_string(),
+            id_token: Some("id-token".to_string()),
             access_expires_in: 900,
         }
     }
@@ -1028,12 +1198,22 @@ mod tests {
             id_token: None,
             expires_in: Some(900),
         }
-        .into_refreshed("original-id".to_string())
+        .into_refreshed(Some("original-id".to_string()))
         .unwrap();
 
         assert_eq!(refreshed.access_token, "new-access");
         assert_eq!(refreshed.refresh_token, "new-refresh");
-        assert_eq!(refreshed.id_token, "original-id");
+        assert_eq!(refreshed.id_token.as_deref(), Some("original-id"));
+
+        let without_hint = TokenEndpointResponse {
+            access_token: "new-access".to_string(),
+            refresh_token: Some("new-refresh".to_string()),
+            id_token: None,
+            expires_in: Some(900),
+        }
+        .into_refreshed(None)
+        .unwrap();
+        assert!(without_hint.id_token.is_none());
     }
 
     #[test]
@@ -1127,6 +1307,98 @@ mod tests {
             assert_eq!(returned_claims.sub, "user");
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unrelated_refresh_tokens_exchange_concurrently() {
+        let manager = Arc::new(test_manager());
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+
+        for refresh_token in ["refresh-a", "refresh-b"] {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            let started_tx = started_tx.clone();
+            tasks.push(tokio::spawn(async move {
+                manager
+                    .coordinate_refresh(refresh_token, || async move {
+                        started_tx.send(refresh_token).unwrap();
+                        barrier.wait().await;
+                        Ok((token_set(), claims()))
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+        drop(started_tx);
+
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            assert!(started_rx.recv().await.is_some());
+            assert!(started_rx.recv().await.is_some());
+        })
+        .await
+        .expect("unrelated refresh exchanges should both start");
+        barrier.wait().await;
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn logout_invalidates_an_in_flight_refresh_chain_before_waiters_replay_it() {
+        let manager = Arc::new(test_manager());
+        let (exchange_started_tx, exchange_started_rx) = tokio::sync::oneshot::channel();
+        let (finish_exchange_tx, finish_exchange_rx) = tokio::sync::oneshot::channel();
+
+        let first_manager = manager.clone();
+        let first = tokio::spawn(async move {
+            first_manager
+                .coordinate_refresh("old-refresh-token", || async move {
+                    exchange_started_tx.send(()).unwrap();
+                    finish_exchange_rx.await.unwrap();
+                    Ok((token_set(), claims()))
+                })
+                .await
+        });
+        exchange_started_rx.await.unwrap();
+
+        // The same-token gate is FIFO: queue logout before the waiter so it
+        // removes and tombstones the just-created cache entry first.
+        let logout_manager = manager.clone();
+        let logout = tokio::spawn(async move {
+            logout_manager
+                .invalidate_refresh_chain("old-refresh-token")
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let waiter_manager = manager.clone();
+        let waiter_calls = replay_calls.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_manager
+                .coordinate_refresh("old-refresh-token", || async move {
+                    waiter_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok((token_set(), claims()))
+                })
+                .await
+        });
+
+        finish_exchange_tx.send(()).unwrap();
+        assert!(first.await.unwrap().is_ok());
+        let revoked = logout.await.unwrap();
+        assert!(revoked.contains(&"old-refresh-token".to_string()));
+        assert!(revoked.contains(&"rotated-refresh-token".to_string()));
+        assert!(waiter.await.unwrap().is_err());
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+        assert!(manager.refresh_was_invalidated("old-refresh-token").await);
+        assert!(
+            manager
+                .refresh_was_invalidated("rotated-refresh-token")
+                .await
+        );
     }
 
     #[test]
