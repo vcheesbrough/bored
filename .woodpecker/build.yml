@@ -1,6 +1,7 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push/manual: compute-version → build → e2e → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev-1.31.0
-# Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → push → deploy-* → tag-release-*
+# Push/manual: compute-version → build → e2e → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+# Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → verify-image → deploy-* → tag-release-*
+#   verify-image pulls the artifact the push pipeline already built+tested for this commit; it does NOT rebuild (card #254).
 #
 # Release mechanics (see card #176):
 #   - compute-version (plugin) allocates/reuses ONE semver per commit, before build.
@@ -125,7 +126,13 @@ steps:
         AUTHENTIK_BORED_DEV_CLIENT_SECRET:
           from_secret: bored_dev_oidc_client_secret
 
-  push:
+  verify-image:
+    # A deployment promotes the artifact the push-event pipeline already built,
+    # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
+    # #254). compute-version reuses one semver per commit, so the tag we pull
+    # here is byte-identical to what e2e validated and what dev is running.
+    # Pull it and re-assert its OCI labels; fail loudly (fail-closed) if it is
+    # absent, which means this commit never completed build/e2e.
     when:
       - event: deployment
     depends_on:
@@ -138,27 +145,29 @@ steps:
       - *docker-login
       - |
         RELEASE_TAG=$$(cat .release-tag)
-        CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
         IMAGE=registry.desync.link/bored:$$RELEASE_TAG
-        docker build \
-          --build-arg RELEASE_TAG="$$RELEASE_TAG" \
-          --label org.opencontainers.image.version="$$RELEASE_TAG" \
-          --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
-          --label org.opencontainers.image.created="$$CREATED" \
-          -t "$$IMAGE" .
+        if ! docker pull "$$IMAGE"; then
+          echo "ERROR: $$IMAGE not found in registry." >&2
+          echo "The push-event pipeline (build + e2e) must succeed for this commit before it can be deployed." >&2
+          echo "Merge/push the commit to main and let its pipeline finish, then re-run this deployment." >&2
+          exit 1
+        fi
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        docker push "$$IMAGE"
 
   deploy-dev:
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
-      - push
+      - verify-image
       - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
-    environment:
+    # The dev deploy env + commands are shared verbatim with auto-deploy-dev
+    # (the push-event path) via these anchors, so the two triggers cannot drift.
+    # (A single merged step would need `optional: true` step deps, which this
+    # Woodpecker version's config parser rejects — see card #254 notes.)
+    environment: &dev-deploy-env
       REGISTRY_USER:
         from_secret: zot_ci_user
       REGISTRY_PASSWORD:
@@ -167,7 +176,7 @@ steps:
         from_secret: bored_dev_oidc_client_secret
       SESSION_COOKIE_KEY:
         from_secret: bored_dev_session_cookie_key
-    commands:
+    commands: &dev-deploy-commands
       - *docker-login
       - docker volume create bored-dev-db
       - |
@@ -187,7 +196,7 @@ steps:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
-      - push
+      - verify-image
       - apply-authentik-blueprint
     image: *docker-image
     volumes: *docker-socket
@@ -225,31 +234,12 @@ steps:
       - apply-authentik-blueprint-auto-dev
     image: *docker-image
     volumes: *docker-socket
-    environment:
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-      OIDC_CLIENT_SECRET:
-        from_secret: bored_dev_oidc_client_secret
-      SESSION_COOKIE_KEY:
-        from_secret: bored_dev_session_cookie_key
-    commands:
-      - *docker-login
-      - docker volume create bored-dev-db
-      - |
-        BORED_IMAGE_TAG=$(cat .release-tag) \
-        APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
-        BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
-        OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-dev/ \
-        OIDC_CLIENT_ID=bored-browser-dev \
-        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
-        OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
-        REQUIRED_SCOPE=bored:dev:access \
-        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
-        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
+    # Same dev deploy as deploy-dev, only triggered automatically on push —
+    # env and commands are the shared anchors defined on deploy-dev above.
+    environment: *dev-deploy-env
+    commands: *dev-deploy-commands
 
-  tag-release-auto-dev-1.31.0:
+  tag-release-auto-dev:
     when:
       - event: [push, manual]
     depends_on:
