@@ -155,41 +155,42 @@ steps:
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
   deploy-dev:
+    # Everything a dev deploy needs except its trigger lives in &dev-deploy-base,
+    # merged (`<<`) into both this step and auto-deploy-dev, so the two triggers
+    # differ ONLY in when/depends_on and can never drift. (A single merged step
+    # would need `optional: true` deps, which this Woodpecker rejects — card #254.)
+    <<: &dev-deploy-base
+      image: *docker-image
+      volumes: *docker-socket
+      environment:
+        REGISTRY_USER:
+          from_secret: zot_ci_user
+        REGISTRY_PASSWORD:
+          from_secret: zot_ci_password
+        OIDC_CLIENT_SECRET:
+          from_secret: bored_dev_oidc_client_secret
+        SESSION_COOKIE_KEY:
+          from_secret: bored_dev_session_cookie_key
+      commands:
+        - *docker-login
+        - docker volume create bored-dev-db
+        - |
+          BORED_IMAGE_TAG=$(cat .release-tag) \
+          APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
+          BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
+          OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-dev/ \
+          OIDC_CLIENT_ID=bored-browser-dev \
+          OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
+          OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
+          REQUIRED_SCOPE=bored:dev:access \
+          OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
+          docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - verify-image
       - apply-authentik-blueprint
-    image: *docker-image
-    volumes: *docker-socket
-    # The dev deploy env + commands are shared verbatim with auto-deploy-dev
-    # (the push-event path) via these anchors, so the two triggers cannot drift.
-    # (A single merged step would need `optional: true` step deps, which this
-    # Woodpecker version's config parser rejects — see card #254 notes.)
-    environment: &dev-deploy-env
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
-      OIDC_CLIENT_SECRET:
-        from_secret: bored_dev_oidc_client_secret
-      SESSION_COOKIE_KEY:
-        from_secret: bored_dev_session_cookie_key
-    commands: &dev-deploy-commands
-      - *docker-login
-      - docker volume create bored-dev-db
-      - |
-        BORED_IMAGE_TAG=$(cat .release-tag) \
-        APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
-        BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
-        OIDC_ISSUER_URL=https://auth.desync.link/application/o/bored-dev/ \
-        OIDC_CLIENT_ID=bored-browser-dev \
-        OIDC_CLIENT_SECRET=$$OIDC_CLIENT_SECRET \
-        OIDC_REDIRECT_URI=https://bored-dev.desync.link/auth/callback \
-        REQUIRED_SCOPE=bored:dev:access \
-        OIDC_END_SESSION_URL=https://auth.desync.link/application/o/bored-dev/end-session/ \
-        docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
   deploy-prod:
     when:
@@ -227,51 +228,43 @@ steps:
         docker compose -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
   auto-deploy-dev:
+    # Same dev deploy as deploy-dev (via <<: *dev-deploy-base), fired on push.
+    <<: *dev-deploy-base
     when:
       - event: [push, manual]
     depends_on:
       - compute-version
       - apply-authentik-blueprint-auto-dev
-    image: *docker-image
-    volumes: *docker-socket
-    # Same dev deploy as deploy-dev, only triggered automatically on push —
-    # env and commands are the shared anchors defined on deploy-dev above.
-    environment: *dev-deploy-env
-    commands: *dev-deploy-commands
 
   tag-release-auto-dev:
+    # All three tag-release steps share pull/image/settings via &tag-release-base
+    # (push-tag mode is idempotent — a no-op if the commit is already tagged);
+    # they differ only in when/depends_on.
+    <<: &tag-release-base
+      pull: true
+      image: *version-plugin
+      settings:
+        mode: push-tag
+        major_minor_source: cargo
+        github_token:
+          from_secret: github_token
     when:
       - event: [push, manual]
     depends_on:
       - auto-deploy-dev
-    pull: true
-    image: *version-plugin
-    settings:
-      mode: push-tag
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
 
   tag-release-dev:
+    <<: *tag-release-base
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - deploy-dev
-    pull: true
-    image: *version-plugin
-    settings: &push-tag-settings
-      mode: push-tag
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
 
   tag-release-prod:
+    <<: *tag-release-base
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
       - deploy-prod
-    pull: true
-    image: *version-plugin
-    settings: *push-tag-settings
