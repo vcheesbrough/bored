@@ -3,6 +3,12 @@ services:
     image: registry.desync.link/bored:${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}
     container_name: ${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}
     restart: unless-stopped
+    # Run tini as PID 1 (docker injects it) so orphaned children are reaped.
+    # The backend runs as PID 1 without an init and cannot reap zombies; the
+    # 10s healthcheck's wget shells out to `openssl s_client` for TLS (busybox
+    # here has no ssl_client applet), and each orphaned openssl leaks a
+    # permanent defunct process. tini reaps them regardless of the TLS helper.
+    init: true
     environment:
       - APP_ENV=${APP_ENV:?APP_ENV is required}
       # Optional runtime override; when unset the backend reports the RELEASE_TAG
