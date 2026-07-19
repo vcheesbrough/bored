@@ -333,11 +333,3 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - deploy-dev
-
-  tag-release-prod:
-    <<: *tag-release-base
-    when:
-      - event: deployment
-        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
-    depends_on:
-      - deploy-prod
