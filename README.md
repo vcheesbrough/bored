@@ -52,11 +52,12 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 **On every push or manual run**:
 
 1. **compute-version** — `woodpecker-plugin-release-versions` (`compute` mode) writes `.release-tag`.
-2. **build** — builds, verifies, and pushes the production image tagged with `.release-tag`. Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test --lib`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
-3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC + the freshly-built image + Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
-4. **apply-authentik-blueprint-auto-dev** — synchronises the development-only Authentik configuration from [`authentik/blueprint-dev.yaml`](authentik/blueprint-dev.yaml) before rollout; the full dev-and-prod blueprint remains deployment-only.
-5. **auto-deploy-dev** — deploys the tested image to the development environment.
-6. **tag-release-auto-dev** — creates and pushes the git tag matching `.release-tag` after the successful dev deployment.
+2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test --lib`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
+3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC + the freshly-built local image + Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
+4. **publish-image** — pushes the `.release-tag` image to `registry.desync.link` **only after e2e passes**, so the registry never holds an image from a red e2e run (this is what makes the deployment-path `verify-image` existence check a genuine e2e-tested gate).
+5. **apply-authentik-blueprint-auto-dev** — synchronises the development-only Authentik configuration from [`authentik/blueprint-dev.yaml`](authentik/blueprint-dev.yaml) before rollout; the full dev-and-prod blueprint remains deployment-only.
+6. **auto-deploy-dev** — deploys the tested image to the development environment.
+7. **tag-release-auto-dev** — creates and pushes the git tag matching `.release-tag` after the successful dev deployment.
 
 **On a manual deployment event** (`CI_PIPELINE_DEPLOY_TARGET=dev|prod`):
 
