@@ -1,11 +1,13 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
 # Push/manual: compute-version → build(local, no push) → e2e → (publish-image ∥ apply-authentik-blueprint-auto-dev) → auto-deploy-dev → tag-release-auto-dev
 #   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
-# Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → verify-image → deploy-* → tag-release-*
-#   verify-image pulls the artifact the push pipeline already built+tested for this commit; it does NOT rebuild (card #254).
+# Deploy: validate-deployment → resolve-release-tag → apply-authentik-blueprint → verify-image → deploy-* → tag-release-*
+#   Deployments do NOT allocate a version — resolve-release-tag reads the commit's already-built git tag; verify-image
+#   pulls that exact artifact and does NOT rebuild (card #254).
 #
 # Release mechanics (see card #176):
-#   - compute-version (plugin) allocates/reuses ONE semver per commit, before build.
+#   - compute-version (plugin) allocates/reuses ONE semver per commit — on the PUSH pipeline only.
+#   - Deployments (dev/prod) resolve that already-built tag from the commit's git tag; they never allocate (card #254).
 #   - RELEASE_TAG is burned into the image (build-arg) and used as the single
 #     docker tag; the git tag pushed after deploy is byte-identical.
 #   - Git tagging happens after a successful dev OR prod deploy.
@@ -15,8 +17,13 @@ when:
 
 steps:
   compute-version:
+    # Allocates/reuses ONE semver per commit — ONLY on the push pipeline, which
+    # is the single place a version is minted. Deployments must NOT allocate:
+    # they resolve the already-built tag via resolve-release-tag instead (a
+    # deployment re-running compute allocated an unbuilt tag and broke prod
+    # deploys — card #254).
     when:
-      - event: [push, deployment, manual]
+      - event: [push, manual]
     depends_on: []
     pull: true
     image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.0@sha256:81a29c3a5785c146b5b3dfd7e0d8e7edb353b72e4e53bdbef4f7e13a88488c59
@@ -148,19 +155,58 @@ steps:
         AUTHENTIK_BORED_DEV_CLIENT_SECRET:
           from_secret: bored_dev_oidc_client_secret
 
-  verify-image:
-    # A deployment promotes the artifact the push-event pipeline already built,
-    # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
-    # #254). compute-version reuses one semver per commit, so the tag we pull
-    # here is byte-identical to what e2e validated and what dev is running.
-    # Because publish-image only pushes AFTER e2e passes, the tag existing in the
-    # registry *is* the e2e-passed signal — a red e2e run never publishes it.
-    # Pull it and re-assert its OCI labels; fail loudly (fail-closed) if it is
-    # absent, which means this commit never completed build/e2e.
+  resolve-release-tag:
+    # A deployment promotes the EXACT version the main push pipeline already
+    # built, e2e-tested, and dev-deployed for this commit — it must NEVER
+    # allocate a new one. (compute-version does allocation and now runs on the
+    # push pipeline only; re-allocating on a deployment produced an unbuilt tag
+    # like :1.35.4 and broke prod deploys — card #254.) The version is the semver
+    # git tag tag-release-auto-dev pushed onto this commit after its main
+    # build+e2e+dev-deploy. Resolve it into .release-tag; fail closed if the
+    # commit was never built/dev-deployed on main (no tag).
     when:
       - event: deployment
     depends_on:
-      - compute-version
+      - validate-deployment
+    image: *docker-image
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - |
+        apk add --no-cache git >/dev/null
+        git config --global --add safe.directory '*'
+        # Fast path: a semver tag on HEAD already present from the clone.
+        RELEASE_TAG=$$(git tag --points-at HEAD 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1)
+        # Fallback (private repo): query the remote without fetching objects.
+        # For annotated tags the dereferenced (^{}) line carries the commit sha.
+        if [ -z "$$RELEASE_TAG" ]; then
+          RELEASE_TAG=$$(git ls-remote --tags "https://x-access-token:$$GITHUB_TOKEN@github.com/$$CI_REPO" \
+            | awk -v sha="$$CI_COMMIT_SHA" '{ ref=$$2; sub("refs/tags/","",ref); sub(/\^\{\}$$/,"",ref) } $$1==sha && ref ~ /^[0-9]+\.[0-9]+\.[0-9]+$$/ { print ref }' \
+            | sort -V | tail -1)
+        fi
+        if [ -z "$$RELEASE_TAG" ]; then
+          echo "ERROR: commit $$CI_COMMIT_SHA has no release tag." >&2
+          echo "A commit must finish the main push pipeline (build + e2e + dev deploy -> git tag) before it can be deployed." >&2
+          exit 1
+        fi
+        printf '%s' "$$RELEASE_TAG" > .release-tag
+        echo "Deploying release $$RELEASE_TAG (resolved from the main build/dev-deploy; no re-allocation)."
+
+  verify-image:
+    # A deployment promotes the artifact the push-event pipeline already built,
+    # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
+    # #254). resolve-release-tag pins .release-tag to the commit's already-built
+    # version, so the tag we pull here is byte-identical to what e2e validated
+    # and what dev is running. Because publish-image only pushes AFTER e2e passes,
+    # the tag existing in the registry *is* the e2e-passed signal — a red e2e run
+    # never publishes it. Pull it and re-assert its OCI labels; fail loudly
+    # (fail-closed) if it is absent, which means this commit never completed
+    # build/e2e.
+    when:
+      - event: deployment
+    depends_on:
+      - resolve-release-tag
       - validate-deployment
     image: *docker-image
     volumes: *docker-socket
