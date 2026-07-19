@@ -1,5 +1,6 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push/manual: compute-version → build → e2e → apply-authentik-blueprint-auto-dev → auto-deploy-dev → tag-release-auto-dev
+# Push/manual: compute-version → build(local, no push) → e2e → (publish-image ∥ apply-authentik-blueprint-auto-dev) → auto-deploy-dev → tag-release-auto-dev
+#   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
 # Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → verify-image → deploy-* → tag-release-*
 #   verify-image pulls the artifact the push pipeline already built+tested for this commit; it does NOT rebuild (card #254).
 #
@@ -26,6 +27,13 @@ steps:
         from_secret: github_token
 
   build:
+    # Build the image and validate its OCI labels LOCALLY — do not push yet.
+    # The push is deferred to publish-image, which runs only after e2e passes, so
+    # the registry never holds an image from a red e2e run and verify-image's
+    # existence check on the deploy path becomes a real e2e gate (PR #47 review).
+    # build/e2e/publish-image share one Woodpecker agent + docker daemon, so the
+    # image built here is available to e2e and publish-image without a registry
+    # round-trip. Base images are public, so no registry login is needed here.
     when:
       - event: [push, manual]
     depends_on:
@@ -33,13 +41,7 @@ steps:
     image: &docker-image docker:27-cli@sha256:f56779b4e86550493153cc8642c9c8e40b5d934e43cb5b4ea463aea5245c5c01
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
-    environment: &registry-creds
-      REGISTRY_USER:
-        from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
-        from_secret: zot_ci_password
     commands:
-      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - |
         RELEASE_TAG=$$(cat .release-tag)
         CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -51,7 +53,6 @@ steps:
           --label org.opencontainers.image.created="$$CREATED" \
           -t "$$IMAGE" .
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-        docker push "$$IMAGE"
 
   e2e:
     when:
@@ -68,6 +69,27 @@ steps:
         REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
         echo "Test report: $$REPORT/index.html"
         exit $$RC
+
+  publish-image:
+    # Push the built + validated image to the registry ONLY after e2e is green,
+    # so the registry never contains an image from a red e2e run. This is what
+    # makes verify-image's "can the tag be pulled" check on the deployment path a
+    # genuine e2e-tested gate (card #254 / PR #47 review). Runs on the same agent
+    # and docker daemon as build, so it pushes the exact image build produced.
+    when:
+      - event: [push, manual]
+    depends_on:
+      - e2e
+    image: *docker-image
+    volumes: *docker-socket
+    environment: &registry-creds
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+    commands:
+      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
+      - docker push registry.desync.link/bored:$$(cat .release-tag)
 
   validate-deployment:
     when:
@@ -131,6 +153,8 @@ steps:
     # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
     # #254). compute-version reuses one semver per commit, so the tag we pull
     # here is byte-identical to what e2e validated and what dev is running.
+    # Because publish-image only pushes AFTER e2e passes, the tag existing in the
+    # registry *is* the e2e-passed signal — a red e2e run never publishes it.
     # Pull it and re-assert its OCI labels; fail loudly (fail-closed) if it is
     # absent, which means this commit never completed build/e2e.
     when:
@@ -149,7 +173,7 @@ steps:
         if ! docker pull "$$IMAGE"; then
           echo "ERROR: $$IMAGE not found in registry." >&2
           echo "The push-event pipeline (build + e2e) must succeed for this commit before it can be deployed." >&2
-          echo "Merge/push the commit to main and let its pipeline finish, then re-run this deployment." >&2
+          echo "Push the commit and let its build + e2e pipeline finish (prod additionally requires it be on main), then re-run this deployment." >&2
           exit 1
         fi
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
@@ -229,12 +253,15 @@ steps:
 
   auto-deploy-dev:
     # Same dev deploy as deploy-dev (via <<: *dev-deploy-base), fired on push.
+    # Depends on publish-image because the deploy pulls the image from the
+    # registry (`--pull always`), so it must be pushed (post-e2e) first.
     <<: *dev-deploy-base
     when:
       - event: [push, manual]
     depends_on:
       - compute-version
       - apply-authentik-blueprint-auto-dev
+      - publish-image
 
   tag-release-auto-dev:
     # All three tag-release steps share pull/image/settings via &tag-release-base
