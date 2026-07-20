@@ -34,6 +34,68 @@ test.describe('simple search', () => {
     await expect(page.locator('.card-item')).toHaveCount(3);
   });
 
+  test('clear button appears only with a query and resets the search', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-clear-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    await apiCreateCard(request, col.id, 'Deploy checklist');
+    await apiCreateCard(request, col.id, 'Release notes');
+
+    await gotoBoardView(page, board.name);
+    const search = page.locator('.navbar-search-input');
+    const clear = page.locator('.navbar-search-clear');
+
+    // Hidden while the box is empty.
+    await expect(clear).toHaveCount(0);
+
+    await search.fill('deploy');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    await expect(clear).toBeVisible();
+
+    await clear.click();
+    // Clearing empties the query, restores every card, refocuses the input, and
+    // hides the button again.
+    await expect(search).toHaveValue('');
+    await expect(page.locator('.card-item')).toHaveCount(2);
+    await expect(search).toBeFocused();
+    await expect(clear).toHaveCount(0);
+  });
+
+  test('Enter focuses the search box so searching is mouse-free', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-enter-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    await apiCreateCard(request, col.id, 'Deploy checklist');
+    await apiCreateCard(request, col.id, 'Release notes');
+
+    await gotoBoardView(page, board.name);
+    await expect(page.locator('.card-item')).toHaveCount(2);
+
+    // With nothing interactive focused, Enter jumps into the search box; typing
+    // then filters without ever touching the mouse.
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.navbar-search-input')).toBeFocused();
+
+    await page.keyboard.type('deploy');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    await expect(page.locator('.card-item')).toContainText('Deploy checklist');
+  });
+
+  test('Escape clears the query while the search box is focused', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-escape-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    await apiCreateCard(request, col.id, 'Deploy checklist');
+    await apiCreateCard(request, col.id, 'Release notes');
+
+    await gotoBoardView(page, board.name);
+    const search = page.locator('.navbar-search-input');
+
+    await search.fill('deploy');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+
+    await search.press('Escape');
+    await expect(search).toHaveValue('');
+    await expect(page.locator('.card-item')).toHaveCount(2);
+  });
+
   test('hash-prefixed numbers match only the card number', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `search-number-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
