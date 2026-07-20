@@ -131,9 +131,24 @@ pub fn BoardView() -> impl IntoView {
     // Some overlays (the board chooser, a card's right-click context menu) sit
     // above the board without moving DOM focus onto themselves, so the
     // `<body>` check alone would let Enter reach through them. They each mount
-    // a full-viewport backdrop element only while open, so checking for those
-    // backdrops closes that gap without plumbing each overlay's local
-    // open-state signal into this component.
+    // a full-viewport backdrop element while open, so checking for a *visible*
+    // backdrop closes that gap without plumbing each overlay's local
+    // open-state signal into this component. Presence alone isn't enough:
+    // `.chooser-backdrop` stays mounted at all times and is toggled purely via
+    // inline `display`, so each selector is checked independently for that
+    // rather than matched as a single combined query.
+    fn backdrop_visible(selector: &str) -> bool {
+        use wasm_bindgen::JsCast;
+        document()
+            .query_selector(selector)
+            .ok()
+            .flatten()
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+            .is_some_and(|el| {
+                el.style().get_property_value("display").unwrap_or_default() != "none"
+            })
+    }
+
     let enter_focus_listener = StoredValue::new(Some(window_event_listener(
         leptos::ev::keydown,
         move |ev| {
@@ -147,11 +162,8 @@ pub fn BoardView() -> impl IntoView {
             if !on_bare_board {
                 return;
             }
-            let overlay_open = document()
-                .query_selector(".chooser-backdrop, .card-context-menu-backdrop")
-                .ok()
-                .flatten()
-                .is_some();
+            let overlay_open = backdrop_visible(".chooser-backdrop")
+                || backdrop_visible(".card-context-menu-backdrop");
             if overlay_open {
                 return;
             }
