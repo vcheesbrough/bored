@@ -127,6 +127,13 @@ pub fn BoardView() -> impl IntoView {
     // interactive element, we act only when focus rests on the page `<body>`,
     // which is exactly the "nothing is focused" state. Registered once for the
     // life of the view and torn down in `on_cleanup`.
+    //
+    // Some overlays (the board chooser, a card's right-click context menu) sit
+    // above the board without moving DOM focus onto themselves, so the
+    // `<body>` check alone would let Enter reach through them. They each mount
+    // a full-viewport backdrop element only while open, so checking for those
+    // backdrops closes that gap without plumbing each overlay's local
+    // open-state signal into this component.
     let enter_focus_listener = StoredValue::new(Some(window_event_listener(
         leptos::ev::keydown,
         move |ev| {
@@ -138,6 +145,14 @@ pub fn BoardView() -> impl IntoView {
                 Some(active) => active.tag_name().eq_ignore_ascii_case("body"),
             };
             if !on_bare_board {
+                return;
+            }
+            let overlay_open = document()
+                .query_selector(".chooser-backdrop, .card-context-menu-backdrop")
+                .ok()
+                .flatten()
+                .is_some();
+            if overlay_open {
                 return;
             }
             // Prevent default so the keypress doesn't also trigger any latent
