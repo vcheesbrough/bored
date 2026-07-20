@@ -70,7 +70,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends busybox-static ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=backend-builder /tmp/backend ./backend
+COPY --from=backend-builder /tmp/backend ./bored-backend
 COPY --from=frontend-builder /app/frontend/dist ./dist
 RUN openssl req -x509 -newkey rsa:4096 \
         -keyout /app/key.pem \
@@ -84,4 +84,4 @@ ENV STATIC_DIR=/app/dist
 EXPOSE 443
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD ["busybox", "wget", "--quiet", "--spider", "--no-check-certificate", "https://localhost:443/health"]
-CMD ["./backend"]
+CMD ["./bored-backend"]
