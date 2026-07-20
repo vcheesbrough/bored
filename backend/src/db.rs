@@ -11,20 +11,33 @@ use surrealdb::{
     Surreal,
 };
 
-// How often the embedded engine runs each of its tunable background maintenance
-// tasks. SurrealDB's local engine spawns several always-on tasks (node-membership
-// heartbeat/refresh, expiry, cleanup, and changefeed GC) that fire on fixed timers
-// regardless of whether any client is connected. Their defaults are tuned for a
-// clustered multi-node deployment — refresh defaults to every *3 seconds*, which
-// writes a node-heartbeat row (a KV transaction + fsync) on every tick. For a
-// single embedded node that work is wasted and shows up as continuous idle CPU.
+// SurrealDB's local engine spawns several always-on background tasks (node-membership
+// heartbeat/refresh, expiry-check, cleanup, and changefeed GC) that fire on fixed
+// timers regardless of whether any client is connected. Their defaults are tuned for
+// a clustered multi-node deployment — the refresh task defaults to every *3 seconds*
+// and on every tick writes a node-heartbeat row (a KV transaction + fsync) and also
+// refreshes system-usage metrics. For a single embedded node that work is largely
+// wasted and shows up as continuous idle CPU.
 //
-// We are one embedded node with no cluster peers, so liveness churn is irrelevant;
-// stretching every tunable interval to 5 minutes keeps the machinery functional
-// while cutting the heartbeat write rate ~100x. Note the ~5s index-compaction tick
-// is NOT exposed by the embedded `Config` API (only via the standalone server CLI),
-// so it stays as an unavoidable — but here no-op, since we define no SEARCH/full-text
-// indexes — floor. See card #255 for the full investigation.
+// We lengthen these intervals, but the refresh interval CANNOT be stretched freely:
+// SurrealDB's expiry-check archives any node whose heartbeat is older than a
+// hard-coded 30s (`kvs/node.rs`: `n.hb < now - Duration::from_secs(30)`). If refresh
+// ran only every 5 minutes, our own node would look expired for most of each window,
+// and the expiry-check would archive it — flapping archive → cleanup → re-register
+// every cycle (the next refresh revives it via `update_node`). That churn defeats the
+// purpose and is fragile, so we keep refresh comfortably under 30s.
+//
+// - HEARTBEAT_REFRESH_INTERVAL (20s): keeps our node's heartbeat fresh (~10s of margin
+//   below the 30s expiry window even if a tick is delayed), while still cutting the
+//   heartbeat write rate ~7x versus the 3s default.
+// - MAINTENANCE_INTERVAL (300s): the expiry-check, archived-node cleanup, and
+//   changefeed GC are not time-sensitive once the heartbeat stays fresh (a healthy
+//   node is never archived, so the check/cleanup are no-ops), so we run them rarely.
+//
+// The ~5s index-compaction tick is NOT exposed by the embedded `Config` API (only via
+// the standalone server CLI), so it stays as an unavoidable — but here no-op, since we
+// define no SEARCH/full-text indexes — floor. See card #255 for the full investigation.
+const HEARTBEAT_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 
 // Called at startup in production. `path` is a filesystem path like `/data/bored.db`.
@@ -32,11 +45,12 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 // the rest of the app doesn't need to know whether storage is on-disk or in-memory.
 pub async fn connect_persistent(path: &str) -> surrealdb::Result<Surreal<Db>> {
     // Build a config that lengthens the embedded engine's background-maintenance
-    // intervals (see MAINTENANCE_INTERVAL above). Each setter internally does
+    // intervals (see the constants above). Each setter internally does
     // `.filter(|x| !x.is_zero())`, so a non-zero Duration is required to override
     // the default — these intervals can be *lengthened* but never fully disabled.
+    // Refresh stays under the 30s expiry window; the rest run every 5 minutes.
     let config = Config::new()
-        .node_membership_refresh_interval(MAINTENANCE_INTERVAL)
+        .node_membership_refresh_interval(HEARTBEAT_REFRESH_INTERVAL)
         .node_membership_check_interval(MAINTENANCE_INTERVAL)
         .node_membership_cleanup_interval(MAINTENANCE_INTERVAL)
         .changefeed_gc_interval(MAINTENANCE_INTERVAL);
