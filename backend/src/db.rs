@@ -4,18 +4,46 @@
 #[cfg(test)]
 use surrealdb::engine::local::Mem;
 
+use std::time::Duration;
+use surrealdb::opt::Config;
 use surrealdb::{
     engine::local::{Db, SurrealKv}, // `SurrealKv` is the persistent on-disk backend
     Surreal,
 };
 
+// How often the embedded engine runs each of its tunable background maintenance
+// tasks. SurrealDB's local engine spawns several always-on tasks (node-membership
+// heartbeat/refresh, expiry, cleanup, and changefeed GC) that fire on fixed timers
+// regardless of whether any client is connected. Their defaults are tuned for a
+// clustered multi-node deployment — refresh defaults to every *3 seconds*, which
+// writes a node-heartbeat row (a KV transaction + fsync) on every tick. For a
+// single embedded node that work is wasted and shows up as continuous idle CPU.
+//
+// We are one embedded node with no cluster peers, so liveness churn is irrelevant;
+// stretching every tunable interval to 5 minutes keeps the machinery functional
+// while cutting the heartbeat write rate ~100x. Note the ~5s index-compaction tick
+// is NOT exposed by the embedded `Config` API (only via the standalone server CLI),
+// so it stays as an unavoidable — but here no-op, since we define no SEARCH/full-text
+// indexes — floor. See card #255 for the full investigation.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
+
 // Called at startup in production. `path` is a filesystem path like `/data/bored.db`.
 // Returns a `Surreal<Db>` — the generic `Db` type erases the concrete backend so
 // the rest of the app doesn't need to know whether storage is on-disk or in-memory.
 pub async fn connect_persistent(path: &str) -> surrealdb::Result<Surreal<Db>> {
-    // `Surreal::new::<SurrealKv>(path)` opens (or creates) the database file at `path`.
-    // The `?` propagates any connection error up to the caller.
-    let db = Surreal::new::<SurrealKv>(path).await?;
+    // Build a config that lengthens the embedded engine's background-maintenance
+    // intervals (see MAINTENANCE_INTERVAL above). Each setter internally does
+    // `.filter(|x| !x.is_zero())`, so a non-zero Duration is required to override
+    // the default — these intervals can be *lengthened* but never fully disabled.
+    let config = Config::new()
+        .node_membership_refresh_interval(MAINTENANCE_INTERVAL)
+        .node_membership_check_interval(MAINTENANCE_INTERVAL)
+        .node_membership_cleanup_interval(MAINTENANCE_INTERVAL)
+        .changefeed_gc_interval(MAINTENANCE_INTERVAL);
+    // `Surreal::new::<SurrealKv>((path, config))` opens (or creates) the database
+    // file at `path` with the tuned config. The `?` propagates any connection
+    // error up to the caller.
+    let db = Surreal::new::<SurrealKv>((path, config)).await?;
     init(&db).await?;
     Ok(db)
 }
@@ -133,4 +161,53 @@ async fn migrate_board_names(db: &Surreal<Db>) -> surrealdb::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Exercises the real `connect_persistent` path (on-disk SurrealKv + tuned
+    // `Config`), rather than the in-memory `connect_mem` used elsewhere. The goal
+    // is to prove the tuned-`Config` connection still opens, runs `init()` (schema
+    // + migrations), and serves a basic round-trip query — i.e. lengthening the
+    // maintenance intervals didn't break connection setup. We can't assert on the
+    // interval values themselves (the `Config` fields are private and the engine
+    // exposes no getter), so we assert on observable behaviour instead.
+    #[tokio::test]
+    async fn connect_persistent_opens_and_serves_queries() {
+        // A throwaway directory that is deleted when `dir` drops at end of test.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        // SurrealKv stores its files under this path; a subdir keeps it tidy.
+        let path = dir.path().join("bored-db");
+        let path_str = path.to_str().expect("temp path is valid UTF-8");
+
+        // Opening must succeed with the tuned Config and apply the schema via init().
+        let db = connect_persistent(path_str)
+            .await
+            .expect("connect_persistent should open the database");
+
+        // A trivial write+read round-trip proves the connection is usable and the
+        // `boards` table from schema.surql exists. We create one board and read it
+        // back; `.check()` turns any SurrealDB-level error into a test failure.
+        db.query("CREATE boards SET name = 'probe', created_at = time::now()")
+            .await
+            .expect("insert query should execute")
+            .check()
+            .expect("insert should not surface a SurrealDB error");
+
+        #[derive(serde::Deserialize)]
+        struct NameOnly {
+            name: String,
+        }
+        let rows: Vec<NameOnly> = db
+            .query("SELECT name FROM boards")
+            .await
+            .expect("select query should execute")
+            .take(0)
+            .expect("select should deserialize");
+
+        assert_eq!(rows.len(), 1, "expected exactly the one board we inserted");
+        assert_eq!(rows[0].name, "probe");
+    }
 }
