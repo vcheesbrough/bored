@@ -1,3 +1,4 @@
+use leptos::leptos_dom::helpers::window_event_listener;
 use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::prelude::*;
@@ -113,6 +114,74 @@ pub fn BoardView() -> impl IntoView {
     provide_context(ExpandedCardId(expanded_card_id));
     provide_context(DragOverColId(drag_over_col_id));
     provide_context(BoardSearchQuery(search_query));
+
+    // Handle on the navbar search `<input>`, used to focus it programmatically
+    // (Enter-to-focus shortcut below and the clear button's refocus).
+    let search_input_ref = NodeRef::<leptos::html::Input>::new();
+
+    // Enter on the "bare" board — when nothing interactive is focused — jumps
+    // straight into the search input so the whole search flow is mouse-free.
+    // Enter is a normal activation key, so we must *not* steal it from focused
+    // controls, text fields, or open overlays (a card modal, for instance,
+    // parks focus on its container `<div>`). Rather than enumerate every
+    // interactive element, we act only when focus rests on the page `<body>`,
+    // which is exactly the "nothing is focused" state. Registered once for the
+    // life of the view and torn down in `on_cleanup`.
+    //
+    // Some overlays (the board chooser, a card's right-click context menu) sit
+    // above the board without moving DOM focus onto themselves, so the
+    // `<body>` check alone would let Enter reach through them. They each mount
+    // a full-viewport backdrop element while open, so checking for a *visible*
+    // backdrop closes that gap without plumbing each overlay's local
+    // open-state signal into this component. Presence alone isn't enough:
+    // `.chooser-backdrop` stays mounted at all times and is toggled purely via
+    // inline `display`, so each selector is checked independently for that
+    // rather than matched as a single combined query.
+    fn backdrop_visible(selector: &str) -> bool {
+        use wasm_bindgen::JsCast;
+        document()
+            .query_selector(selector)
+            .ok()
+            .flatten()
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+            .is_some_and(|el| {
+                el.style().get_property_value("display").unwrap_or_default() != "none"
+            })
+    }
+
+    let enter_focus_listener = StoredValue::new(Some(window_event_listener(
+        leptos::ev::keydown,
+        move |ev| {
+            if ev.key() != "Enter" {
+                return;
+            }
+            let on_bare_board = match document().active_element() {
+                None => true,
+                Some(active) => active.tag_name().eq_ignore_ascii_case("body"),
+            };
+            if !on_bare_board {
+                return;
+            }
+            let overlay_open = backdrop_visible(".chooser-backdrop")
+                || backdrop_visible(".card-context-menu-backdrop");
+            if overlay_open {
+                return;
+            }
+            // Prevent default so the keypress doesn't also trigger any latent
+            // form submission before we move focus into the search box.
+            ev.prevent_default();
+            if let Some(input) = search_input_ref.get_untracked() {
+                let _ = input.focus();
+            }
+        },
+    )));
+    on_cleanup(move || {
+        enter_focus_listener.update_value(|listener| {
+            if let Some(listener) = listener.take() {
+                listener.remove();
+            }
+        });
+    });
 
     let on_column_drop = Callback::new(move |target_id: String| {
         let DragPayload::Column {
@@ -391,13 +460,44 @@ pub fn BoardView() -> impl IntoView {
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
             <BoardChooser board_name=board_name columns=columns />
-            <input
-                class="navbar-search-input"
-                type="text"
-                placeholder="Search"
-                prop:value=move || search_query.get()
-                on:input=move |ev| search_query.set(event_target_value(&ev))
-            />
+            <div class="navbar-search">
+                <input
+                    node_ref=search_input_ref
+                    class="navbar-search-input"
+                    type="text"
+                    placeholder="Search"
+                    prop:value=move || search_query.get()
+                    on:input=move |ev| search_query.set(event_target_value(&ev))
+                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                        // Esc clears a non-empty query; on an already-empty box it
+                        // steps back out of the search entirely by blurring.
+                        if ev.key() == "Escape" {
+                            if search_query.get_untracked().is_empty() {
+                                if let Some(input) = search_input_ref.get_untracked() {
+                                    let _ = input.blur();
+                                }
+                            } else {
+                                search_query.set(String::new());
+                            }
+                        }
+                    }
+                />
+                <Show when=move || !search_query.get().is_empty() fallback=|| ()>
+                    <button
+                        class="navbar-search-clear"
+                        type="button"
+                        aria-label="Clear search"
+                        title="Clear search"
+                        on:click=move |_| {
+                            search_query.set(String::new());
+                            // Keep the caret in the box so typing can continue.
+                            if let Some(input) = search_input_ref.get_untracked() {
+                                let _ = input.focus();
+                            }
+                        }
+                    >"×"</button>
+                </Show>
+            </div>
             <button
                 class="card-toolbar-btn navbar-history-btn"
                 type="button"
