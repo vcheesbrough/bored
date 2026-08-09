@@ -52,7 +52,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 **On every push or manual run**:
 
 1. **compute-version** — `woodpecker-plugin-release-versions` (`compute` mode) writes `.release-tag`.
-2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test --lib`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
+2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test -p backend -p shared`) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
 3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC + the freshly-built local image + Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
 4. **publish-image** — pushes the `.release-tag` image to `registry.desync.link` **only after e2e passes**, so the registry never holds an image from a red e2e run (this is what makes the deployment-path `verify-image` existence check a genuine e2e-tested gate).
 5. **apply-authentik-blueprint-auto-dev** — synchronises the development-only Authentik configuration from [`authentik/blueprint-dev.yaml`](authentik/blueprint-dev.yaml) before rollout; the full dev-and-prod blueprint remains deployment-only.
@@ -77,17 +77,19 @@ Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but val
 | Secret | Used by |
 |---|---|
 | `zot_ci_user` / `zot_ci_password` | push to `registry.desync.link` |
-| `github_token` | `woodpecker-plugin-release-versions` — remote tag listing + `git push` of release tags |
+| `github_token` | `woodpecker-plugin-release-versions` (remote tag listing + `git push` of release tags) **and** the `build` step's `docker build --secret id=github_token` (fetches the private `sovereign-config-provider` git dependency — see [Runtime configuration](#runtime-configuration)) |
 | `authentik_api_token` | apply-authentik-blueprint (Authentik admin API) |
-| `bored_dev_oidc_client_secret` | deploy-dev + blueprint var `AUTHENTIK_BORED_DEV_CLIENT_SECRET` |
-| `bored_prod_oidc_client_secret` | deploy-prod + blueprint var `AUTHENTIK_BORED_PROD_CLIENT_SECRET` |
+| `bored_dev_oidc_client_secret` | blueprint var `AUTHENTIK_BORED_DEV_CLIENT_SECRET` only — deploy-dev reads the OIDC client secret from sovereign-config now, not this secret directly |
+| `bored_prod_oidc_client_secret` | blueprint var `AUTHENTIK_BORED_PROD_CLIENT_SECRET` only — deploy-prod reads the OIDC client secret from sovereign-config now, not this secret directly |
 | `bored_mcp_prod_client_secret` | blueprint var `AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET` (MCP OAuth client) |
-| `bored_dev_session_cookie_key` | dev AES-256-GCM private-cookie key (base64-encoded 64 random bytes) |
-| `bored_prod_session_cookie_key` | prod AES-256-GCM private-cookie key (base64-encoded 64 random bytes) |
+| `bored_dev_sovereign_access_url` | deploy-dev — read-only sovereign-config connection URL for `/bored/dev/server` |
+| `bored_prod_sovereign_access_url` | deploy-prod — read-only sovereign-config connection URL for `/bored/prod/server` |
 | `claude_oauth_token` | PR review agent |
 | `pr_reviewer_gh_app_id` | PR review agent |
 | `pr_reviewer_gh_app_installation_id` | PR review agent |
 | `pr_reviewer_gh_app_private_key_b64` | PR review agent |
+
+`bored_dev_session_cookie_key` / `bored_prod_session_cookie_key` are retired — the session cookie key now lives at `session/cookie-key` in sovereign-config alongside the rest of runtime config.
 
 ## Deployment
 
@@ -102,38 +104,84 @@ The container runs its own rustls listener on port 443 with a self-signed cert; 
 
 ### Environment variables
 
-All values are injected by the deploy pipeline (inline `environment:` map — there is no `.env` file on the host). The full set lives in [`deploy/docker-compose.yml`](deploy/docker-compose.yml); the highlights are:
+The full set lives in [`deploy/docker-compose.yml`](deploy/docker-compose.yml):
 
 ```
-APP_ENV                 # "production" or the dev branch name
-APP_VERSION             # MAJOR.MINOR.PATCH (or .PATCH-<sha> for dev)
-DATABASE_PATH=/data/bored.db
-LOKI_URL=http://monitor-loki:3100
-OIDC_ISSUER_URL         # https://auth.desync.link/application/o/bored-{dev,prod}/
-OIDC_CLIENT_ID          # bored-browser-{dev,prod}
-OIDC_CLIENT_SECRET      # from Woodpecker secret
-SESSION_COOKIE_KEY      # environment-specific base64-encoded 64-byte random key
-OIDC_REDIRECT_URI       # https://<host>/auth/callback
-OIDC_END_SESSION_URL    # https://auth.desync.link/application/o/bored-{dev,prod}/end-session/
-REQUIRED_SCOPE          # bored:{dev,prod}:access
-# Prod-only: extra issuer accepted alongside browser tokens, used by the MCP service account.
-OIDC_MCP_ISSUER_URL     # https://auth.desync.link/application/o/bored-mcp/
-OIDC_MCP_CLIENT_ID      # bored-mcp-prod
+APP_ENV                          # "production" or the dev branch name (deploy-script-facing name;
+                                  # forwarded into the container as BORED__OBSERVABILITY__ENVIRONMENT)
+APP_VERSION                      # optional override; unset in normal deploys (see below)
+SOVEREIGN_CONFIG_ACCESS_URL_FILE # sourced from bored_{dev,prod}_sovereign_access_url,
+                                  # materialised as a file (not left in the container's process env)
 ```
 
-When `OIDC_ISSUER_URL` is unset (local dev / tests) the auth middleware short-circuits and injects a synthetic `anonymous` claim, so the API stays usable without an IdP.
+Everything else — OIDC settings, the session cookie key, log level, the Loki endpoint, the database
+path — is resolved at startup from a layered configuration composition root
+(`backend/src/config.rs`), **not** individual compose env vars. See
+[Runtime configuration](#runtime-configuration) below.
+
+When `oidc.issuer-url` is unset or blank (local dev / tests) the auth middleware short-circuits and
+injects a synthetic `anonymous` claim, so the API stays usable without an IdP.
+
+### Runtime configuration
+
+Bored's runtime config (OIDC, the browser session cookie key, observability settings) is resolved at
+startup through three layers, lowest priority first:
+
+1. **in-memory defaults** — ports, log level, database path, service name.
+2. **[sovereign-config](https://github.com/vcheesbrough/sovereign-config)** — added only when
+   `SOVEREIGN_CONFIG_ACCESS_URL_FILE` (or `SOVEREIGN_CONFIG_ACCESS_URL`) is present and non-blank, so
+   local dev, unit tests, and e2e (which have no sovereign-config server) fall back to defaults + env.
+3. **`BORED__*` environment overrides**, `__`-nested (e.g. `BORED__OIDC__CLIENT-ID` /
+   `BORED__OIDC__CLIENT_ID` → `oidc.client-id` — both kebab- and snake_case leaf spellings work, since
+   a POSIX shell variable can't contain `-`).
+
+Each config group is written to its own sub-branch:
+
+```
+/bored/{dev,prod}/server/oidc            # issuer-url, client-id, client-secret (secret),
+                                          # redirect-uri, required-scope, end-session-url,
+                                          # mcp/issuer-url, mcp/client-id
+/bored/{dev,prod}/server/session         # cookie-key (secret) — required whenever oidc is configured
+/bored/{dev,prod}/server/observability   # environment, log-level, loki-url, service-name
+```
+
+`server/*` (`http-port`, `tls-cert`, `tls-key`, `static-dir`, `database-path`) is **never** stored in
+sovereign-config — it's image-internal and identical across deployments, set via defaults or the
+image's own `BORED__SERVER__*` env (see the `Dockerfile` runtime stage).
+
+`oidc` is bored's one **optional** group — an absent or blank `oidc/issuer-url` runs the server in
+auth-disabled mode (a synthetic `anonymous` claim), matching local-dev behavior; a present issuer
+makes every other `oidc` leaf (and `session/cookie-key`) a required, fail-closed startup error if
+missing.
+
+**Access URLs.** Each environment has one read-only sovereign-config connection scoped to its own
+subtree (`/bored/dev/server`, `/bored/prod/server`), stored as a Woodpecker secret **in
+sovereign-config itself** — `/woodpecker/repos/vcheesbrough/bored/bored_{dev,prod}_sovereign_access_url`
+— alongside bored's other Woodpecker secrets (the mini-config broker cutover). Rotation is
+`rotate_connection` + rewrite that Woodpecker secret + redeploy; no app change, no image rebuild.
+
+**Version pin.** `backend/Cargo.toml` pins `sovereign-config-provider` to the sovereign-config
+**server's** running version (currently `2.17.6`) — the provider negotiates a protocol version on
+connect and fails closed on mismatch, so a server upgrade means bumping this tag and rebuilding.
+`sovereign-config-provider` is a private git dependency; the Docker build fetches it via
+`scripts/docker-git-credential.sh`, which needs the `github_token` secret (`--secret
+id=github_token,env=GITHUB_TOKEN` on `docker build`).
 
 ## Local development
 
 ```bash
-# Backend (plain HTTP on :3000 when TLS_CERT/TLS_KEY are unset; anonymous auth when OIDC vars are unset)
+# Backend (plain HTTP on :3000 by default; anonymous auth when oidc.issuer-url is unset)
 cargo run -p backend
 
 # Frontend (requires trunk + the wasm32-unknown-unknown target)
 cd frontend && trunk serve
 ```
 
-If both `TLS_CERT` and `TLS_KEY` point at PEM files, the backend instead binds rustls to `:443`. Inside the production image those paths default to `/app/cert.pem` / `/app/key.pem` (a self-signed cert is generated at image build time).
+No sovereign-config access URL is set locally, so config comes from defaults + `BORED__*` env only —
+see [Runtime configuration](#runtime-configuration). If both `BORED__SERVER__TLS_CERT` and
+`BORED__SERVER__TLS_KEY` point at PEM files, the backend instead binds rustls to `:443`. Inside the
+production image those paths default to `/app/cert.pem` / `/app/key.pem` (a self-signed cert is
+generated at image build time).
 
 The full CI suite — fmt, clippy, unit tests, build, and Playwright — can be reproduced locally with the exact commands CI uses (see [`.cursor/rules/woodpecker-after-push.mdc`](.cursor/rules/woodpecker-after-push.mdc) for the canonical recipe).
 

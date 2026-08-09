@@ -31,9 +31,9 @@ pub struct AppState {
     /// Each message is a `BroadcastEvent` that bundles the event with the board ID
     /// it originated from, so SSE clients can filter to their own board's stream.
     pub events: broadcast::Sender<BroadcastEvent>,
-    /// OIDC configuration. `None` when `OIDC_ISSUER_URL` is unset — in that
-    /// case the auth middleware injects a synthetic `anonymous` claim so local
-    /// dev without an IdP keeps working unchanged. Production always sets this.
+    /// OIDC configuration. `None` when `oidc.issuer-url` is unset/blank — in
+    /// that case the auth middleware injects a synthetic `anonymous` claim so
+    /// local dev without an IdP keeps working unchanged. Production always sets this.
     pub auth: Option<Arc<AuthConfig>>,
     /// Cached JWKS public keys for the configured issuer. Always present
     /// alongside `auth` (created together at startup); kept as a separate

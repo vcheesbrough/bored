@@ -147,56 +147,35 @@ struct DiscoveryDoc {
 }
 
 impl AuthConfig {
-    /// Read the auth configuration from environment variables and resolve
-    /// provider endpoints via OIDC discovery (`/.well-known/openid-configuration`).
-    /// Returns `None` if `OIDC_ISSUER_URL` is unset *or empty*, allowing the
-    /// server to run in "auth-disabled" mode for local development without
-    /// IdP setup. The empty-string case matters because `deploy/docker-compose.yml`
-    /// uses `${OIDC_ISSUER_URL:-}` to forward the host env, which sets the
-    /// var to "" rather than leaving it unset when the host has no OIDC config.
-    /// All other required vars — and a reachable discovery document — become
-    /// hard errors when issuer is set.
-    pub async fn load() -> Option<Self> {
-        let issuer_url = std::env::var("OIDC_ISSUER_URL")
-            .ok()
-            .filter(|s| !s.is_empty())?;
-        let client_id = std::env::var("OIDC_CLIENT_ID")
-            .expect("OIDC_CLIENT_ID required when OIDC_ISSUER_URL is set");
-        let client_secret = std::env::var("OIDC_CLIENT_SECRET")
-            .expect("OIDC_CLIENT_SECRET required when OIDC_ISSUER_URL is set");
-        let redirect_uri = std::env::var("OIDC_REDIRECT_URI")
-            .expect("OIDC_REDIRECT_URI required when OIDC_ISSUER_URL is set");
-        let required_scope = std::env::var("REQUIRED_SCOPE")
-            .expect("REQUIRED_SCOPE required when OIDC_ISSUER_URL is set");
-        let end_session_url = std::env::var("OIDC_END_SESSION_URL")
-            .ok()
-            .filter(|s| !s.is_empty());
-
-        let mcp_issuer_url = std::env::var("OIDC_MCP_ISSUER_URL")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let mcp_client_id = std::env::var("OIDC_MCP_CLIENT_ID")
-            .ok()
-            .filter(|s| !s.is_empty());
-
-        let discovery = Self::discover(&issuer_url)
+    /// Build the auth configuration from an already-loaded `OidcConfig` and
+    /// resolve provider endpoints via OIDC discovery
+    /// (`/.well-known/openid-configuration`).
+    ///
+    /// The auth-disabled-mode decision (no `oidc.issuer-url` configured ⇒ run
+    /// without auth) is made by the caller via
+    /// `config::load_optional_oidc` — by the time this is called, `oidc` is
+    /// `Some` and every leaf it requires is already known non-blank
+    /// (`OidcConfig::validate` guarantees it). A reachable discovery document
+    /// is still a hard startup error.
+    pub async fn from_config(oidc: &crate::config::OidcConfig) -> Self {
+        let discovery = Self::discover(&oidc.issuer_url)
             .await
-            .expect("OIDC discovery failed for OIDC_ISSUER_URL");
+            .expect("OIDC discovery failed for oidc.issuer-url");
 
-        Some(Self {
-            issuer_url,
-            client_id,
-            client_secret,
-            redirect_uri,
-            required_scope,
-            end_session_url,
+        Self {
+            issuer_url: oidc.issuer_url.clone(),
+            client_id: oidc.client_id.clone(),
+            client_secret: oidc.client_secret.clone(),
+            redirect_uri: oidc.redirect_uri.clone(),
+            required_scope: oidc.required_scope.clone(),
+            end_session_url: oidc.end_session_url.clone(),
             authorize_endpoint: discovery.authorization_endpoint,
             token_endpoint: discovery.token_endpoint,
             jwks_uri: discovery.jwks_uri,
             revocation_endpoint: discovery.revocation_endpoint,
-            mcp_issuer_url,
-            mcp_client_id,
-        })
+            mcp_issuer_url: oidc.mcp.issuer_url.clone(),
+            mcp_client_id: oidc.mcp.client_id.clone(),
+        }
     }
 
     /// Fetch the issuer's `/.well-known/openid-configuration` document and
@@ -346,21 +325,20 @@ impl std::fmt::Debug for AuthSessionManager {
 }
 
 impl AuthSessionManager {
-    /// Load the stable private-cookie key. Exactly 64 random bytes are used by
-    /// the cookie crate as independent signing and encryption key material.
-    pub fn load() -> Result<Self, String> {
-        let encoded = std::env::var("SESSION_COOKIE_KEY")
-            .map_err(|_| "SESSION_COOKIE_KEY required when OIDC_ISSUER_URL is set".to_string())?;
-        Self::from_encoded_key(&encoded)
+    /// Build from an already-loaded `SessionConfig`'s cookie key. Exactly 64
+    /// random bytes are used by the cookie crate as independent signing and
+    /// encryption key material.
+    pub fn from_config(session: &crate::config::SessionConfig) -> Result<Self, String> {
+        Self::from_encoded_key(&session.cookie_key)
     }
 
     fn from_encoded_key(encoded: &str) -> Result<Self, String> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .map_err(|_| "SESSION_COOKIE_KEY must be valid standard base64".to_string())?;
+            .map_err(|_| "session.cookie-key must be valid standard base64".to_string())?;
         if bytes.len() != 64 {
             return Err(format!(
-                "SESSION_COOKIE_KEY must decode to exactly 64 bytes (got {})",
+                "session.cookie-key must decode to exactly 64 bytes (got {})",
                 bytes.len()
             ));
         }

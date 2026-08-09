@@ -36,6 +36,14 @@ axum-extra = { version = "0.9", features = ["cookie", "cookie-private"] }
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+# Layered configuration composition root (backend/src/config.rs) — see
+# card #288. Pinned to the running sovereign-config server version (2.17.6):
+# the provider negotiates protocol v3 on connect and fails closed on
+# mismatch, so a server upgrade means bumping this tag and rebuilding.
+sovereign-config-provider = { git = "https://github.com/vcheesbrough/sovereign-config", tag = "2.17.6", features = [
+    "config",
+] }
+config = "0.15"
 # `time` is used for cookie max_age durations — the `cookie` crate (via
 # axum-extra) re-exports time::Duration but having it as an explicit dep
 # makes call sites easier to read and guarantees a consistent version.
