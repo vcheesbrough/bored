@@ -2,6 +2,7 @@
 // These are private by default; the route handlers are reached via `routes::boards::...`.
 mod audit;
 mod auth;
+mod config;
 mod db;
 mod events;
 mod models;
@@ -94,7 +95,8 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
 
 // `app` is extracted from `main` so integration tests can call it directly
 // without spinning up a real TCP listener. Tests construct `AppState` with an
-// in-memory DB, call `app(state).await`, and pass the router to `TestServer`.
+// in-memory DB, call `app(state, static_dir, environment).await`, and pass the
+// router to `TestServer`.
 //
 // Routing layout:
 //   Public (no auth required):
@@ -102,10 +104,10 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
 //   Protected (auth middleware enforced — `auth` cookie or `Bearer` header):
 //     /api/me, /api/boards/*, /api/columns/*, /api/cards/*, /api/events
 //
-// When the server is started without OIDC env vars (i.e. local dev or tests),
-// the middleware short-circuits and injects a synthetic `anonymous` claim so
-// existing flows keep working unchanged.
-pub async fn app(state: AppState) -> Router {
+// When the server is started without `oidc.issuer-url` configured (i.e. local
+// dev or tests), the middleware short-circuits and injects a synthetic
+// `anonymous` claim so existing flows keep working unchanged.
+pub async fn app(state: AppState, static_dir: &str, environment: &str) -> Router {
     // Build the protected `/api/*` sub-router. Every route here gets the auth
     // middleware applied below; handlers can extract `Extension<Claims>` to
     // get the validated identity. The middleware needs access to AppState
@@ -165,16 +167,17 @@ pub async fn app(state: AppState) -> Router {
         .route("/logout", get(routes::auth::logout))
         .with_state(state);
 
-    // `STATIC_DIR` lets the Docker image override where the compiled WASM frontend
-    // lives without rebuilding. Falls back to `./dist` for local development.
-    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "./dist".to_string());
+    // `environment` is captured into the `/api/info` closure below rather than
+    // read per-request, since it now comes from `ObservabilityConfig` (set once
+    // at startup) rather than a live `std::env::var` lookup.
+    let environment = environment.to_string();
 
     Router::new()
         .route("/health", get(health))
         // `/api/info` is intentionally public — the frontend fetches it
         // unauthenticated on every page load to populate the version watermark.
         // It must stay outside any auth-gated sub-router.
-        .route("/api/info", get(info))
+        .route("/api/info", get(move || info(environment.clone())))
         // Browser-facing OAuth2 flow endpoints.
         .nest("/auth", auth_routes)
         // Protected API — every route under here requires a valid token (or
@@ -183,7 +186,7 @@ pub async fn app(state: AppState) -> Router {
         // `SpaSvc` serves static files from the dist directory and falls back to
         // index.html for any path that isn't a real file on disk, enabling
         // Leptos client-side routing to handle deep-links (e.g. /boards/123).
-        .fallback_service(SpaSvc::new(&static_dir))
+        .fallback_service(SpaSvc::new(static_dir))
         // `TraceLayer` logs every request (method, path, status, latency) using
         // the `tracing` crate — visible as structured JSON in production.
         .layer(TraceLayer::new_for_http())
@@ -193,7 +196,7 @@ pub async fn app(state: AppState) -> Router {
 // this function as the entry point. Without it, `async fn main` wouldn't work
 // because Rust's standard runtime is synchronous.
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), config::ConfigError> {
     // rustls needs a crypto provider installed before any TLS handshakes.
     // `ring` is the default provider — this call must happen before any
     // TLS config is created.
@@ -201,20 +204,32 @@ async fn main() {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    // Initialise structured logging / tracing (returns a guard that flushes on drop).
-    let _obs = observability::init();
+    // Composition root: build the layered config once, before any other task
+    // is scheduled (`build_config` blocks on a startup sovereign-config RPC,
+    // which is safe here because nothing else has run yet), then hand each
+    // validated DTO to the feature that owns it. Every downstream component
+    // receives its typed config, never raw env or provider access.
+    let cfg = config::build_config()?;
+    let observability = config::load_group::<config::ObservabilityConfig>(&cfg, "observability")?;
+    let oidc = config::load_optional_oidc(&cfg)?; // None => auth-disabled mode
+    let session = oidc
+        .is_some()
+        .then(|| config::load_group::<config::SessionConfig>(&cfg, "session"))
+        .transpose()?;
+    let server = config::load_group::<config::ServerConfig>(&cfg, "server")?;
+    drop(cfg);
 
-    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "/data/bored.db".to_string());
-    let db = db::connect_persistent(&db_path)
+    // Initialise structured logging / tracing (returns a guard that flushes on drop).
+    let _obs = observability::init(&observability);
+
+    let db = db::connect_persistent(&server.database_path)
         .await
         .expect("failed to connect to database");
 
-    // Initialise OIDC config from env vars if present. When `OIDC_ISSUER_URL`
-    // is unset the server runs in auth-disabled mode — useful for local
-    // hacking without a live IdP and for unit tests. Production sets all of
-    // OIDC_ISSUER_URL / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URI
-    // / REQUIRED_SCOPE; missing any of those when issuer is set is fatal.
-    let state = if let Some(auth) = AuthConfig::load().await {
+    // `oidc` is `None` when `oidc.issuer-url` is unset — auth-disabled mode,
+    // useful for local hacking without a live IdP and for unit tests.
+    let state = if let Some(oidc) = oidc {
+        let auth = AuthConfig::from_config(&oidc).await;
         tracing::info!(
             issuer = %auth.issuer_url,
             client_id = %auth.client_id,
@@ -226,42 +241,47 @@ async fn main() {
         );
         let cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
         let sessions = Arc::new(
-            AuthSessionManager::load().expect("invalid browser session cookie configuration"),
+            AuthSessionManager::from_config(
+                &session.expect("session config is loaded whenever oidc is enabled"),
+            )
+            // `SessionConfig::validate` already rejected a malformed key at the
+            // config-loading stage above — this can only fail if that invariant
+            // is broken.
+            .expect("session.cookie-key already validated by config::SessionConfig::validate"),
         );
         AppState::new(db).with_auth(Arc::new(auth), cache, sessions)
     } else {
-        tracing::warn!("OIDC_ISSUER_URL not set — auth middleware will inject anonymous claim");
+        tracing::warn!("oidc.issuer-url not set — auth middleware will inject anonymous claim");
         AppState::new(db)
     };
 
-    // Check for TLS certificate/key paths in environment variables.
-    // If both are present, serve HTTPS on port 443.
-    // If either is missing, fall back to plain HTTP on port 3000 (dev mode).
-    let cert = std::env::var("TLS_CERT");
-    let key = std::env::var("TLS_KEY");
+    let app = app(state, &server.static_dir, &observability.environment).await;
 
-    match (cert, key) {
-        (Ok(cert), Ok(key)) => {
-            let config = RustlsConfig::from_pem_file(&cert, &key)
+    // TLS pair present ⇒ serve HTTPS on :443. Otherwise plain HTTP on
+    // `server.http-port` (dev mode).
+    match server.tls_pair() {
+        Some((cert, key)) => {
+            let tls_config = RustlsConfig::from_pem_file(cert, key)
                 .await
                 .expect("failed to load TLS config");
             // `[0, 0, 0, 0]` means bind to all network interfaces (0.0.0.0).
             let addr = SocketAddr::from(([0, 0, 0, 0], 443));
             tracing::info!(%addr, "bored backend listening (TLS)");
-            axum_server::bind_rustls(addr, config)
-                .serve(app(state).await.into_make_service())
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(app.into_make_service())
                 .await
                 .unwrap();
         }
-        _ => {
-            let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+        None => {
+            let addr = SocketAddr::from(([0, 0, 0, 0], server.http_port));
             tracing::info!(%addr, "bored backend listening (plain HTTP)");
             // `tokio::net::TcpListener` is the async equivalent of the standard
             // library's `TcpListener` — it doesn't block the thread while waiting.
             let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            axum::serve(listener, app(state).await).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
         }
     }
+    Ok(())
 }
 
 async fn health() -> &'static str {
@@ -272,14 +292,12 @@ async fn health() -> &'static str {
 // Version: the release tag burned into the image at build time (see
 // `shared::app_version`). `APP_VERSION` remains an optional runtime override
 // (used by tests and ad-hoc runs); when unset the burned-in tag is reported.
-// Env falls back to "dev" when running locally.
-async fn info() -> axum::Json<shared::AppInfo> {
+// `environment` is captured at startup from `ObservabilityConfig` (see `app`).
+async fn info(environment: String) -> axum::Json<shared::AppInfo> {
     axum::Json(shared::AppInfo {
-        version: std::env::var("APP_VERSION")
-            .ok()
-            .filter(|v| !v.is_empty())
+        version: config::app_version_override()
             .unwrap_or_else(|| shared::app_version().to_string()),
-        env: std::env::var("APP_ENV").unwrap_or_else(|_| "dev".to_string()),
+        env: environment,
     })
 }
 
@@ -302,7 +320,7 @@ mod tests {
     async fn test_app() -> TestServer {
         let db = db::connect_mem().await.expect("failed to connect mem db");
         let state = AppState::new(db);
-        let router = app(state).await;
+        let router = app(state, "./dist", "dev").await;
         TestServer::new(router).unwrap()
     }
 
@@ -1187,6 +1205,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_returns_version_and_env() {
+        std::env::remove_var("APP_VERSION");
         let server = test_app().await;
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
@@ -1194,21 +1213,24 @@ mod tests {
         // Falls back to shared::app_version (burned-in RELEASE_TAG, else
         // CARGO_PKG_VERSION) when APP_VERSION is unset.
         assert!(!info.version.is_empty());
-        // Falls back to "dev" when APP_ENV is unset.
+        // `test_app()` passes "dev" as the environment.
         assert_eq!(info.env, "dev");
     }
 
     #[tokio::test]
     #[serial]
-    async fn info_route_uses_env_vars_when_set() {
+    async fn info_route_uses_app_version_env_and_configured_environment() {
         std::env::set_var("APP_VERSION", "1.2.3");
-        std::env::set_var("APP_ENV", "production");
-        let server = test_app().await;
+        let db = db::connect_mem().await.expect("failed to connect mem db");
+        let state = AppState::new(db);
+        // `environment` is threaded through `app()` directly (from
+        // `ObservabilityConfig` in production) rather than a raw env var.
+        let router = app(state, "./dist", "production").await;
+        let server = TestServer::new(router).unwrap();
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
         let body = resp.text();
         std::env::remove_var("APP_VERSION");
-        std::env::remove_var("APP_ENV");
         let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
         assert_eq!(info.version, "1.2.3");
         assert_eq!(info.env, "production");
@@ -1217,14 +1239,16 @@ mod tests {
     // Verifies that a deep-link path (e.g. /boards/abc) returns 200 with index.html
     // rather than 404 when the SPA fallback is active.
     #[tokio::test]
-    #[serial]
     async fn spa_deep_link_returns_index_html() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
-        std::env::set_var("STATIC_DIR", dir.path().to_str().unwrap());
-        let server = test_app().await;
+        let db = db::connect_mem().await.expect("failed to connect mem db");
+        let state = AppState::new(db);
+        // `static_dir` is threaded through `app()` directly (from
+        // `ServerConfig` in production) rather than a raw env var.
+        let router = app(state, dir.path().to_str().unwrap(), "dev").await;
+        let server = TestServer::new(router).unwrap();
         let resp = server.get("/boards/some-deep-link").await;
-        std::env::remove_var("STATIC_DIR"); // remove before assert so cleanup runs even on failure
         resp.assert_status(StatusCode::OK);
         assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
         assert!(resp.text().contains("<html>"));
@@ -1409,7 +1433,7 @@ mod tests {
         // Subscribe *before* making requests so we don't miss any events.
         let mut rx = state.events.subscribe();
 
-        let server = TestServer::new(app(state).await).unwrap();
+        let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
 
         // CREATE board → BoardCreated
         let board: shared::Board = server
@@ -1686,7 +1710,7 @@ mod tests {
     async fn audit_body_restore_rejects_invalid_or_current_versions() {
         let db = db::connect_mem().await.expect("failed to connect mem db");
         let state = AppState::new(db.clone());
-        let server = TestServer::new(app(state).await).unwrap();
+        let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
         let (board, column) = setup_board_and_column(&server).await;
         let card: shared::Card = server
             .post(&format!("/api/columns/{}/cards", column.id))

@@ -2,35 +2,34 @@ use tracing_subscriber::{
     layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry,
 };
 
+use crate::config::ObservabilityConfig;
+
 pub struct ObservabilityGuard {
     _loki_task: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Initialise structured logging. Call once as the first statement in main().
-/// The returned guard must be kept alive for the process lifetime — dropping it
+/// Initialise structured logging. Call once as the first statement in main(),
+/// with the already-loaded, already-validated `ObservabilityConfig`. The
+/// returned guard must be kept alive for the process lifetime — dropping it
 /// detaches the Loki background task (the task continues running). Shutdown
 /// ordering is not guaranteed, so buffered log events may be lost at process exit.
-pub fn init() -> ObservabilityGuard {
-    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
-    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
-    let loki_url = std::env::var("LOKI_URL").ok();
+pub fn init(config: &ObservabilityConfig) -> ObservabilityGuard {
     // Burned-in release tag (see shared::app_version); APP_VERSION can override.
-    let version = std::env::var("APP_VERSION")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| shared::app_version().to_string());
+    let version =
+        crate::config::app_version_override().unwrap_or_else(|| shared::app_version().to_string());
 
     // Each layer gets its own EnvFilter via .with_filter() so that
     // register_callsite interest is correctly computed per-layer. A shared
     // EnvFilter pushed into the Vec doesn't work: Vec<Layer> takes the most
     // permissive register_callsite interest across all sub-layers, so the fmt
     // layer's Interest::always() would bypass the filter entirely.
-    let make_filter = || EnvFilter::try_new(&log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let make_filter =
+        || EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
     // Console layer: JSON in production, pretty otherwise
-    let fmt: Box<dyn Layer<Registry> + Send + Sync> = if app_env == "production" {
+    let fmt: Box<dyn Layer<Registry> + Send + Sync> = if config.environment == "production" {
         Box::new(
             tracing_subscriber::fmt::layer()
                 .json()
@@ -46,15 +45,15 @@ pub fn init() -> ObservabilityGuard {
     };
     layers.push(fmt);
 
-    // Loki layer
-    let loki_task = if let Some(url_str) = loki_url {
-        let url = url::Url::parse(&url_str)
-            .unwrap_or_else(|e| panic!("LOKI_URL '{url_str}' is not a valid URL: {e}"));
+    // Loki layer. `config.loki_url` is already a validated `url::Url` — a
+    // malformed value is rejected at config load time (fail-closed startup
+    // error), not here.
+    let loki_task = if let Some(url) = config.loki_url.clone() {
         let (loki_layer, controller) = tracing_loki::builder()
-            .label("app", "bored")
-            .expect("hardcoded label \"app\" is invalid — should never happen")
-            .label("env", &app_env)
-            .expect("APP_ENV contains characters invalid in a Loki label value")
+            .label("app", &config.service_name)
+            .expect("observability.service-name contains characters invalid in a Loki label value")
+            .label("env", &config.environment)
+            .expect("observability.environment contains characters invalid in a Loki label value")
             .label("version", version)
             .unwrap()
             .build_url(url)

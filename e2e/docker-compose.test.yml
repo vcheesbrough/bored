@@ -42,19 +42,22 @@ services:
   app:
     image: ${TEST_IMAGE:?TEST_IMAGE must be set}
     environment:
-      DATABASE_PATH: /tmp/bored-test.db
-      APP_ENV: test
+      # No SOVEREIGN_CONFIG_ACCESS_URL[_FILE] here — the sovereign layer stays
+      # off (config.rs falls back to defaults + env), proving the no-sovereign
+      # fallback path e2e is meant to exercise.
+      BORED__SERVER__DATABASE_PATH: /tmp/bored-test.db
+      BORED__OBSERVABILITY__ENVIRONMENT: test
       APP_VERSION: test
-      LOG_LEVEL: warn
+      BORED__OBSERVABILITY__LOG_LEVEL: warn
       # OIDC configured against the mock. The /default issuer is built in
       # to mock-oauth2-server and accepts tokens for any client_id.
-      OIDC_ISSUER_URL: http://mock-oidc:8080/default
-      OIDC_CLIENT_ID: bored-test
-      OIDC_CLIENT_SECRET: test-secret
-      SESSION_COOKIE_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==
-      OIDC_REDIRECT_URI: https://app/auth/callback
-      REQUIRED_SCOPE: bored:test:access
-      OIDC_END_SESSION_URL: http://mock-oidc:8080/default/end-session
+      BORED__OIDC__ISSUER_URL: http://mock-oidc:8080/default
+      BORED__OIDC__CLIENT_ID: bored-test
+      BORED__OIDC__CLIENT_SECRET: test-secret
+      BORED__SESSION__COOKIE_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==
+      BORED__OIDC__REDIRECT_URI: https://app/auth/callback
+      BORED__OIDC__REQUIRED_SCOPE: bored:test:access
+      BORED__OIDC__END_SESSION_URL: http://mock-oidc:8080/default/end-session
     depends_on:
       - mock-oidc
     networks:
