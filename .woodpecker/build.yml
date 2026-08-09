@@ -49,8 +49,9 @@ steps:
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      # backend-builder's cargo layers need this to fetch the private
-      # sovereign-config-provider git dependency (card #288).
+      # backend-builder's (and, defensively, frontend-builder's) cargo layers
+      # need this to fetch the private sovereign-config-provider git
+      # dependency (card #288).
       GITHUB_TOKEN:
         from_secret: github_token
     commands:

@@ -3,11 +3,18 @@
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS frontend-builder
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk
 WORKDIR /app
+# sovereign-config-provider is a private git dependency of `backend` only, but
+# `trunk build` resolves the whole workspace Cargo.lock from within `frontend/`
+# — on a cold cache this stage can race backend-builder's own fetch of the same
+# dependency, so it needs the same credential rewrite (see backend-builder below
+# and scripts/docker-git-credential.sh).
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 COPY Cargo.toml Cargo.lock ./
 COPY frontend/ frontend/
 COPY shared/ shared/
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY mcp/Cargo.toml mcp/Cargo.toml
+COPY scripts/docker-git-credential.sh scripts/docker-git-credential.sh
 RUN mkdir -p backend/src && touch backend/src/main.rs \
  && mkdir -p mcp/src && touch mcp/src/main.rs
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
@@ -19,6 +26,9 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
     --mount=type=cache,id=bored-trunk-cache,target=/root/.cache/trunk,sharing=locked \
+    --mount=type=secret,id=github_token \
+    set -eu; \
+    . /app/scripts/docker-git-credential.sh; \
     cd frontend && trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
