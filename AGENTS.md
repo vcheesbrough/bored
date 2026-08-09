@@ -104,7 +104,31 @@ Claude Code settings live in `.claude/settings.local.json` (also gitignored).
 
 ---
 
-## 4. PR review — repo hooks
+## 4. Runtime configuration — write it, don't pipeline-edit it
+
+Bored's runtime config (OIDC, the browser session cookie key, observability settings)
+lives in **sovereign-config**, not in `.woodpecker/build.yml` env blocks — see
+[README.md § Runtime configuration](README.md#runtime-configuration) for the full
+layering model and subtree layout.
+
+- **Change a value** with the sovereign-config MCP/CLI (`put` / `put_secret` against
+  `/bored/{dev,prod}/server/{oidc,session,observability}`), then redeploy. Do **not**
+  add a value back into `.woodpecker/build.yml` or `deploy/docker-compose.yml` — the
+  whole point of card #288 was collapsing those inline blocks into one access-URL
+  secret.
+- **`server/*`** (`http-port`, `tls-cert`, `tls-key`, `static-dir`, `database-path`) is
+  the one group that stays out of sovereign-config — it's image-internal, set via
+  `Dockerfile` `ENV BORED__SERVER__*` or in-code defaults.
+- **Rotating an access URL:** sovereign-config `rotate_connection` + rewrite the
+  Woodpecker secret (`bored_{dev,prod}_sovereign_access_url`, itself stored in
+  sovereign-config) + redeploy. No app change, no image rebuild.
+- **Bumping the sovereign-config server:** the provider dependency in
+  `backend/Cargo.toml` is pinned to the server's running version and fails closed on
+  protocol mismatch — bump the `tag` and rebuild when the server upgrades.
+
+---
+
+## 5. PR review — repo hooks
 
 Run the **`pr-review-loop`** skill (baseline §5: self-review every PR you open,
 then the one-comment-at-a-time triage loop). Repo parameters for the skill:
