@@ -257,7 +257,7 @@ fn apply_defaults(
     // No `oidc.*` / `session.*` defaults — both are absent unless configured,
     // which is what makes `oidc` an optional group (see `load_optional_oidc`).
     let defaults = [
-        ("observability.environment", "development"),
+        ("observability.environment", "dev"),
         ("observability.log-level", "info"),
         ("observability.service-name", "bored"),
         // Plain-HTTP fallback port; TLS (when configured) always binds :443.

@@ -39,7 +39,10 @@ Run the **`ci-watch`** skill (baseline §4). Skill parameters:
 
 - `OWNER=vcheesbrough`, `REPO=bored`.
 - **Reproduce failures locally** from [.woodpecker/build.yml](.woodpecker/build.yml):
-  - `docker build -t bored:ci-local .` (rustfmt / clippy / tests / trunk all run inside the Dockerfile).
+  - `docker build --secret id=github_token,env=GITHUB_TOKEN -t bored:ci-local .` (rustfmt / clippy / tests / trunk all
+    run inside the Dockerfile). The `github_token` secret fetches the private `sovereign-config-provider` git
+    dependency (see [README.md § Runtime configuration](README.md#runtime-configuration)) — export
+    `GITHUB_TOKEN` first (e.g. a `gh auth token`-equivalent PAT with repo read access).
   - `TEST_IMAGE=bored:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
 
 The [`.claude/watch-woodpecker.js`](.claude/watch-woodpecker.js) PostToolUse
