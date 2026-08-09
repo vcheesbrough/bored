@@ -10,27 +10,21 @@ services:
     # permanent defunct process. tini reaps them regardless of the TLS helper.
     init: true
     environment:
-      - APP_ENV=${APP_ENV:?APP_ENV is required}
+      # Container-internal key stays `BORED__OBSERVABILITY__ENVIRONMENT`; the
+      # deploy-script-facing variable name stays `APP_ENV` (`.woodpecker/build.yml`
+      # sets it per environment, unchanged by card #288).
+      - BORED__OBSERVABILITY__ENVIRONMENT=${APP_ENV:?APP_ENV is required}
       # Optional runtime override; when unset the backend reports the RELEASE_TAG
-      # burned into the image at build time (shared::app_version).
+      # burned into the image at build time (shared::app_version). Deliberately
+      # NOT part of the BORED__* layered config — see backend/src/config.rs.
       - APP_VERSION=${APP_VERSION:-}
-      - LOG_LEVEL=info
-      - LOKI_URL=http://monitor-loki:3100
-      - DATABASE_PATH=/data/bored.db
-      # OIDC auth — when OIDC_ISSUER_URL is unset the backend runs in
-      # auth-disabled mode and injects an "anonymous" claim. Production
-      # always supplies the full set; dev may opt out by leaving them blank.
-      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
-      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
-      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
-      - SESSION_COOKIE_KEY=${SESSION_COOKIE_KEY:-}
-      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
-      - REQUIRED_SCOPE=${REQUIRED_SCOPE:-}
-      - OIDC_END_SESSION_URL=${OIDC_END_SESSION_URL:-}
-      # MCP service-account provider (client_credentials). Both vars must be set
-      # together; omitting either disables the extra-issuer acceptance path.
-      - OIDC_MCP_ISSUER_URL=${OIDC_MCP_ISSUER_URL:-}
-      - OIDC_MCP_CLIENT_ID=${OIDC_MCP_CLIENT_ID:-}
+      # OIDC, session, and the rest of observability now come from sovereign-config
+      # (see backend/src/config.rs) via this one access URL, materialised as a file
+      # rather than left in the container's process env. A blank/absent value
+      # disables the sovereign layer cleanly (config.rs falls back to defaults+env).
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
+    secrets:
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE
     volumes:
       - bored-db:/data
     networks:
@@ -52,3 +46,10 @@ volumes:
 networks:
   proxy-backend:
     external: true
+
+secrets:
+  # Sourced from the Woodpecker secret `bored_{dev,prod}_sovereign_access_url`,
+  # exposed as this env var at deploy time; compose materialises it as a file
+  # rather than leaving the connection URL in the container's process env.
+  SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+    environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
