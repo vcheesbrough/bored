@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS frontend-builder
-RUN rustup target add wasm32-unknown-unknown && cargo install trunk
+# `--version` + `--locked` pin trunk and its whole dependency tree: an unpinned
+# install resolves the newest semver-compatible deps, and a `lightningcss` bump
+# published after 0.21.14 no longer compiles on the rust version pinned above.
+RUN rustup target add wasm32-unknown-unknown && cargo install trunk --version 0.21.14 --locked
 WORKDIR /app
 # sovereign-config-provider is a private git dependency of `backend` only, but
 # `trunk build` resolves the whole workspace Cargo.lock from within `frontend/`
