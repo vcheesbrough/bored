@@ -9,6 +9,7 @@ use crate::components::confirm_modal::ConfirmModal;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
 use crate::events::DragPayload;
+use crate::search::{query_matches_number, BoardSearchQuery};
 
 /// Newtype wrapping the board-level "which card is currently expanded" signal.
 /// Using a newtype avoids type collisions with other `RwSignal<Option<String>>`
@@ -152,8 +153,28 @@ pub fn CardItem(
         prev_card_state.set_value(st);
     });
 
-    let number = Signal::derive(move || card.get().number);
-    let body_signal = Signal::derive(move || body.get());
+    // `try_get` rather than `get` throughout: these render closures also
+    // subscribe to the board-level search query below, so a card that the
+    // search has just filtered out can be asked to re-render once more after
+    // its own signals were disposed.  Reading a disposed signal traps the WASM
+    // module, and the rendered output is thrown away anyway.
+    let number = Signal::derive(move || card.try_get().map_or(0, |c| c.number));
+    let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
+
+    // Live search query, so rendered card bodies can mark the matched text.
+    // `CardItem` only ever renders inside `BoardView`, which provides it.
+    let search_query = use_context::<BoardSearchQuery>()
+        .expect("BoardSearchQuery context missing")
+        .0;
+    let highlight = Signal::derive(move || search_query.try_get().unwrap_or_default());
+    // A `#42`-style query matches the number, not the body — the badge lights
+    // up instead so the card still shows why it survived the filter.
+    let number_is_hit = Signal::derive(move || {
+        query_matches_number(
+            number.try_get().unwrap_or(0),
+            &highlight.try_get().unwrap_or_default(),
+        )
+    });
 
     // ── Save helpers ──────────────────────────────────────────────────────
 
@@ -413,8 +434,11 @@ pub fn CardItem(
         >
             // ── Collapsed: absolute number badge + clamped preview ────────
             <Show when=is_collapsed>
-                <span class="card-number">{move || format!("#{}", number.get())}</span>
-                <MarkdownPreview body=body_signal class="card-preview" />
+                <span
+                    class="card-number"
+                    class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
+                >{move || format!("#{}", number.get())}</span>
+                <MarkdownPreview body=body_signal class="card-preview" highlight=highlight />
             </Show>
 
             // ── Expanded / Editing ────────────────────────────────────────
@@ -434,7 +458,10 @@ pub fn CardItem(
                             SaveStatus::Failed  => "!",
                         }}
                     </span>
-                    <span class="card-number">{move || format!("#{}", number.get())}</span>
+                    <span
+                        class="card-number"
+                        class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
+                    >{move || format!("#{}", number.get())}</span>
                     <Show when=move || history_drawer.is_some() fallback=|| ()>
                         <button
                             class="card-toolbar-btn"
@@ -487,7 +514,7 @@ pub fn CardItem(
                                 <p class="card-body-placeholder">"Click to edit…"</p>
                             }
                         >
-                            <MarkdownPreview body=body_signal class="card-markdown" />
+                            <MarkdownPreview body=body_signal class="card-markdown" highlight=highlight />
                         </Show>
                     </div>
 
