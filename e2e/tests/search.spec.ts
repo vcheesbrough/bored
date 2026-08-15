@@ -126,6 +126,86 @@ test.describe('simple search', () => {
     await expect(page.locator('.card-item')).not.toContainText('Other board only');
   });
 
+  test('highlights matches in the card body', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-highlight-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    await apiCreateCard(request, col.id, 'Deploy the deploy script');
+    await apiCreateCard(request, col.id, 'Release notes');
+
+    await gotoBoardView(page, board.name);
+    const search = page.locator('.navbar-search-input');
+    const marks = page.locator('.card-preview mark.search-hit');
+
+    // Nothing is marked before a query is typed.
+    await expect(marks).toHaveCount(0);
+
+    await search.fill('deploy');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    // Both occurrences are marked, with the original casing preserved.
+    await expect(marks).toHaveCount(2);
+    await expect(marks.first()).toHaveText('Deploy');
+    await expect(marks.nth(1)).toHaveText('deploy');
+    // Yellow ground, card surface as the ink.
+    await expect(marks.first()).toHaveCSS('background-color', 'rgb(251, 191, 36)');
+    await expect(marks.first()).toHaveCSS('color', 'rgb(0, 56, 120)');
+
+    // Clearing the query removes every mark.
+    await search.fill('');
+    await expect(page.locator('.card-item')).toHaveCount(2);
+    await expect(marks).toHaveCount(0);
+  });
+
+  test('highlights the whole word for a fuzzy match', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-highlight-fuzzy-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    await apiCreateCard(request, col.id, 'SSE card in another browser');
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.navbar-search-input').fill('brwsr');
+
+    const marks = page.locator('.card-preview mark.search-hit');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    // "brwsr" only matches as a subsequence, so the whole word lights up.
+    await expect(marks).toHaveCount(1);
+    await expect(marks.first()).toHaveText('browser');
+  });
+
+  test('a #number query highlights the badge, not the body', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-highlight-number-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const target = await apiCreateCard(request, col.id, 'Numbered card body text');
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.navbar-search-input').fill(`#${target.number}`);
+
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    await expect(page.locator('.card-preview mark.search-hit')).toHaveCount(0);
+    const badge = page.locator('.card-item .card-number');
+    await expect(badge).toHaveClass(/card-number-hit/);
+    await expect(badge).toHaveCSS('background-color', 'rgb(251, 191, 36)');
+  });
+
+  test('highlights persist in the expanded card and the maximised modal', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `search-highlight-modal-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    await apiCreateCard(request, col.id, '# Deploy plan\n\nRun the deploy step twice.');
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.navbar-search-input').fill('deploy');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+
+    // Expanding renders the full markdown — headings included — still marked.
+    await page.locator('.card-item').click();
+    const expandedMarks = page.locator('.card-markdown mark.search-hit');
+    await expect(expandedMarks).toHaveCount(2);
+    await expect(page.locator('.card-markdown h1 mark.search-hit')).toHaveText('Deploy');
+
+    // Maximising carries the highlight into the modal.
+    await page.locator('.card-toolbar-btn[title="Maximise"]').click();
+    const modalMarks = page.locator('.modal-markdown mark.search-hit');
+    await expect(modalMarks).toHaveCount(2);
+  });
+
   test('matching cards created over SSE appear while search is active', async ({ browser, request }) => {
     const board = await apiCreateBoard(request, `search-sse-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
