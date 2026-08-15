@@ -729,6 +729,15 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   min-height: calc(13px * 1.5 * 2 + 20px);
 }
 
+/* Search highlight — yellow ground, card background as the ink, so a match
+   reads as an inverted patch of the surface it sits on. */
+mark.search-hit {
+  background: var(--yellow);
+  color: var(--surface-2);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 .card-number {
   position: absolute;
   top: 6px;
@@ -741,6 +750,16 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   letter-spacing: 0.3px;
   pointer-events: none;
   user-select: none;
+}
+
+/* The card-number badge is the highlight target for `#42`-style queries, which
+   match the number rather than any body text.  The compound selector keeps it
+   ahead of `.card-float-panel .card-number` on specificity. */
+.card-number.card-number-hit {
+  background: var(--yellow);
+  color: var(--surface-2);
+  border-radius: 2px;
+  padding: 0 3px;
 }
 
 .card-item:not(.card-expanded):hover {

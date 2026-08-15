@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use crate::components::confirm_modal::ConfirmModal;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
+use crate::search::BoardSearchQuery;
 
 #[derive(Clone, PartialEq)]
 enum SaveStatus {
@@ -154,7 +155,15 @@ pub fn CardModal(
         }
     });
 
-    let body_signal = Signal::derive(move || body.get());
+    let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
+
+    // The modal renders over the board, so it keeps the same search highlight.
+    // `use_context` rather than `expect_context`: the modal must still render if
+    // it is ever mounted outside a board.  `try_get` for the same reason as in
+    // `CardItem`: the query can change in the same tick that closes the modal.
+    let search_query = use_context::<BoardSearchQuery>().map(|q| q.0);
+    let highlight =
+        Signal::derive(move || search_query.and_then(|q| q.try_get()).unwrap_or_default());
 
     let modal_ref = NodeRef::<leptos::html::Div>::new();
     let history_drawer = use_context::<HistoryDrawer>();
@@ -233,7 +242,7 @@ pub fn CardModal(
                                         <p class="modal-body-placeholder">"Click to edit…"</p>
                                     }
                                 >
-                                    <MarkdownPreview body=body_signal class="modal-markdown" />
+                                    <MarkdownPreview body=body_signal class="modal-markdown" highlight=highlight />
                                 </Show>
                             </div>
                         </Show>
