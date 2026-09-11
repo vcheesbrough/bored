@@ -60,6 +60,7 @@ steps:
         CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
         IMAGE=registry.desync.link/bored:$$RELEASE_TAG
         docker build \
+          --progress=plain \
           --secret id=github_token,env=GITHUB_TOKEN \
           --build-arg RELEASE_TAG="$$RELEASE_TAG" \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \

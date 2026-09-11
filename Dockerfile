@@ -18,6 +18,7 @@ COPY shared/ shared/
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY mcp/Cargo.toml mcp/Cargo.toml
 COPY scripts/docker-git-credential.sh scripts/docker-git-credential.sh
+COPY scripts/with-progress.sh scripts/with-progress.sh
 RUN mkdir -p backend/src && touch backend/src/main.rs \
  && mkdir -p mcp/src && touch mcp/src/main.rs
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
@@ -32,7 +33,8 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cd frontend && trunk build --release
+    cd frontend && \
+    CARGO_TERM_VERBOSE=true /app/scripts/with-progress.sh frontend-wasm trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
 RUN rustup component add rustfmt clippy
@@ -45,6 +47,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY shared/ shared/
 COPY scripts/docker-git-credential.sh scripts/docker-git-credential.sh
+COPY scripts/with-progress.sh scripts/with-progress.sh
 COPY frontend/Cargo.toml frontend/Cargo.toml
 COPY mcp/Cargo.toml mcp/Cargo.toml
 RUN mkdir -p frontend/src && touch frontend/src/lib.rs \
@@ -61,7 +64,7 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo clippy -p backend -p shared -- -D warnings
+    /app/scripts/with-progress.sh clippy cargo clippy -p backend -p shared -- -D warnings
 # No `--lib`: `backend` is a `[[bin]]`-only crate with no `[lib]` target, so
 # `--lib` silently runs zero of its tests instead of erroring (confirmed by
 # running the previous `--lib` invocation locally — it executed only
@@ -73,7 +76,7 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo test -p backend -p shared
+    /app/scripts/with-progress.sh test cargo test -p backend -p shared
 # Release tag burned into the backend binary (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # fmt/clippy/test layers so a tag change only recompiles the crates that read it.
