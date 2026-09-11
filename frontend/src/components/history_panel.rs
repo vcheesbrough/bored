@@ -320,7 +320,7 @@ fn CardVersionActions(
     restore_error: RwSignal<Option<String>>,
     /// Re-fetches the history list after a successful restore.
     reload: Callback<()>,
-) -> impl IntoView {
+) -> AnyView {
     let preview_aid = audit_id.clone();
     let preview_toggle_aid = audit_id.clone();
     let preview_label_aid = audit_id.clone();
@@ -429,6 +429,7 @@ fn CardVersionActions(
             </div>
         </Show>
     }
+    .into_any()
 }
 
 /// The card **content** — body plus tags — one audit row captured, or `None`

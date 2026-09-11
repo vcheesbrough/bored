@@ -20,7 +20,7 @@ pub fn TagEditor(
     /// Receives the full replacement list whenever the user adds or removes a
     /// tag. Never called when the change would be a no-op.
     on_change: Callback<Vec<String>>,
-) -> impl IntoView {
+) -> AnyView {
     let draft = RwSignal::new(String::new());
     // Index into the suggestion list, moved with the arrow keys. `None` means
     // "nothing picked yet", where Enter commits whatever was typed verbatim.
@@ -252,6 +252,7 @@ pub fn TagEditor(
             </span>
         </div>
     }
+    .into_any()
 }
 
 /// Read-only chips for a collapsed card, capped so a heavily tagged card can't
@@ -265,7 +266,7 @@ pub fn TagChips(
     /// Most chips to render before collapsing the rest into a `+N` counter.
     #[prop(default = 3)]
     max: usize,
-) -> impl IntoView {
+) -> AnyView {
     let shown = Signal::derive(move || {
         tags.try_get()
             .unwrap_or_default()
@@ -306,4 +307,5 @@ pub fn TagChips(
             </span>
         </Show>
     }
+    .into_any()
 }
