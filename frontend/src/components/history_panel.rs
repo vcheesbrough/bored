@@ -112,6 +112,8 @@ pub fn HistoryPanel(
         };
         let ulid = board_ulid.get_untracked();
         if let BoardSseEvent::AuditAppended { entry } = ev {
+            // Unbox once; the rest of this block works with the entry by value.
+            let entry = *entry;
             if entry.board_id != ulid {
                 return;
             }
@@ -134,13 +136,16 @@ pub fn HistoryPanel(
         }
     });
 
+    // The newest version row — the one whose content the card currently has.
+    // Used to badge that row "Current" and to disable its restore button.
     let current_card_version = Signal::derive(move || {
         if !matches!(drawer.0.get(), Some(HistoryScope::Card(_))) {
             return None;
         }
-        entries.get().into_iter().find_map(|entry| {
-            card_body_version(&entry).map(|body| (entry.id.clone(), body.to_string()))
-        })
+        entries
+            .get()
+            .into_iter()
+            .find_map(|entry| card_content_version(&entry).map(|v| (entry.id.clone(), v)))
     });
 
     let drawer_title = Signal::derive(move || match drawer.0.get().as_ref() {
@@ -231,8 +236,8 @@ pub fn HistoryPanel(
                                     drawer.0.get_untracked(),
                                     Some(HistoryScope::Card(_))
                                 );
-                                let version_body = is_card_scope
-                                    .then(|| card_body_version(&e).map(str::to_string))
+                                let version = is_card_scope
+                                    .then(|| card_content_version(&e))
                                     .flatten();
                                 let headline = summary.headline;
                                 let sub = summary.sub;
@@ -269,117 +274,16 @@ pub fn HistoryPanel(
                                                 }
                                             >"Restore"</button>
                                         </Show>
-                                        {version_body.map(|body| {
-                                            let preview_aid = aid.clone();
-                                            let preview_toggle_aid = aid.clone();
-                                            let preview_label_aid = aid.clone();
-                                            let preview_show_aid = aid.clone();
-                                            let restore_aid = aid.clone();
-                                            let restore_request_aid = aid.clone();
-                                            let current_aid = aid.clone();
-                                            let version_body_for_match = body.clone();
-                                            let version_body_for_title = body.clone();
-                                            let preview_body = body;
-                                            view! {
-                                                <div class="history-version-actions">
-                                                    <button
-                                                        type="button"
-                                                        class="btn btn-history-version"
-                                                        aria-expanded=move || (expanded_version
-                                                            .get()
-                                                            .as_deref()
-                                                            == Some(preview_aid.as_str()))
-                                                            .to_string()
-                                                        on:click=move |_| {
-                                                            expanded_version.update(|open| {
-                                                                if open.as_deref()
-                                                                    == Some(preview_toggle_aid.as_str())
-                                                                {
-                                                                    *open = None;
-                                                                } else {
-                                                                    *open = Some(preview_toggle_aid.clone());
-                                                                }
-                                                            });
-                                                        }
-                                                    >
-                                                        {move || if expanded_version.get().as_deref()
-                                                            == Some(preview_label_aid.as_str())
-                                                        {
-                                                            "Hide preview"
-                                                        } else {
-                                                            "Preview"
-                                                        }}
-                                                    </button>
-                                                    <Show
-                                                        when=move || current_card_version
-                                                            .get()
-                                                            .as_ref()
-                                                            .is_some_and(|(id, _)| id == &current_aid)
-                                                        fallback=|| ()
-                                                    >
-                                                        <span class="history-current">"Current"</span>
-                                                    </Show>
-                                                    <button
-                                                        type="button"
-                                                        class="btn btn-restore btn-history-version"
-                                                        disabled=move || {
-                                                            current_card_version
-                                                                .get()
-                                                                .as_ref()
-                                                                .is_some_and(|(_, current_body)| {
-                                                                    current_body == &version_body_for_match
-                                                                })
-                                                                || restoring_version.get().as_deref()
-                                                                    == Some(restore_aid.as_str())
-                                                        }
-                                                        title=move || if current_card_version
-                                                            .get()
-                                                            .as_ref()
-                                                            .is_some_and(|(_, current_body)| {
-                                                                current_body == &version_body_for_title
-                                                            })
-                                                        {
-                                                            "This body is already current"
-                                                        } else {
-                                                            "Restore this body version"
-                                                        }
-                                                        on:click={
-                                                            move |_| {
-                                                                let id = restore_request_aid.clone();
-                                                                restoring_version.set(Some(id.clone()));
-                                                                restore_error.set(None);
-                                                                wasm_bindgen_futures::spawn_local(async move {
-                                                                    match crate::api::restore_audit_entry(&id).await {
-                                                                        Ok(_) => reload.run(()),
-                                                                        Err(err) => {
-                                                                            leptos::logging::error!(
-                                                                                "body restore failed: {err}"
-                                                                            );
-                                                                            restore_error.set(Some(
-                                                                                "Could not restore this version. Refresh and try again."
-                                                                                    .to_string(),
-                                                                            ));
-                                                                        }
-                                                                    }
-                                                                    restoring_version.set(None);
-                                                                });
-                                                            }
-                                                        }
-                                                    >"Restore version"</button>
-                                                </div>
-                                                <Show
-                                                    when=move || expanded_version.get().as_deref()
-                                                        == Some(preview_show_aid.as_str())
-                                                    fallback=|| ()
-                                                >
-                                                    <div class="history-version-preview">
-                                                        <StaticMarkdownPreview
-                                                            body=preview_body.clone()
-                                                            class="card-markdown history-version-markdown"
-                                                        />
-                                                    </div>
-                                                </Show>
-                                            }
+                                        {version.map(|version| view! {
+                                            <CardVersionActions
+                                                audit_id=aid.clone()
+                                                version=version
+                                                current=current_card_version
+                                                expanded=expanded_version
+                                                restoring=restoring_version
+                                                restore_error=restore_error
+                                                reload=reload
+                                            />
                                         })}
                                     </li>
                                 }
@@ -392,7 +296,148 @@ pub fn HistoryPanel(
     }
 }
 
-fn card_body_version(entry: &shared::AuditLogEntry) -> Option<&str> {
+/// Preview / restore controls for one restorable card version in the drawer.
+///
+/// Pulled out of `HistoryPanel`'s row rendering rather than left inline. A
+/// Leptos `view!` compiles to one deeply nested generic type, and this markup
+/// sat inside `Show > aside > ul > For > li` — deep enough that adding to it
+/// pushed the frontend crate's compile time from minutes into the tens of
+/// minutes. A component boundary caps the nesting so this block is type-checked
+/// and monomorphised on its own.
+#[component]
+fn CardVersionActions(
+    /// Audit row this version came from; identifies it for preview + restore.
+    audit_id: String,
+    /// Body and tags captured by that row.
+    version: CardVersion,
+    /// The row whose content the card currently has, if any.
+    current: Signal<Option<(String, CardVersion)>>,
+    /// Audit id whose preview is expanded, shared across rows so only one opens.
+    expanded: RwSignal<Option<String>>,
+    /// Audit id currently being restored, used to disable its button.
+    restoring: RwSignal<Option<String>>,
+    /// Drawer-level error banner text.
+    restore_error: RwSignal<Option<String>>,
+    /// Re-fetches the history list after a successful restore.
+    reload: Callback<()>,
+) -> impl IntoView {
+    let preview_aid = audit_id.clone();
+    let preview_toggle_aid = audit_id.clone();
+    let preview_label_aid = audit_id.clone();
+    let preview_show_aid = audit_id.clone();
+    let restore_aid = audit_id.clone();
+    let restore_request_aid = audit_id.clone();
+    let current_aid = audit_id;
+    let version_for_match = version.clone();
+    let version_for_title = version.clone();
+    let preview_body = version.body;
+    // Built once, up front: the preview is static, so the chips need no closure.
+    let preview_tag_chips = (!version.tags.is_empty()).then(|| {
+        let chips = version
+            .tags
+            .iter()
+            .map(|tag| view! { <span class="tag-chip">{format!("#{tag}")}</span> })
+            .collect::<Vec<_>>();
+        view! { <div class="history-version-tags">{chips}</div> }
+    });
+
+    view! {
+        <div class="history-version-actions">
+            <button
+                type="button"
+                class="btn btn-history-version"
+                aria-expanded=move || {
+                    (expanded.get().as_deref() == Some(preview_aid.as_str())).to_string()
+                }
+                on:click=move |_| {
+                    expanded.update(|open| {
+                        if open.as_deref() == Some(preview_toggle_aid.as_str()) {
+                            *open = None;
+                        } else {
+                            *open = Some(preview_toggle_aid.clone());
+                        }
+                    });
+                }
+            >
+                {move || {
+                    if expanded.get().as_deref() == Some(preview_label_aid.as_str()) {
+                        "Hide preview"
+                    } else {
+                        "Preview"
+                    }
+                }}
+            </button>
+            <Show
+                when=move || {
+                    current.get().as_ref().is_some_and(|(id, _)| id == &current_aid)
+                }
+                fallback=|| ()
+            >
+                <span class="history-current">"Current"</span>
+            </Show>
+            <button
+                type="button"
+                class="btn btn-restore btn-history-version"
+                disabled=move || {
+                    current
+                        .get()
+                        .as_ref()
+                        .is_some_and(|(_, current)| current == &version_for_match)
+                        || restoring.get().as_deref() == Some(restore_aid.as_str())
+                }
+                title=move || {
+                    if current
+                        .get()
+                        .as_ref()
+                        .is_some_and(|(_, current)| current == &version_for_title)
+                    {
+                        "This version is already current"
+                    } else {
+                        "Restore this body and tags"
+                    }
+                }
+                on:click=move |_| {
+                    let id = restore_request_aid.clone();
+                    restoring.set(Some(id.clone()));
+                    restore_error.set(None);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        match crate::api::restore_audit_entry(&id).await {
+                            Ok(_) => reload.run(()),
+                            Err(err) => {
+                                leptos::logging::error!("content restore failed: {err}");
+                                restore_error.set(Some(
+                                    "Could not restore this version. Refresh and try again."
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        restoring.set(None);
+                    });
+                }
+            >"Restore version"</button>
+        </div>
+        <Show
+            when=move || { expanded.get().as_deref() == Some(preview_show_aid.as_str()) }
+            fallback=|| ()
+        >
+            <div class="history-version-preview">
+                {preview_tag_chips.clone()}
+                <StaticMarkdownPreview
+                    body=preview_body.clone()
+                    class="card-markdown history-version-markdown"
+                />
+            </div>
+        </Show>
+    }
+}
+
+/// The card **content** — body plus tags — one audit row captured, or `None`
+/// when the row isn't a restorable card version.
+///
+/// Mirrors `backend::audit::card_content_version`, which decides what a restore
+/// actually writes; the two must agree or the drawer would offer to restore
+/// something different from what it previews.
+fn card_content_version(entry: &shared::AuditLogEntry) -> Option<CardVersion> {
     if entry.entity_type != "card"
         || !matches!(
             entry.action.as_str(),
@@ -401,7 +446,28 @@ fn card_body_version(entry: &shared::AuditLogEntry) -> Option<&str> {
     {
         return None;
     }
-    entry.snapshot_after.as_ref()?.get("body")?.as_str()
+    let snapshot = entry.snapshot_after.as_ref()?;
+    let body = snapshot.get("body")?.as_str()?.to_string();
+    // Rows predating tags simply have no `tags` key — that card had no tags.
+    let tags = snapshot
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(CardVersion { body, tags })
+}
+
+/// One restorable snapshot of a card's content.
+#[derive(Clone, PartialEq, Eq)]
+struct CardVersion {
+    body: String,
+    tags: Vec<String>,
 }
 
 // ── JS bridge helpers ────────────────────────────────────────────────────

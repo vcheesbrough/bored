@@ -68,8 +68,13 @@ pub enum BoardSseEvent {
         board_id: String,
     },
 
+    /// A new audit-log row was appended — drives the history drawer in real time.
+    /// Boxed to match the backend's `BoardEvent::AuditAppended`: an audit entry
+    /// carries two JSON snapshots and would otherwise make every variant of this
+    /// enum as large as the biggest one (`clippy::large_enum_variant`). Boxing is
+    /// invisible on the wire — serde encodes `Box<T>` exactly as `T`.
     AuditAppended {
-        entry: shared::AuditLogEntry,
+        entry: Box<shared::AuditLogEntry>,
     },
 }
 

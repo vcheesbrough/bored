@@ -1,7 +1,8 @@
 //! Audit recording + history queries + restore replay.
 //!
 //! Card body `update` rows may merge in place when the client repeats the same
-//! `audit_edit_session` (one editing stretch). Everything else is append-only.
+//! `audit_edit_session` (one editing stretch). Everything else — tag changes
+//! included — is append-only.
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
@@ -501,13 +502,14 @@ async fn restore_one_delete(
                     "CREATE type::thing('cards', $id) SET \
                      column = type::thing('columns', $col_id), \
                      body = $body, position = $position, number = $number, \
-                     last_edited_by = $editor",
+                     tags = $tags, last_edited_by = $editor",
                 )
                 .bind(("id", card.id.clone()))
                 .bind(("col_id", card.column_id.clone()))
                 .bind(("body", card.body.clone()))
                 .bind(("position", card.position))
                 .bind(("number", card.number as i64))
+                .bind(("tags", card.tags.clone()))
                 .bind(("editor", editor.clone()))
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -562,7 +564,13 @@ async fn restore_batch(
     Ok(restored)
 }
 
-fn card_body_version(row: &DbAuditLog) -> Result<&str, StatusCode> {
+/// The card **content** (body + tags) captured by one audit row's
+/// `snapshot_after`, or a 422 when the row is not a card version to begin with.
+///
+/// Tags are optional in the snapshot: rows recorded before tags existed simply
+/// have no `tags` key, and restoring one means "the card had no tags then",
+/// which is exactly an empty list.
+fn card_content_version(row: &DbAuditLog) -> Result<(String, Vec<String>), StatusCode> {
     if row.entity_type != "card"
         || !matches!(
             row.action.as_str(),
@@ -579,26 +587,45 @@ fn card_body_version(row: &DbAuditLog) -> Result<&str, StatusCode> {
     if snapshot.get("id").and_then(Value::as_str) != Some(row.entity_id.as_str()) {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
-    snapshot
+    let body = snapshot
         .get("body")
         .and_then(Value::as_str)
-        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?
+        .to_string();
+    let tags = snapshot
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((body, tags))
 }
 
-/// Restore only the body of an active card from a historical `snapshot_after`.
-async fn restore_card_body(
+/// Restore the content — body **and** tags — of an active card from a
+/// historical `snapshot_after`.
+///
+/// Both move together on purpose: a version in the drawer is one moment in the
+/// card's life, so restoring it puts the card back to that moment rather than
+/// to a hybrid of an old body and today's tags.
+async fn restore_card_content(
     db: &Surreal<Db>,
     claims: &Claims,
     events: &Sender<BroadcastEvent>,
     row: &DbAuditLog,
 ) -> Result<Vec<shared::AuditLogEntry>, StatusCode> {
-    let target_body = card_body_version(row)?.to_string();
+    let (target_body, target_tags) = card_content_version(row)?;
     let existing: Option<DbCard> = db
         .select(("cards", &row.entity_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let existing = existing.ok_or(StatusCode::NOT_FOUND)?;
-    if existing.body == target_body {
+    // Nothing to restore only when *both* halves already match.
+    if existing.body == target_body && existing.tags == target_tags {
         return Err(StatusCode::CONFLICT);
     }
 
@@ -606,10 +633,12 @@ async fn restore_card_body(
         serde_json::to_value(existing.into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let updated: Option<DbCard> = db
         .query(
-            "UPDATE type::thing('cards', $id) SET body = $body, last_edited_by = $editor RETURN AFTER",
+            "UPDATE type::thing('cards', $id) SET body = $body, tags = $tags, \
+             last_edited_by = $editor RETURN AFTER",
         )
         .bind(("id", row.entity_id.clone()))
         .bind(("body", target_body))
+        .bind(("tags", target_tags))
         .bind(("editor", claims.sub.clone()))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -646,10 +675,11 @@ async fn restore_card_body(
     Ok(vec![entry])
 }
 
-/// `POST /api/audit/:id/restore` — replays a delete or restores an active card body.
+/// `POST /api/audit/:id/restore` — replays a delete or restores an active card's content.
 ///
-/// Card body restores read `snapshot_after.body` from a card create, baseline,
-/// update, or earlier restore row. Delete restores retain the cascade behavior below.
+/// Card content restores read `snapshot_after.body` and `snapshot_after.tags` from a
+/// card create, baseline, update, or earlier restore row. Delete restores retain the
+/// cascade behavior below.
 ///
 /// When the referenced row is a **board** or **column** delete that was recorded as
 /// part of a cascade batch (`batch_group`), the entire batch is replayed in reverse
@@ -676,6 +706,6 @@ pub async fn restore_from_audit(
             restore_one_delete(db, claims, events, &row).await
         }
     } else {
-        restore_card_body(db, claims, events, &row).await
+        restore_card_content(db, claims, events, &row).await
     }
 }

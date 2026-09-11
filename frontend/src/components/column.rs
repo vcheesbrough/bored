@@ -4,7 +4,7 @@ use leptos::prelude::*;
 
 use crate::components::card::CardItem;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
-use crate::search::{card_matches_query, BoardSearchQuery};
+use crate::search::{card_matches_query, BoardCardIndex, BoardSearchQuery};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -70,6 +70,22 @@ pub fn ColumnView(
 
     provide_context(ColumnCards(cards));
     provide_context(drag_over_card_id);
+
+    // Publish this column's card list to the board-level index so the navbar
+    // search can suggest tags and card numbers from the whole board. Entries
+    // are keyed by column ID and withdrawn on unmount, so a deleted column
+    // stops contributing suggestions immediately.
+    if let Some(BoardCardIndex(index)) = use_context::<BoardCardIndex>() {
+        let column_id = column.get_untracked().id;
+        let registered_id = column_id.clone();
+        index.update(|entries| {
+            entries.retain(|(id, _)| *id != column_id);
+            entries.push((column_id, cards));
+        });
+        on_cleanup(move || {
+            index.try_update(|entries| entries.retain(|(id, _)| *id != registered_id));
+        });
+    }
 
     // ── Contexts from BoardView ────────────────────────────────────────────
     let sse_event =

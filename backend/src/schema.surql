@@ -18,6 +18,8 @@ DEFINE FIELD IF NOT EXISTS column         ON TABLE cards TYPE record<columns>;
 DEFINE FIELD IF NOT EXISTS body           ON TABLE cards TYPE string;
 DEFINE FIELD IF NOT EXISTS position       ON TABLE cards TYPE int;
 DEFINE FIELD IF NOT EXISTS number         ON TABLE cards TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS tags           ON TABLE cards TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS tags.*         ON TABLE cards TYPE string;
 DEFINE FIELD IF NOT EXISTS last_edited_by ON TABLE cards TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at     ON TABLE cards TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at     ON TABLE cards TYPE datetime VALUE time::now();
@@ -28,6 +30,12 @@ UPDATE cards SET body = string::concat(title, '\n\n', description ?? '') WHERE b
 -- Remove legacy fields from the iteration-5 schema; no-op if they don't exist.
 REMOVE FIELD IF EXISTS title       ON TABLE cards;
 REMOVE FIELD IF EXISTS description ON TABLE cards;
+-- Backfill `tags` on cards written before the field existed. `DEFAULT []` only
+-- applies to new records, and on a SCHEMAFULL table a later UPDATE of a record
+-- whose `tags` is still NONE fails the `array<string>` type check — so existing
+-- rows have to be given the empty list explicitly. Idempotent: once every row
+-- has a list, the WHERE clause matches nothing.
+UPDATE cards SET tags = [] WHERE tags IS NONE;
 
 -- Global counter used to assign unique sequential card numbers.
 -- The single record card_counter:global holds the current high-water mark.
