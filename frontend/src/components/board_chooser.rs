@@ -7,6 +7,10 @@ use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope}
 pub fn BoardChooser(
     board_name: RwSignal<String>,
     columns: RwSignal<Vec<RwSignal<shared::Column>>>,
+    /// Owner for column signals this component creates. Belongs to the view
+    /// that owns `columns`, so the signals outlive anything here — see
+    /// [`crate::columns::insert_absent`].
+    column_owner: Owner,
 ) -> impl IntoView {
     let params = use_params_map();
     // Reads the `:slug` route parameter — the board name, which doubles as the URL slug.
@@ -18,8 +22,11 @@ pub fn BoardChooser(
     let new_col_name = RwSignal::new(String::new());
     let adding_board = RwSignal::new(false);
     let adding_col = RwSignal::new(false);
-    // Prevents duplicate `create_column` calls when Enter and `blur` both fire.
-    let create_col_inflight = RwSignal::new(false);
+    // High-water mark of the positions already requested from the server.
+    // `columns` only knows about columns it has been given back, so without this
+    // two creates submitted before either response lands would both claim the
+    // same slot.
+    let requested_position: RwSignal<Option<i32>> = RwSignal::new(None);
     let editing_col: RwSignal<Option<String>> = RwSignal::new(None);
     let edit_buf = RwSignal::new(String::new());
     let navigate = use_navigate();
@@ -57,13 +64,12 @@ pub fn BoardChooser(
         });
     });
 
+    // Creates a column from whatever is currently typed, if anything. Whether
+    // the input row stays open afterwards is the caller's decision: Enter keeps
+    // it open for the next column, losing focus closes it.
     let submit_new_col: Callback<()> = Callback::new(move |_| {
-        if create_col_inflight.get_untracked() {
-            return;
-        }
         let name = new_col_name.get_untracked();
         if name.trim().is_empty() {
-            adding_col.set(false);
             return;
         }
         // Use the board slug (current route param) as the API path segment.
@@ -71,18 +77,32 @@ pub fn BoardChooser(
         if board_id.is_empty() {
             return;
         }
-        let position = columns.with_untracked(|cs| cs.len() as i32);
-        create_col_inflight.set(true);
+        let position = columns.with_untracked(|cs| {
+            let mut used: Vec<i32> = cs.iter().map(|c| c.get_untracked().position).collect();
+            used.extend(requested_position.get_untracked());
+            crate::columns::next_position(&used)
+        });
+        requested_position.set(Some(position));
+        // Empty the field now rather than when the response lands. The request
+        // owns this name from here on, so a second submit of the same keystroke
+        // (Enter, then the blur it causes) finds nothing left to send, and
+        // whatever the user types while the request is in flight is theirs to
+        // keep instead of being wiped by the reply to an earlier one.
+        new_col_name.set(String::new());
+        let owner = column_owner.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let res = crate::api::create_column(&board_id, name, position).await;
-            create_col_inflight.set(false);
-            match res {
-                Ok(col) => {
-                    columns.update(|cs| cs.push(RwSignal::new(col)));
-                    new_col_name.set(String::new());
-                    adding_col.set(false);
+            match crate::api::create_column(&board_id, name.clone(), position).await {
+                Ok(col) => crate::columns::insert_absent(&owner, columns, col),
+                Err(e) => {
+                    leptos::logging::error!("failed to create column: {e}");
+                    // Hand the name back so the attempt can be retried, unless
+                    // the user has already started typing the next one.
+                    new_col_name.update(|current| {
+                        if current.is_empty() {
+                            *current = name;
+                        }
+                    });
                 }
-                Err(e) => leptos::logging::error!("failed to create column: {e}"),
             }
         });
     });
@@ -392,14 +412,28 @@ pub fn BoardChooser(
                 >
                     <input
                         type="text"
-                        class="chooser-col-edit"
+                        // `chooser-col-edit` carries the shared styling; the
+                        // second class distinguishes this one input from the
+                        // per-column rename inputs, which are otherwise
+                        // identical to look at and to select.
+                        class="chooser-col-edit chooser-col-new"
                         placeholder="Column name"
                         prop:value=move || new_col_name.get()
                         on:input=move |ev| new_col_name.set(event_target_value(&ev))
-                        on:blur=move |_| submit_new_col.run(())
+                        // Leaving the field commits what is in it and is the
+                        // end of adding columns, so the row closes.
+                        on:blur=move |_| {
+                            submit_new_col.run(());
+                            adding_col.set(false);
+                        }
                         on:keydown=move |ev| {
                             if ev.key() == "Enter" {
                                 ev.prevent_default();
+                                // Deliberately leaves the row open and focused:
+                                // the user is most likely adding several columns
+                                // at once, and hiding a focused input hands focus
+                                // to `<body>`, where the next thing they type is
+                                // silently discarded.
                                 submit_new_col.run(());
                             } else if ev.key() == "Escape" {
                                 new_col_name.set(String::new());

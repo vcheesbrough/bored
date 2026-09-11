@@ -97,6 +97,10 @@ pub fn BoardView() -> impl IntoView {
 
     let board_name = RwSignal::new(String::new());
     let columns: RwSignal<Vec<RwSignal<shared::Column>>> = RwSignal::new(Vec::new());
+    // Owner for the per-column signals inside `columns`. They have to be created
+    // under an owner that lives as long as the list, which rules out creating
+    // them in an `Effect` — see `crate::columns::insert_absent`.
+    let view_owner = Owner::current().expect("BoardView runs inside a reactive owner");
     let loading = RwSignal::new(true);
     let search_query = RwSignal::new(String::new());
 
@@ -408,18 +412,14 @@ pub fn BoardView() -> impl IntoView {
     // ── Column-level SSE events ───────────────────────────────────────────
     // Use `board_ulid.get_untracked()` for the board-ID comparison so this
     // Effect is only reactive on `sse_event`, not on `board_ulid`.
+    let sse_column_owner = view_owner.clone();
     Effect::new(move |_| {
         let Some(event) = sse_event.get() else { return };
         let ulid = board_ulid.get_untracked();
         match event {
             BoardSseEvent::ColumnCreated { column } => {
                 if column.board_id == ulid {
-                    columns.update(|cs| {
-                        if cs.iter().any(|s| s.get_untracked().id == column.id) {
-                            return;
-                        }
-                        cs.push(RwSignal::new(column));
-                    });
+                    crate::columns::insert_absent(&sse_column_owner, columns, column);
                 }
             }
             BoardSseEvent::ColumnUpdated { column } => {
@@ -459,7 +459,7 @@ pub fn BoardView() -> impl IntoView {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
-            <BoardChooser board_name=board_name columns=columns />
+            <BoardChooser board_name=board_name columns=columns column_owner=view_owner.clone() />
             <div class="navbar-search">
                 <input
                     node_ref=search_input_ref
