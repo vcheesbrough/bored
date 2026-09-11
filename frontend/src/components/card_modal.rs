@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use crate::components::confirm_modal::ConfirmModal;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
+use crate::components::tag_editor::TagEditor;
 use crate::search::BoardSearchQuery;
 
 #[derive(Clone, PartialEq)]
@@ -157,6 +158,44 @@ pub fn CardModal(
 
     let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
 
+    // Same contract as the inline card: tags are read straight off the card and
+    // written back as a full replacement list, on their own audit row.
+    let tags = Signal::derive(move || card.try_get().flatten().map(|c| c.tags).unwrap_or_default());
+    let save_tags = Callback::new(move |next: Vec<String>| {
+        let Some(current) = card.get_untracked() else {
+            return;
+        };
+        let card_id = current.id.clone();
+        let previous = current.tags;
+        // Optimistic, for the same reason as the inline card: consecutive edits
+        // have to compose rather than each start from the last server echo.
+        card.update(|c| {
+            if let Some(c) = c.as_mut() {
+                c.tags = next.clone();
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let req = shared::UpdateCardRequest {
+                tags: Some(next),
+                ..Default::default()
+            };
+            match crate::api::update_card(&card_id, req).await {
+                Ok(updated) => {
+                    card.set(Some(updated.clone()));
+                    on_updated.run(updated);
+                }
+                Err(e) => {
+                    card.update(|c| {
+                        if let Some(c) = c.as_mut() {
+                            c.tags = previous;
+                        }
+                    });
+                    leptos::logging::error!("modal tag save failed: {e}");
+                }
+            }
+        });
+    });
+
     // The modal renders over the board, so it keeps the same search highlight.
     // `use_context` rather than `expect_context`: the modal must still render if
     // it is ever mounted outside a board.  `try_get` for the same reason as in
@@ -228,6 +267,8 @@ pub fn CardModal(
                             on:click=on_delete_click
                         >"✕"</button>
                     </div>
+
+                    <TagEditor tags=tags on_change=save_tags />
 
                     // ── Body region: rendered markdown ↔ textarea toggle ──────
                     <div class="modal-body-region">

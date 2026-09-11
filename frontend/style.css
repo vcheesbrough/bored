@@ -1542,3 +1542,189 @@ mark.search-hit {
 .chooser-history-btn:hover {
   color: var(--accent);
 }
+
+/* ── Card tags (iteration 41 / card #292) ────────────────────────────────── */
+
+/* Shared chip look. Used read-only on collapsed cards and in history previews,
+   and with `.tag-chip-editable` in the tag editor. The monospace `#name` form
+   matches how tags are written in the search box, so the two read as the same
+   thing. */
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 160px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+/* A chip matched by a `#tag` search term inverts, exactly like the card-number
+   badge does for `#42`, so a filtered card always shows why it survived. */
+.tag-chip.tag-chip-hit {
+  background: var(--yellow);
+  border-color: var(--yellow);
+  color: var(--on-yellow);
+}
+
+.tag-chip-overflow {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+/* Collapsed card: one line of chips above the preview. `padding-right` keeps
+   them clear of the absolutely positioned card-number badge. */
+.tag-chip-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  overflow: hidden;
+  margin-bottom: 4px;
+  padding-right: 36px;
+}
+
+/* Editable chip row in the expanded card and the modal. */
+.tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+  cursor: default;
+}
+
+/* Only the inline card has a toolbar floating over this row; the modal puts its
+   toolbar on a line of its own, so it needs no gutter. */
+.card-item .tag-editor {
+  padding-right: 120px;
+}
+
+.tag-chip-editable {
+  padding-right: 2px;
+}
+
+.tag-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.tag-chip-remove:hover {
+  background: var(--danger);
+  color: var(--text);
+}
+
+.tag-editor-input-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Borderless until focused so an untagged card shows a quiet `+ tag` hint
+   rather than an empty form field. */
+.tag-editor-input {
+  width: 80px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tag-editor-input::placeholder {
+  color: var(--text-muted);
+}
+
+.tag-editor-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+  width: 120px;
+}
+
+/* ── Suggestion popups ───────────────────────────────────────────────────── */
+
+/* One look for both popups: the tag editor's completions and the navbar's
+   `#` helper. They do the same job in two places, so they should not look like
+   two different controls. */
+.tag-suggestions,
+.search-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 180px;
+  max-width: 320px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.tag-suggestion,
+.search-suggestion {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.tag-suggestion:hover,
+.search-suggestion:hover,
+.tag-suggestion-active,
+.search-suggestion-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ── Tags in a history version preview ───────────────────────────────────── */
+
+.history-version-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
