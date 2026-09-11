@@ -20,7 +20,7 @@ pub fn SearchSuggestions(
     active: RwSignal<Option<usize>>,
     /// Invoked with the chosen suggestion when a row is clicked.
     on_accept: Callback<HashSuggestion>,
-) -> impl IntoView {
+) -> AnyView {
     view! {
         <Show when=move || { open.get() } fallback=|| ()>
             <ul class="search-suggestions" id="search-hash-suggestions" role="listbox">
@@ -52,4 +52,5 @@ pub fn SearchSuggestions(
             </ul>
         </Show>
     }
+    .into_any()
 }
