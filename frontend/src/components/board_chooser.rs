@@ -22,10 +22,10 @@ pub fn BoardChooser(
     let new_col_name = RwSignal::new(String::new());
     let adding_board = RwSignal::new(false);
     let adding_col = RwSignal::new(false);
-    // High-water mark of the positions already requested from the server.
-    // `columns` only knows about columns it has been given back, so without this
-    // two creates submitted before either response lands would both claim the
-    // same slot.
+    // High-water mark of the positions already requested from the server, for
+    // the board currently routed to. `columns` only knows about columns it has
+    // been given back, so without this two creates submitted before either
+    // response lands would both claim the same slot.
     let requested_position: RwSignal<Option<i32>> = RwSignal::new(None);
     let editing_col: RwSignal<Option<String>> = RwSignal::new(None);
     let edit_buf = RwSignal::new(String::new());
@@ -62,6 +62,14 @@ pub fn BoardChooser(
                 Err(e) => leptos::logging::error!("failed to create board: {e}"),
             }
         });
+    });
+
+    // Positions are per board, and this component outlives a board change: the
+    // route can move to another board without remounting it. Drop the mark so it
+    // cannot inflate positions on a board it was never measured against.
+    Effect::new(move |_| {
+        current_slug();
+        requested_position.set(None);
     });
 
     // Creates a column from whatever is currently typed, if anything. Whether

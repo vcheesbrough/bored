@@ -99,8 +99,11 @@ pub fn BoardView() -> impl IntoView {
     let columns: RwSignal<Vec<RwSignal<shared::Column>>> = RwSignal::new(Vec::new());
     // Owner for the per-column signals inside `columns`. They have to be created
     // under an owner that lives as long as the list, which rules out creating
-    // them in an `Effect` — see `crate::columns::insert_absent`.
-    let view_owner = Owner::current().expect("BoardView runs inside a reactive owner");
+    // them in an `Effect` — see `crate::columns::insert_absent`. A component
+    // body always has an owner, but falling back to a standalone one keeps a
+    // broken assumption from blanking the whole board: an owner held here for
+    // the life of the view satisfies the same requirement.
+    let view_owner = Owner::current().unwrap_or_default();
     let loading = RwSignal::new(true);
     let search_query = RwSignal::new(String::new());
 
