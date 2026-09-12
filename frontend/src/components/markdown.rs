@@ -270,7 +270,8 @@ pub fn MarkdownPreview(
     /// Omit it (or feed it an empty string) to render without highlighting.
     #[prop(optional, into)]
     highlight: Option<Signal<String>>,
-) -> impl IntoView {
+) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     view! {
         <div
             class=class
@@ -285,6 +286,7 @@ pub fn MarkdownPreview(
             }
         ></div>
     }
+    .into_any()
 }
 
 /// Renders markdown that does not change for the lifetime of the component.

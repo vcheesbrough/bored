@@ -44,7 +44,8 @@ pub fn HistoryPanel(
     board_slug: RwSignal<String>,
     board_ulid: RwSignal<String>,
     sse_event: RwSignal<Option<BoardSseEvent>>,
-) -> impl IntoView {
+) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment below
     let drawer = use_context::<HistoryDrawer>().expect("HistoryDrawer context missing");
     let entries = RwSignal::new(Vec::<shared::AuditLogEntry>::new());
     let loading = RwSignal::new(false);
@@ -298,6 +299,7 @@ pub fn HistoryPanel(
             </aside>
         </Show>
     }
+    .into_any()
 }
 
 /// Preview / restore controls for one restorable card version in the drawer.
