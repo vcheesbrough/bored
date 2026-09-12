@@ -30,10 +30,10 @@ pub const EARLIER_COLLABORATOR: &str = "Earlier collaborator";
 /// `Some("")` is treated the same as `None` so callers don't have to
 /// special-case empty strings.
 pub fn label_actor(actor_sub: &str, actor_display_name: &str, me_name: Option<&str>) -> String {
-    if let Some(me) = me_name.filter(|s| !s.is_empty()) {
-        if actor_display_name.eq_ignore_ascii_case(me) {
-            return YOU.to_string();
-        }
+    if let Some(me) = me_name.filter(|s| !s.is_empty())
+        && actor_display_name.eq_ignore_ascii_case(me)
+    {
+        return YOU.to_string();
     }
     if actor_sub == "anonymous" {
         return SOMEONE.to_string();

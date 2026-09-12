@@ -1,14 +1,14 @@
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    Extension, Json,
 };
 
 use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbColumn};
-use crate::routes::boards::{editor_sub, find_board_by_slug, AppState};
+use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
 
 pub async fn list_columns(
     State(state): State<AppState>,

@@ -183,7 +183,7 @@ pub fn hash_suggestions(
             .filter(|card| card.number.to_string().starts_with(prefix))
             .collect();
         // Highest number first: the newest cards are the ones being referenced.
-        numbered.sort_by(|a, b| b.number.cmp(&a.number));
+        numbered.sort_by_key(|card| std::cmp::Reverse(card.number));
         out.extend(numbered.into_iter().take(MAX_CARD_SUGGESTIONS).map(|card| {
             HashSuggestion::Card {
                 number: card.number,

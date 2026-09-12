@@ -2,10 +2,16 @@
 name = "backend"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "backend"
 path = "src/main.rs"
+
+[lints.clippy]
+# surrealdb::Error is inherently >128 bytes; propagating it via `?` throughout
+# this crate is the intended usage of the driver, not something to box away.
+result_large_err = "allow"
 
 [dependencies]
 axum = "0.7"

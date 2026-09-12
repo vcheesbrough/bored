@@ -12,16 +12,16 @@ mod routes;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     middleware,
     routing::{delete, get, post, put}, // HTTP method helpers for the router
-    Router,
 };
 use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rust TLS)
 use routes::boards::AppState;
 use std::net::SocketAddr;
 use tower_http::{services::ServeDir, trace::TraceLayer}; // Middleware: static files + request tracing
 
-use crate::auth::{auth_middleware, AuthConfig, AuthSessionManager, JwksCache};
+use crate::auth::{AuthConfig, AuthSessionManager, JwksCache, auth_middleware};
 
 // Wraps ServeDir and replaces any 404 response with index.html so that SPA
 // deep-links (e.g. /boards/123) survive a browser reload.
@@ -780,9 +780,11 @@ mod tests {
         assert!(hist_a.iter().any(|e| {
             e.entity_type == "card" && e.entity_id == card.id && e.action == "create"
         }));
-        assert!(!hist_a
-            .iter()
-            .any(|e| e.entity_type == "column" && e.entity_id == col_b.id));
+        assert!(
+            !hist_a
+                .iter()
+                .any(|e| e.entity_type == "column" && e.entity_id == col_b.id)
+        );
     }
 
     #[tokio::test]
@@ -1722,7 +1724,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_returns_version_and_env() {
-        std::env::remove_var("APP_VERSION");
+        // SAFETY: env mutation happens strictly before `test_app()` creates any
+        // db/runtime background tasks that could race a `getenv`. `#[serial]`
+        // additionally serialises this against the other `#[serial]` tests here
+        // (it does not by itself exclude other threads).
+        unsafe { std::env::remove_var("APP_VERSION") };
         let server = test_app().await;
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
@@ -1737,7 +1743,11 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_uses_app_version_env_and_configured_environment() {
-        std::env::set_var("APP_VERSION", "1.2.3");
+        // SAFETY: env mutation happens strictly before `db::connect_mem()` spawns
+        // SurrealDB's background tasks that could race a `getenv`. `#[serial]`
+        // additionally serialises this against the other `#[serial]` tests here
+        // (it does not by itself exclude other threads).
+        unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
         let db = db::connect_mem().await.expect("failed to connect mem db");
         let state = AppState::new(db);
         // `environment` is threaded through `app()` directly (from
@@ -1747,7 +1757,12 @@ mod tests {
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
         let body = resp.text();
-        std::env::remove_var("APP_VERSION");
+        drop(server);
+        // SAFETY: `server` (and the db/state it owns, including SurrealDB's
+        // background tasks) was dropped just above, so no task from this test
+        // can race this mutation. `#[serial]` additionally serialises this
+        // against the other `#[serial]` tests here.
+        unsafe { std::env::remove_var("APP_VERSION") };
         let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
         assert_eq!(info.version, "1.2.3");
         assert_eq!(info.env, "production");
@@ -2723,9 +2738,11 @@ mod tests {
             .get(&format!("/api/cards/{}/history", a.id))
             .await
             .json();
-        assert!(hist
-            .iter()
-            .any(|e| e.entity_type == "card_link" && e.entity_id == ab.id && e.action == "delete"));
+        assert!(
+            hist.iter().any(|e| e.entity_type == "card_link"
+                && e.entity_id == ab.id
+                && e.action == "delete")
+        );
         assert!(!hist.iter().any(|e| e.entity_id == bc.id));
 
         // The link delete rows land before the card delete row in time, so a

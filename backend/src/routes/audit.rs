@@ -1,13 +1,13 @@
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    Extension, Json,
 };
 
 use crate::audit;
 use crate::auth::Claims;
 use crate::models::DbColumn;
-use crate::routes::boards::{find_board_by_slug, AppState};
+use crate::routes::boards::{AppState, find_board_by_slug};
 
 pub async fn board_history(
     State(state): State<AppState>,

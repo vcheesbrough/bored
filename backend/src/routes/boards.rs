@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    Extension, Json,
 };
-use surrealdb::{engine::local::Db, Surreal};
-use tokio::sync::{broadcast, Mutex};
+use surrealdb::{Surreal, engine::local::Db};
+use tokio::sync::{Mutex, broadcast};
 
 use crate::audit;
 use crate::auth::{AuthConfig, AuthSessionManager, Claims, JwksCache};
-use crate::events::{BoardEvent, BroadcastEvent, BROADCAST_CAPACITY};
+use crate::events::{BROADCAST_CAPACITY, BoardEvent, BroadcastEvent};
 use crate::models::{DbBoard, DbCard, DbColumn};
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.

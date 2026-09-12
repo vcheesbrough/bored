@@ -1,15 +1,15 @@
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    Extension, Json,
 };
-use surrealdb::{engine::local::Db, Surreal};
+use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
-use crate::routes::boards::{editor_sub, AppState};
+use crate::routes::boards::{AppState, editor_sub};
 
 /// Gap between adjacent card positions in the sparse ordering scheme.
 /// Large enough to allow ~10 bisections between any two cards before a rebalance
@@ -392,10 +392,10 @@ pub async fn update_card(
             None => return Err(StatusCode::NOT_FOUND),
         };
 
-        if let Some(ref current_col) = current_col {
-            if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
-            }
+        if let Some(ref current_col) = current_col
+            && current_col.board.id.to_raw() != target_col.board.id.to_raw()
+        {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -650,10 +650,10 @@ pub async fn move_card(
     // Board ID for the SSE event — always available from the target column.
     let board_id = target_col.board.id.to_raw();
 
-    if let Some(current_col) = current_col {
-        if current_col.board.id.to_raw() != board_id {
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
-        }
+    if let Some(current_col) = current_col
+        && current_col.board.id.to_raw() != board_id
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // Compute a sparse position so only this one card needs to be written.
