@@ -864,7 +864,12 @@ pub async fn reorder_cards(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let mut it = updated.into_iter();
         let Some(card_after) = it.next() else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            // Zero rows means the card left this column between the SELECT
+            // above and this UPDATE. It is no longer part of the order being
+            // applied, so skip it rather than failing a batch that has already
+            // written rows — the same policy `reorder_columns` uses for a
+            // column that no longer qualifies.
+            continue;
         };
         if it.next().is_some() {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -896,9 +901,17 @@ pub async fn reorder_cards(
         moved.push(api_card);
     }
 
-    // Broadcast only once every position has landed. A client that refetched
-    // the column part-way through the loop above could see two cards sharing a
-    // slot; by the time it hears about the first move, the column is settled.
+    // Broadcast only once every position has landed, so no `CardMoved` — the
+    // event that actually repositions a card — describes a column that is
+    // still mid-write. (The loop above is not silent: `record_and_broadcast`
+    // emits an `AuditAppended` per row as it goes. Those do not move cards, so
+    // a listener acting only on `CardMoved` never sees the transient state.)
+    //
+    // Cost of doing it this way: `BROADCAST_CAPACITY` is 128 (events.rs:25)
+    // and each moved card spends two slots (`AuditAppended` + `CardMoved`), so
+    // a very large column reordered twice in quick succession could lag a slow
+    // tab into `Lagged`. The escape hatch is an aggregate `CardsReordered`
+    // variant, deliberately not built until something needs it.
     for card in moved {
         let _ = state.events.send(BroadcastEvent {
             board_id: board_id.clone(),

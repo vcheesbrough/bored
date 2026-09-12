@@ -17,9 +17,17 @@ import {
 // `apiCreateCard` inserts at the *top* of the column, so creating Alpha, Beta,
 // Gamma in that order leaves the column reading Gamma, Beta, Alpha.
 
-/** The column whose header shows `name`. */
+/**
+ * The column whose header is exactly `name`. Anchored because `hasText` is
+ * substring matching by default, which would let a "Todo" lookup also match a
+ * column called "Todo later"; case-insensitive because `.column-name` is
+ * `text-transform: uppercase` and Playwright matches the rendered text, which
+ * the string form of `hasText` would have ignored for free.
+ */
 function columnNamed(page: import('@playwright/test').Page, name: string) {
-  return page.locator('.column-view').filter({ has: page.locator('.column-name', { hasText: name }) });
+  return page
+    .locator('.column-view')
+    .filter({ has: page.locator('.column-name', { hasText: new RegExp(`^${name}$`, 'i') }) });
 }
 
 /** Collapsed-card preview text, top to bottom, in the given column. */
