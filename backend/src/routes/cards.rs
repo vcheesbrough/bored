@@ -16,6 +16,16 @@ use crate::routes::boards::{editor_sub, AppState};
 /// is needed, while fitting comfortably within i32.
 const POSITION_GAP: i32 = 1024;
 
+/// Apply [`shared::tags::normalize`] to a client-supplied tag list, mapping a
+/// rejected list onto the HTTP status the handlers return.
+///
+/// Limit violations are a client mistake (a tag longer than the cap, or an
+/// absurd number of them), not a server fault, so they surface as 422 rather
+/// than being silently trimmed into something the user did not ask for.
+fn normalize_tags(raw: &[String]) -> Result<Vec<String>, StatusCode> {
+    shared::tags::normalize(raw).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)
+}
+
 /// Given the sorted card list for a column (with the moving card excluded),
 /// compute the sparse position value for inserting at `idx`.
 /// Uses sentinels: 0 at the top edge, last_pos + 2*GAP at the bottom edge.
@@ -252,6 +262,10 @@ pub async fn create_card(
     };
     let board_id = column.board.id.to_raw();
 
+    // Normalize before claiming a card number so a rejected tag list cannot
+    // burn a number from the global counter.
+    let tags = normalize_tags(&payload.tags)?;
+
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
 
@@ -283,6 +297,7 @@ pub async fn create_card(
              body = $body, \
              number = $number, \
              position = $position, \
+             tags = $tags, \
              last_edited_by = $editor",
         )
         .bind(("id", id))
@@ -290,6 +305,7 @@ pub async fn create_card(
         .bind(("body", payload.body))
         .bind(("number", card_number))
         .bind(("position", top_pos))
+        .bind(("tags", tags))
         .bind(("editor", editor))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -383,6 +399,14 @@ pub async fn update_card(
         }
     }
 
+    // Tags arrive as a full replacement list; normalize before deciding whether
+    // this request changes anything, so a request that only re-sends the tags a
+    // card already has is treated as a no-op rather than an edit.
+    let tags = payload.tags.as_deref().map(normalize_tags).transpose()?;
+    let tags_changed = tags
+        .as_ref()
+        .is_some_and(|new_tags| *new_tags != existing.tags);
+
     // Build a single atomic UPDATE covering all changed fields.
     let mut set_parts: Vec<String> = Vec::new();
 
@@ -394,6 +418,9 @@ pub async fn update_card(
     }
     if payload.position.is_some() {
         set_parts.push("position = $position".to_string());
+    }
+    if tags_changed {
+        set_parts.push("tags = $tags".to_string());
     }
 
     // Nothing changed — return the existing card unchanged.
@@ -411,9 +438,11 @@ pub async fn update_card(
 
     // Layout-only changes are "move" (history toggles / filters). Body edits — alone or
     // combined with position/column in one PUT — stay "update" so audit_edit_session merge works.
+    // A tag change is content, not layout, so it keeps the row out of "move" too: tagging a
+    // card must never be something the history drawer's "show moves" toggle hides.
     let has_layout_change = payload.column_id.is_some() || payload.position.is_some();
     let has_body_change = payload.body.is_some();
-    let is_move_audit = has_layout_change && !has_body_change;
+    let is_move_audit = has_layout_change && !has_body_change && !tags_changed;
 
     let mut q = state
         .db
@@ -429,6 +458,11 @@ pub async fn update_card(
     if let Some(position) = payload.position {
         q = q.bind(("position", position));
     }
+    if tags_changed {
+        // `tags_changed` is only true when `tags` is `Some`; the fallback keeps
+        // the bind total without an unwrap that could panic.
+        q = q.bind(("tags", tags.unwrap_or_default()));
+    }
 
     let card: Option<DbCard> = q
         .await
@@ -442,7 +476,11 @@ pub async fn update_card(
             let snapshot_after = serde_json::to_value(api_card.clone())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let action = if is_move_audit { "move" } else { "update" };
-            let audit_edit_session = if action == "update" {
+            // Every tag change gets its own discrete audit row. Merging one into
+            // an in-flight body-edit session would hide it behind a "+12 chars"
+            // summary and make the tag delta unrecoverable from history, so the
+            // session token is deliberately dropped whenever tags moved.
+            let audit_edit_session = if action == "update" && !tags_changed {
                 payload
                     .audit_edit_session
                     .as_deref()

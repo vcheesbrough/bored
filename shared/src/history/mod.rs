@@ -22,5 +22,5 @@ pub mod summary;
 pub mod time;
 
 pub use actor::{label_actor, EARLIER_COLLABORATOR, SOMEONE, YOU};
-pub use summary::{derive_summary, Summary};
+pub use summary::{card_title_from_body, derive_summary, Summary};
 pub use time::{format_history_time, format_history_tooltip, strip_surreal_wrapper};

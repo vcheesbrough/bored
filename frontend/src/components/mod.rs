@@ -5,4 +5,6 @@ pub mod column;
 pub mod confirm_modal;
 pub mod history_panel;
 pub mod markdown;
+pub mod search_suggestions;
+pub mod tag_editor;
 pub mod user_badge;

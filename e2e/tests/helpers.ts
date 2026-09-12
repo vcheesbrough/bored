@@ -24,13 +24,29 @@ export async function apiCreateColumn(
 export async function apiCreateCard(
   request: APIRequestContext,
   columnId: string,
-  body = ''
+  body = '',
+  tags: string[] = []
 ) {
   const res = await request.post(`/api/columns/${columnId}/cards`, {
-    data: { body },
+    data: { body, tags },
   });
   if (!res.ok()) throw new Error(`POST /api/columns/${columnId}/cards failed: ${res.status()} ${await res.text()}`);
-  return await res.json() as { id: string; body: string; column_id: string; number: number };
+  return await res.json() as Card;
+}
+
+/** Card as returned by the API — mirrors `shared::Card`. */
+export interface Card {
+  id: string;
+  body: string;
+  column_id: string;
+  number: number;
+  tags: string[];
+}
+
+export async function apiGetCard(request: APIRequestContext, cardId: string): Promise<Card> {
+  const res = await request.get(`/api/cards/${cardId}`);
+  if (!res.ok()) throw new Error(`GET /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);
+  return await res.json() as Card;
 }
 
 export async function apiDeleteCard(request: APIRequestContext, cardId: string) {
@@ -45,12 +61,13 @@ export async function apiUpdateCard(
     body?: string;
     position?: number;
     column_id?: string;
+    tags?: string[];
     audit_edit_session?: string;
   }
 ) {
   const res = await request.put(`/api/cards/${cardId}`, { data: patch });
   if (!res.ok()) throw new Error(`PUT /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);
-  return await res.json() as { id: string; body: string; column_id: string; number: number };
+  return await res.json() as Card;
 }
 
 export async function apiMoveCard(
