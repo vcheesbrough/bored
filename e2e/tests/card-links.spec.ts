@@ -48,10 +48,15 @@ test.describe('card links', () => {
       expect.objectContaining({ predecessor_id: a.id, successor_id: b.id, reason: null }),
     ]);
 
-    // Collapsing shows the count badges: Alpha has one after, Beta one before.
+    // Collapsing shows a pill per link: Alpha has Beta after it, Beta has
+    // Alpha before it.
     await page.locator('.card-toolbar-btn[title="Collapse"]').click();
-    await expect(cardWith(page, 'Alpha card').locator('.link-badge-after')).toHaveText('↓1');
-    await expect(cardWith(page, 'Beta card').locator('.link-badge-before')).toHaveText('↑1');
+    await expect(cardWith(page, 'Alpha card').locator('.link-badge-after')).toHaveText(
+      `↓#${b.number}`
+    );
+    await expect(cardWith(page, 'Beta card').locator('.link-badge-before')).toHaveText(
+      `↑#${a.number}`
+    );
 
     // The same link is visible — and editable — from Beta's side.
     await cardWith(page, 'Beta card').click();
@@ -126,7 +131,9 @@ test.describe('card links', () => {
     await apiCreateLink(request, a.id, 'successor', b.id, 'because');
 
     await gotoBoardView(page, board.name);
-    await expect(cardWith(page, 'Downstream').locator('.link-badge-before')).toHaveText('↑1');
+    await expect(cardWith(page, 'Downstream').locator('.link-badge-before')).toHaveText(
+      `↑#${a.number}`
+    );
 
     await cardWith(page, 'Upstream').click();
     const chip = page.locator('.link-group[data-side="after"] .link-chip');
@@ -167,7 +174,10 @@ test.describe('card links', () => {
     await expect(page.locator('.link-editor-error')).toHaveCount(0);
   });
 
-  test('the collapsed card counts links on each side', async ({ page, request }) => {
+  test('the collapsed card shows one pill per linked card on each side', async ({
+    page,
+    request,
+  }) => {
     const board = await apiCreateBoard(request, `links-badge-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
     const hub = await apiCreateCard(request, col.id, '# Hub');
@@ -180,11 +190,17 @@ test.describe('card links', () => {
 
     await gotoBoardView(page, board.name);
     const badges = cardWith(page, 'Hub').locator('.card-link-badges');
-    await expect(badges.locator('.link-badge-before')).toHaveText('↑2');
-    await expect(badges.locator('.link-badge-after')).toHaveText('↓1');
+    // Oldest link first — one pill per card, not a count.
+    await expect(badges.locator('.link-badge-before')).toHaveText([
+      `↑#${in1.number}`,
+      `↑#${in2.number}`,
+    ]);
+    await expect(badges.locator('.link-badge-after')).toHaveText([`↓#${out.number}`]);
     // A card with links on one side only shows that side.
-    await expect(cardWith(page, 'Out').locator('.link-badge')).toHaveText(['↑1']);
-    await expect(cardWith(page, 'In one').locator('.link-badge')).toHaveText(['↓1']);
+    await expect(cardWith(page, 'Out').locator('.link-badge')).toHaveText([`↑#${hub.number}`]);
+    await expect(cardWith(page, 'In one').locator('.link-badge')).toHaveText([
+      `↓#${hub.number}`,
+    ]);
   });
 
   test('links added elsewhere arrive over SSE', async ({ browser, request }) => {
@@ -206,10 +222,13 @@ test.describe('card links', () => {
     await expect(page.locator('.link-badge')).toHaveCount(0);
 
     const link = await apiCreateLink(request, a.id, 'successor', b.id);
-    await expect(cardWith(page, 'Remote A').locator('.link-badge-after')).toHaveText('↓1', {
-      timeout: 5000,
-    });
-    await expect(cardWith(page, 'Remote B').locator('.link-badge-before')).toHaveText('↑1');
+    await expect(cardWith(page, 'Remote A').locator('.link-badge-after')).toHaveText(
+      `↓#${b.number}`,
+      { timeout: 5000 }
+    );
+    await expect(cardWith(page, 'Remote B').locator('.link-badge-before')).toHaveText(
+      `↑#${a.number}`
+    );
 
     // Removal arrives the same way.
     await request.delete(`/api/links/${link.id}`);
