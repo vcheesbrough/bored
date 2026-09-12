@@ -369,6 +369,13 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
         if ordered == current_ids {
             // Already satisfies its links — do not spend a request, an audit
             // row, or an SSE burst saying so.
+            //
+            // This does mean the server's duplicate-position repair is out of
+            // reach here: a column whose stored positions collide but whose
+            // displayed order already satisfies its links is left alone. That
+            // repair is a side effect of applying an order, not a feature of
+            // this button, and paying a request on every click to maybe fix a
+            // rare state is the worse trade.
             return;
         }
 
