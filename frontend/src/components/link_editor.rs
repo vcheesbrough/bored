@@ -575,8 +575,9 @@ fn LinkPicker(
     .into_any()
 }
 
-/// `↑n ↓n` counts for a collapsed card. Renders nothing when the card has no
-/// links, so an unlinked board looks exactly as it did before.
+/// One pill per linked card for a collapsed card: an arrow for the side plus
+/// the other card's `#number`. Renders nothing when the card has no links, so
+/// an unlinked board looks exactly as it did before.
 #[component]
 pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
     let Some(links) = use_context::<BoardLinkIndex>() else {
@@ -584,34 +585,54 @@ pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
     };
     // `try_get`: the collapsed card can be asked to render once more after the
     // search filter disposed its signals (see `CardItem`).
-    let counts = Signal::derive(move || {
+    let predecessors = Signal::derive(move || {
         card_id
             .try_get()
             .flatten()
-            .map(|id| {
-                (
-                    links.predecessors_of(&id).len(),
-                    links.successors_of(&id).len(),
-                )
-            })
-            .unwrap_or((0, 0))
+            .map(|id| links.predecessors_of(&id))
+            .unwrap_or_default()
     });
+    let successors = Signal::derive(move || {
+        card_id
+            .try_get()
+            .flatten()
+            .map(|id| links.successors_of(&id))
+            .unwrap_or_default()
+    });
+    let has_any =
+        Signal::derive(move || !predecessors.get().is_empty() || !successors.get().is_empty());
 
     view! {
-        <Show when=move || counts.get() != (0, 0) fallback=|| ()>
+        <Show when=move || has_any.get() fallback=|| ()>
             <span class="card-link-badges">
-                <Show when=move || { counts.get().0 > 0 } fallback=|| ()>
-                    <span
-                        class="tag-chip link-badge link-badge-before"
-                        title=move || format!("{} before", counts.get().0)
-                    >{move || format!("↑{}", counts.get().0)}</span>
-                </Show>
-                <Show when=move || { counts.get().1 > 0 } fallback=|| ()>
-                    <span
-                        class="tag-chip link-badge link-badge-after"
-                        title=move || format!("{} after", counts.get().1)
-                    >{move || format!("↓{}", counts.get().1)}</span>
-                </Show>
+                <For
+                    each=move || predecessors.get()
+                    key=|link: &shared::CardLink| link.id.clone()
+                    children=move |link: shared::CardLink| {
+                        let number = link.predecessor_number;
+                        let title = link.reason.clone().unwrap_or_else(|| format!("#{number}"));
+                        view! {
+                            <span class="link-badge link-badge-before" title=title>
+                                <span aria-hidden="true">"↑"</span>
+                                <span class="link-badge-number">{format!("#{number}")}</span>
+                            </span>
+                        }
+                    }
+                />
+                <For
+                    each=move || successors.get()
+                    key=|link: &shared::CardLink| link.id.clone()
+                    children=move |link: shared::CardLink| {
+                        let number = link.successor_number;
+                        let title = link.reason.clone().unwrap_or_else(|| format!("#{number}"));
+                        view! {
+                            <span class="link-badge link-badge-after" title=title>
+                                <span aria-hidden="true">"↓"</span>
+                                <span class="link-badge-number">{format!("#{number}")}</span>
+                            </span>
+                        }
+                    }
+                />
             </span>
         </Show>
     }
