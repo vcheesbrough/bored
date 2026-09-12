@@ -567,10 +567,14 @@ async fn restore_batch(
 /// The card **content** (body + tags) captured by one audit row's
 /// `snapshot_after`, or a 422 when the row is not a card version to begin with.
 ///
-/// Tags are optional in the snapshot: rows recorded before tags existed simply
-/// have no `tags` key, and restoring one means "the card had no tags then",
-/// which is exactly an empty list.
-fn card_content_version(row: &DbAuditLog) -> Result<(String, Vec<String>), StatusCode> {
+/// The tags come back as an `Option`, and the distinction matters: `Some(list)`
+/// is a snapshot that genuinely recorded the card's tags (possibly as an empty
+/// list), while `None` is a row written *before* tags existed, where the key is
+/// simply absent. An absent key is unknown, not empty — treating it as an empty
+/// list would let restoring an old body silently delete tags the card has
+/// carried ever since. `None` therefore means "this row says nothing about
+/// tags", and the caller leaves them alone.
+fn card_content_version(row: &DbAuditLog) -> Result<(String, Option<Vec<String>>), StatusCode> {
     if row.entity_type != "card"
         || !matches!(
             row.action.as_str(),
@@ -592,17 +596,15 @@ fn card_content_version(row: &DbAuditLog) -> Result<(String, Vec<String>), Statu
         .and_then(Value::as_str)
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?
         .to_string();
-    let tags = snapshot
-        .get("tags")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // No `unwrap_or_default()` here: a missing key has to stay `None` all the
+    // way to the caller so it can tell "no tags" from "tags not recorded".
+    let tags = snapshot.get("tags").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    });
     Ok((body, tags))
 }
 
@@ -612,6 +614,12 @@ fn card_content_version(row: &DbAuditLog) -> Result<(String, Vec<String>), Statu
 /// Both move together on purpose: a version in the drawer is one moment in the
 /// card's life, so restoring it puts the card back to that moment rather than
 /// to a hybrid of an old body and today's tags.
+///
+/// The one exception is a row from before tags existed ([`card_content_version`]
+/// returns `None`). Such a row never recorded the card's tags, so there is no
+/// "moment" to put them back to — the restore touches the body only and leaves
+/// today's tags standing, rather than deleting them on the strength of a field
+/// the snapshot never had.
 async fn restore_card_content(
     db: &Surreal<Db>,
     claims: &Claims,
@@ -624,22 +632,41 @@ async fn restore_card_content(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let existing = existing.ok_or(StatusCode::NOT_FOUND)?;
-    // Nothing to restore only when *both* halves already match.
-    if existing.body == target_body && existing.tags == target_tags {
+    // Nothing to restore only when every half this row actually carries already
+    // matches. A legacy row (`None`) carries no tags, so the body alone decides
+    // — otherwise today's tags, which the restore will not touch, could make an
+    // already-current row look restorable.
+    let tags_already_current = target_tags
+        .as_ref()
+        .is_none_or(|target| existing.tags == *target);
+    if existing.body == target_body && tags_already_current {
         return Err(StatusCode::CONFLICT);
     }
 
     let snapshot_before =
         serde_json::to_value(existing.into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let updated: Option<DbCard> = db
-        .query(
+    // Two statements rather than one with a conditional bind: `tags` is left out
+    // of the SET list entirely for a legacy row, so the column keeps whatever
+    // the card carries today.
+    let query = match &target_tags {
+        Some(_) => {
             "UPDATE type::thing('cards', $id) SET body = $body, tags = $tags, \
-             last_edited_by = $editor RETURN AFTER",
-        )
+             last_edited_by = $editor RETURN AFTER"
+        }
+        None => {
+            "UPDATE type::thing('cards', $id) SET body = $body, \
+             last_edited_by = $editor RETURN AFTER"
+        }
+    };
+    let mut request = db
+        .query(query)
         .bind(("id", row.entity_id.clone()))
         .bind(("body", target_body))
-        .bind(("tags", target_tags))
-        .bind(("editor", claims.sub.clone()))
+        .bind(("editor", claims.sub.clone()));
+    if let Some(tags) = target_tags {
+        request = request.bind(("tags", tags));
+    }
+    let updated: Option<DbCard> = request
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .take(0)
@@ -707,5 +734,96 @@ pub async fn restore_from_audit(
         }
     } else {
         restore_card_content(db, claims, events, &row).await
+    }
+}
+
+// `#[cfg(test)]` keeps this module out of the shipped binary — it is compiled
+// only under `cargo test`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use surrealdb::sql::{Datetime, Thing};
+
+    /// Build an audit row whose `snapshot_after` is exactly `snapshot`, so a
+    /// test can control precisely which keys the snapshot carries.
+    fn card_row(snapshot: Value) -> DbAuditLog {
+        DbAuditLog {
+            id: Thing::from(("audit", "01JTESTAUDITROW")),
+            actor_sub: "user-1".to_string(),
+            actor_display_name: "Test User".to_string(),
+            entity_type: "card".to_string(),
+            entity_id: "card-1".to_string(),
+            board_id: "board-1".to_string(),
+            action: "update".to_string(),
+            snapshot_before: None,
+            snapshot_after: Some(snapshot),
+            restored_from: None,
+            batch_group: None,
+            audit_edit_session: None,
+            created_at: Datetime::default(),
+        }
+    }
+
+    /// A row written before tags existed has no `tags` key at all. That must
+    /// surface as `None` — "not recorded" — rather than an empty list, because
+    /// the restore path uses it to decide whether to touch the card's tags.
+    #[test]
+    fn legacy_snapshot_without_tags_key_yields_none() {
+        let row = card_row(json!({ "id": "card-1", "body": "old body" }));
+
+        let (body, tags) = card_content_version(&row).expect("legacy row is a valid card version");
+
+        assert_eq!(body, "old body");
+        assert_eq!(
+            tags, None,
+            "a snapshot with no `tags` key says nothing about tags, so restoring \
+             it must not clear the tags the card carries today"
+        );
+    }
+
+    /// A snapshot recorded *since* tags shipped always has the key, so an empty
+    /// array is a genuine "this card had no tags" and has to stay
+    /// distinguishable from the legacy case above.
+    #[test]
+    fn empty_tags_array_is_recorded_not_absent() {
+        let row = card_row(json!({ "id": "card-1", "body": "b", "tags": [] }));
+
+        let (_, tags) = card_content_version(&row).expect("valid card version");
+
+        assert_eq!(tags, Some(Vec::new()));
+    }
+
+    /// The ordinary case: a populated array round-trips in order.
+    #[test]
+    fn populated_tags_are_parsed_in_order() {
+        let row = card_row(json!({ "id": "card-1", "body": "b", "tags": ["bug", "urgent"] }));
+
+        let (_, tags) = card_content_version(&row).expect("valid card version");
+
+        assert_eq!(tags, Some(vec!["bug".to_string(), "urgent".to_string()]));
+    }
+
+    /// Non-string entries are skipped rather than aborting the whole restore:
+    /// the snapshot is data we already wrote, so the tolerant read keeps one
+    /// malformed entry from making a version permanently unrestorable.
+    #[test]
+    fn non_string_tag_entries_are_skipped() {
+        let row = card_row(json!({ "id": "card-1", "body": "b", "tags": ["bug", 7, null] }));
+
+        let (_, tags) = card_content_version(&row).expect("valid card version");
+
+        assert_eq!(tags, Some(vec!["bug".to_string()]));
+    }
+
+    /// A snapshot belonging to a different card must never be restorable onto
+    /// this row's entity.
+    #[test]
+    fn mismatched_snapshot_id_is_rejected() {
+        let row = card_row(json!({ "id": "card-2", "body": "b", "tags": [] }));
+
+        assert_eq!(
+            card_content_version(&row).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

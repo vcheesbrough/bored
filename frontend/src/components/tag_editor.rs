@@ -225,7 +225,12 @@ pub fn TagEditor(
                             each=move || {
                                 suggestions.get().into_iter().enumerate().collect::<Vec<_>>()
                             }
-                            key=|(_, tag): &(usize, String)| tag.clone()
+                            // Keyed on position as well as value: a keyed
+                            // `<For>` retains a view whose key is unchanged, so
+                            // a row that merely moves would keep the `index`
+                            // captured by value in the highlight closures below
+                            // and compare against a stale position.
+                            key=|(index, tag): &(usize, String)| { format!("{index}:{tag}") }
                             children=move |(index, tag): (usize, String)| {
                                 let label = tag.clone();
                                 let picked = tag.clone();

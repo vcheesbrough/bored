@@ -195,10 +195,23 @@ pub fn CardItem(
         card.update(|c| c.tags = next.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let req = shared::UpdateCardRequest {
-                tags: Some(next),
+                tags: Some(next.clone()),
                 ..Default::default()
             };
-            match crate::api::update_card(&card_id, req).await {
+            let result = crate::api::update_card(&card_id, req).await;
+            // Only this call's own optimistic write may be acted on. If the tags
+            // have moved on since — a second edit was fired while this request
+            // was in flight — this response is stale whatever it says, and both
+            // applying its echo and rolling it back would undo the newer edit.
+            // Responses can also arrive out of order, so this covers success as
+            // well as failure.
+            if card.get_untracked().tags != next {
+                if let Err(e) = result {
+                    leptos::logging::error!("superseded tag save failed: {e}");
+                }
+                return;
+            }
+            match result {
                 Ok(updated) => card.set(updated),
                 Err(e) => {
                     // Put the optimistic change back the way it was, so the chips

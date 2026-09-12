@@ -176,10 +176,23 @@ pub fn CardModal(
         });
         wasm_bindgen_futures::spawn_local(async move {
             let req = shared::UpdateCardRequest {
-                tags: Some(next),
+                tags: Some(next.clone()),
                 ..Default::default()
             };
-            match crate::api::update_card(&card_id, req).await {
+            let result = crate::api::update_card(&card_id, req).await;
+            // Same guard as the inline card: a response that no longer matches
+            // what this call wrote has been superseded by a newer edit, so
+            // neither its echo nor its rollback may be applied.
+            let superseded = card
+                .get_untracked()
+                .is_none_or(|current| current.tags != next);
+            if superseded {
+                if let Err(e) = result {
+                    leptos::logging::error!("superseded modal tag save failed: {e}");
+                }
+                return;
+            }
+            match result {
                 Ok(updated) => {
                     card.set(Some(updated.clone()));
                     on_updated.run(updated);
