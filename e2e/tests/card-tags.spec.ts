@@ -77,14 +77,12 @@ test.describe('card tags', () => {
     expect((await apiGetCard(request, card.id)).tags).toEqual(['bug']);
   });
 
-  test('the tag suggestion popup stays shut until the user types', async ({
+  test('the tag suggestion popup follows focus on the + tag input', async ({
     page,
     request,
   }) => {
-    const board = await apiCreateBoard(request, `tags-popup-quiet-${Date.now()}`);
+    const board = await apiCreateBoard(request, `tags-popup-focus-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
-    // A board that already has tags — the case where an empty prefix would
-    // otherwise match every one of them.
     await apiCreateCard(request, col.id, '# Already tagged', ['backend', 'urgent']);
     await apiCreateCard(request, col.id, '# Needs a tag');
 
@@ -92,28 +90,28 @@ test.describe('card tags', () => {
     await page.locator('.card-item').filter({ hasText: 'Needs a tag' }).click();
 
     const popup = page.locator('.tag-suggestions');
+    const options = page.locator('.tag-suggestions .tag-suggestion');
     const input = page.locator('.tag-editor .tag-editor-input');
 
-    // Expanding the card must not open the popup.
+    // Expanding the card alone must not open the popup.
     await expect(input).toBeVisible();
     await expect(popup).toHaveCount(0);
 
-    // Focus alone is not enough either — an empty box matches every tag.
+    // Focus opens it, offering the board's tags to browse with nothing typed.
     await input.click();
     await expect(input).toBeFocused();
-    await expect(popup).toHaveCount(0);
-
-    // It opens only once there is a prefix to complete.
-    await input.fill('back');
     await expect(popup).toBeVisible();
+    await expect(options).toHaveText(['#backend', '#urgent']);
 
-    // Clearing the box closes it again.
+    // Typing narrows the same list.
+    await input.fill('back');
+    await expect(options).toHaveText(['#backend']);
+
+    // Clearing restores the full list rather than closing the popup.
     await input.fill('');
-    await expect(popup).toHaveCount(0);
+    await expect(options).toHaveText(['#backend', '#urgent']);
 
-    // And so does losing focus.
-    await input.fill('back');
-    await expect(popup).toBeVisible();
+    // Losing focus closes it.
     await input.blur();
     await expect(popup).toHaveCount(0);
   });
