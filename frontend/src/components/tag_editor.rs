@@ -204,14 +204,12 @@ pub fn TagEditor(
                                     });
                                 }
                             }
-                            "Backspace" => {
-                                // Backspace on an empty box removes the last chip,
-                                // the standard behaviour for a chip input.
-                                if draft.get_untracked().is_empty() {
-                                    if let Some(last) = tags.get_untracked().last().cloned() {
-                                        ev.prevent_default();
-                                        remove(last);
-                                    }
+                            // Backspace on an empty box removes the last chip,
+                            // the standard behaviour for a chip input.
+                            "Backspace" if draft.get_untracked().is_empty() => {
+                                if let Some(last) = tags.get_untracked().last().cloned() {
+                                    ev.prevent_default();
+                                    remove(last);
                                 }
                             }
                             _ => {}

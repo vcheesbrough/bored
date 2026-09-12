@@ -626,8 +626,10 @@ fn env_layer_overrides_the_defaults_layer_on_the_same_kebab_key() {
 fn sovereign_source_is_disabled_without_an_access_url() {
     // Guards the local-dev / e2e path: no access URL in this test process, so the
     // sovereign layer must be skipped and config must come from defaults + env.
-    std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL_FILE");
-    std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL");
+    // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+    unsafe { std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL_FILE") };
+    // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+    unsafe { std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL") };
     assert!(!sovereign_source_enabled());
 }
 
@@ -676,14 +678,18 @@ fn env_layer_still_overrides_the_sovereign_leaf() {
 #[test]
 #[serial]
 fn app_version_override_falls_back_to_none_when_unset_or_blank() {
-    std::env::remove_var("APP_VERSION");
+    // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+    unsafe { std::env::remove_var("APP_VERSION") };
     assert_eq!(app_version_override(), None);
 
-    std::env::set_var("APP_VERSION", "");
+    // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+    unsafe { std::env::set_var("APP_VERSION", "") };
     assert_eq!(app_version_override(), None);
 
-    std::env::set_var("APP_VERSION", "1.2.3");
+    // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+    unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
     assert_eq!(app_version_override(), Some("1.2.3".to_string()));
 
-    std::env::remove_var("APP_VERSION");
+    // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+    unsafe { std::env::remove_var("APP_VERSION") };
 }

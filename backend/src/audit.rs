@@ -101,12 +101,12 @@ pub async fn record_and_broadcast(
     events: &Sender<BroadcastEvent>,
     rec: AuditRecord<'_>,
 ) -> Result<shared::AuditLogEntry, surrealdb::Error> {
-    if rec.entity_type == "card" && rec.action == "update" {
-        if let Some(sess) = rec.audit_edit_session.filter(|s| !s.is_empty()) {
-            if let Some(entry) = try_merge_card_update_audit(db, events, &rec, sess).await? {
-                return Ok(entry);
-            }
-        }
+    if rec.entity_type == "card"
+        && rec.action == "update"
+        && let Some(sess) = rec.audit_edit_session.filter(|s| !s.is_empty())
+        && let Some(entry) = try_merge_card_update_audit(db, events, &rec, sess).await?
+    {
+        return Ok(entry);
     }
 
     let id = audit_ulid();

@@ -392,10 +392,10 @@ pub async fn update_card(
             None => return Err(StatusCode::NOT_FOUND),
         };
 
-        if let Some(ref current_col) = current_col {
-            if current_col.board.id.to_raw() != target_col.board.id.to_raw() {
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
-            }
+        if let Some(ref current_col) = current_col
+            && current_col.board.id.to_raw() != target_col.board.id.to_raw()
+        {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
 
@@ -650,10 +650,10 @@ pub async fn move_card(
     // Board ID for the SSE event — always available from the target column.
     let board_id = target_col.board.id.to_raw();
 
-    if let Some(current_col) = current_col {
-        if current_col.board.id.to_raw() != board_id {
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
-        }
+    if let Some(current_col) = current_col
+        && current_col.board.id.to_raw() != board_id
+    {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // Compute a sparse position so only this one card needs to be written.

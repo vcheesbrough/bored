@@ -324,10 +324,10 @@ pub fn BoardChooser(
                     node_ref={
                         let r = NodeRef::<leptos::html::Input>::new();
                         Effect::new(move |_| {
-                            if adding_board.get() {
-                                if let Some(el) = r.get() {
-                                    let _ = el.focus();
-                                }
+                            if adding_board.get()
+                                && let Some(el) = r.get()
+                            {
+                                let _ = el.focus();
                             }
                         });
                         r
@@ -451,10 +451,10 @@ pub fn BoardChooser(
                         node_ref={
                             let r = NodeRef::<leptos::html::Input>::new();
                             Effect::new(move |_| {
-                                if adding_col.get() {
-                                    if let Some(el) = r.get() {
-                                        let _ = el.focus();
-                                    }
+                                if adding_col.get()
+                                    && let Some(el) = r.get()
+                                {
+                                    let _ = el.focus();
                                 }
                             });
                             r

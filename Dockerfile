@@ -1,9 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS frontend-builder
-# `--version` + `--locked` pin trunk and its whole dependency tree: an unpinned
-# install resolves the newest semver-compatible deps, and a `lightningcss` bump
-# published after 0.21.14 no longer compiles on the rust version pinned above.
+FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS frontend-builder
+# `rust-toolchain.toml` at the repo root pins the same version for local dev;
+# keep the two in sync when bumping.
+# `--version` + `--locked` pin trunk and its whole dependency tree: an unlocked
+# `cargo install trunk --version 0.21.14` fails to compile regardless of rustc
+# version, because it resolves lightningcss 1.0.0-alpha.65's own dependency
+# `parcel_selectors 0.28.3` against cssparser 0.37.0 while lightningcss and
+# `cssparser-color` want cssparser 0.33.0 — a version conflict inside
+# lightningcss's own Cargo.toml, not a rust-toolchain incompatibility.
+# 0.21.14 remains the newest stable trunk release (0.22.0 has only shipped
+# betas as of 2026-09).
 RUN rustup target add wasm32-unknown-unknown && cargo install trunk --version 0.21.14 --locked
 WORKDIR /app
 # sovereign-config-provider is a private git dependency of `backend` only, but
@@ -50,7 +57,9 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Ztime-passes" CARGO_TERM_VERBOSE=true \
     trunk build --release
 
-FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
+FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS backend-builder
+# `rust-toolchain.toml` at the repo root pins the same version for local dev;
+# keep the two in sync when bumping.
 RUN rustup component add rustfmt clippy
 WORKDIR /app
 # sovereign-config-provider is a private git dependency (see backend/Cargo.toml);

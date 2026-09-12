@@ -517,15 +517,14 @@ impl AuthSessionManager {
             return Err("rotated refresh session was invalidated by logout".to_string());
         }
 
-        if state.cache.len() >= REFRESH_CACHE_MAX_ENTRIES {
-            if let Some(oldest) = state
+        if state.cache.len() >= REFRESH_CACHE_MAX_ENTRIES
+            && let Some(oldest) = state
                 .cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.expires_at)
                 .map(|(key, _)| *key)
-            {
-                state.cache.remove(&oldest);
-            }
+        {
+            state.cache.remove(&oldest);
         }
         state.cache.insert(
             fingerprint,
@@ -595,15 +594,14 @@ impl AuthSessionManager {
         }
 
         for fingerprint in fingerprints {
-            if state.invalidated.len() >= REFRESH_INVALIDATION_MAX_ENTRIES {
-                if let Some(oldest) = state
+            if state.invalidated.len() >= REFRESH_INVALIDATION_MAX_ENTRIES
+                && let Some(oldest) = state
                     .invalidated
                     .iter()
                     .min_by_key(|(_, expiry)| *expiry)
                     .map(|(fingerprint, _)| *fingerprint)
-                {
-                    state.invalidated.remove(&oldest);
-                }
+            {
+                state.invalidated.remove(&oldest);
             }
             state.invalidated.insert(fingerprint, expires_at);
         }
@@ -973,36 +971,36 @@ pub async fn auth_middleware(
     // the browser processed the clear-cookie response. Refuse the tombstoned
     // refresh chain even if that late response restored a still-valid access
     // cookie, and clear it again immediately.
-    if let Some(refresh_token) = refresh_token.as_deref() {
-        if sessions.refresh_was_invalidated(refresh_token).await {
-            let jar = sessions.clear_session(jar);
-            return (
-                jar,
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "session was invalidated by logout",
-                ),
-            )
-                .into_response();
-        }
+    if let Some(refresh_token) = refresh_token.as_deref()
+        && sessions.refresh_was_invalidated(refresh_token).await
+    {
+        let jar = sessions.clear_session(jar);
+        return (
+            jar,
+            (
+                StatusCode::UNAUTHORIZED,
+                "session was invalidated by logout",
+            ),
+        )
+            .into_response();
     }
 
     // A healthy access token outside the refresh window remains on the fast
     // path: validate locally and serve without emitting Set-Cookie.
-    if let Some(token) = access_token.as_deref() {
-        if !access_needs_refresh(token) {
-            return match validate_jwt(token, auth, jwks).await {
-                Ok(claims) => {
-                    req.extensions_mut().insert(claims);
-                    next.run(req).await
-                }
-                Err(reason) => {
-                    tracing::warn!(reason, "browser access token rejected");
-                    let jar = sessions.clear_session(jar);
-                    (jar, (StatusCode::UNAUTHORIZED, reason)).into_response()
-                }
-            };
-        }
+    if let Some(token) = access_token.as_deref()
+        && !access_needs_refresh(token)
+    {
+        return match validate_jwt(token, auth, jwks).await {
+            Ok(claims) => {
+                req.extensions_mut().insert(claims);
+                next.run(req).await
+            }
+            Err(reason) => {
+                tracing::warn!(reason, "browser access token rejected");
+                let jar = sessions.clear_session(jar);
+                (jar, (StatusCode::UNAUTHORIZED, reason)).into_response()
+            }
+        };
     }
 
     // Access token is absent, expired, or close to expiry. A complete refresh

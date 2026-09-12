@@ -103,10 +103,10 @@ pub fn CardItem(
                         show_move_submenu.set(false);
                     }
                 }));
-            } else if !menu_open {
-                if let Some(listener) = listener.take() {
-                    listener.remove();
-                }
+            } else if !menu_open
+                && let Some(listener) = listener.take()
+            {
+                listener.remove();
             }
         });
     });
@@ -129,20 +129,20 @@ pub fn CardItem(
 
     // Focus textarea whenever the card enters editing mode.
     Effect::new(move |_| {
-        if card_state.get() == CardState::Editing {
-            if let Some(el) = textarea_ref.get() {
-                let _ = el.focus();
-            }
+        if card_state.get() == CardState::Editing
+            && let Some(el) = textarea_ref.get()
+        {
+            let _ = el.focus();
         }
     });
 
     // Focus the rendered body div when entering Expanded so keyboard Esc works
     // without the user needing to click first.
     Effect::new(move |_| {
-        if card_state.get() == CardState::Expanded {
-            if let Some(el) = body_rendered_ref.get() {
-                let _ = el.focus();
-            }
+        if card_state.get() == CardState::Expanded
+            && let Some(el) = body_rendered_ref.get()
+        {
+            let _ = el.focus();
         }
     });
 

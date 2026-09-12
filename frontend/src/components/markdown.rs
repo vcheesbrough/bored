@@ -33,14 +33,11 @@ fn to_html_with(md: &str, query: &str) -> String {
             }
             allowed
         }
-        Event::End(TagEnd::Link | TagEnd::Image) => {
-            if skip_depth > 0 {
-                skip_depth -= 1;
-                false
-            } else {
-                true
-            }
+        Event::End(TagEnd::Link | TagEnd::Image) if skip_depth > 0 => {
+            skip_depth -= 1;
+            false
         }
+        Event::End(TagEnd::Link | TagEnd::Image) => true,
         _ => true,
     });
     // Highlighting runs *after* the sanitising filter above, so injected markup

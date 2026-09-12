@@ -1722,7 +1722,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_returns_version_and_env() {
-        std::env::remove_var("APP_VERSION");
+        // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+        unsafe { std::env::remove_var("APP_VERSION") };
         let server = test_app().await;
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
@@ -1737,7 +1738,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_uses_app_version_env_and_configured_environment() {
-        std::env::set_var("APP_VERSION", "1.2.3");
+        // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+        unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
         let db = db::connect_mem().await.expect("failed to connect mem db");
         let state = AppState::new(db);
         // `environment` is threaded through `app()` directly (from
@@ -1747,7 +1749,8 @@ mod tests {
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
         let body = resp.text();
-        std::env::remove_var("APP_VERSION");
+        // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+        unsafe { std::env::remove_var("APP_VERSION") };
         let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
         assert_eq!(info.version, "1.2.3");
         assert_eq!(info.env, "production");
