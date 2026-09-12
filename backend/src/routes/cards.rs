@@ -3,6 +3,8 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use std::collections::HashSet;
+
 use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
@@ -714,4 +716,249 @@ pub async fn move_card(
         }
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// `PUT /api/columns/:id/cards/reorder`
+///
+/// Applies a complete desired card order to one column. This endpoint is
+/// deliberately **dumb**: it knows nothing about card links or about why the
+/// caller wants this order. The client computes the order (the column header's
+/// "sort by links" button does it with `shared::links::order_by_dependency`)
+/// and sends the result, exactly as `columns::reorder_columns` works for
+/// columns.
+///
+/// The request is tolerant, per [`shared::CardsReorderRequest`]: ids that are
+/// not cards of this column are dropped — which is also the IDOR guard, since
+/// another column's card simply is not in the loaded set — and cards the caller
+/// omitted keep their relative order at the bottom.
+///
+/// # Positions
+///
+/// Card positions are *sparse* (`POSITION_GAP`-spaced, bisected on insert), so
+/// they are not array indices and must not be treated as such. Two rules apply:
+///
+/// * when the values in use are strictly increasing they are reused as the
+///   slots, so a card that does not move is never written and keeps its exact
+///   value — this is what makes "sort an already-sorted column" a true no-op;
+/// * otherwise the column is renumbered to `(i + 1) * POSITION_GAP`, the same
+///   scheme `rebalance_column` uses. `cards.position` has no unique index and
+///   both `PUT /api/cards/:id` and audit restore can write an arbitrary value,
+///   so duplicates are possible, and `ORDER BY position ASC` has no tiebreak.
+///   A column holding duplicates therefore has no defined order to be "already
+///   sorted" in: it is rewritten even when the requested order matches what the
+///   database happened to return.
+///
+/// Distinct final positions are what lets the browser reposition cards from
+/// `CardMoved` alone, without a dedicated bulk SSE event.
+///
+/// One audit row per written card, all sharing a batch group. The group is
+/// informational: batch restore only fans out `delete` rows, so restoring one
+/// of these `move` rows restores that card's position alone.
+pub async fn reorder_cards(
+    State(state): State<AppState>,
+    Path(col_id): Path<String>,
+    claims: Extension<Claims>,
+    Json(payload): Json<shared::CardsReorderRequest>,
+) -> Result<Json<Vec<shared::Card>>, StatusCode> {
+    let column: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some(column) = column else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let board_id = column.board.id.to_raw();
+
+    // Current contents of the column, top first — the same query `list_cards`
+    // uses, so the caller is ordering exactly what it was shown.
+    let current: Vec<DbCard> = state
+        .db
+        .query(
+            "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
+        )
+        .bind(("id", col_id.clone()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Requested ids that really are in this column, in the order asked for and
+    // without repeats, followed by everything the caller left out in its
+    // current order.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut target: Vec<&DbCard> = Vec::with_capacity(current.len());
+    for wanted in &payload.order {
+        if let Some(card) = current.iter().find(|c| &c.id.id.to_raw() == wanted)
+            && seen.insert(wanted.clone())
+        {
+            target.push(card);
+        }
+    }
+    for card in &current {
+        if !seen.contains(&card.id.id.to_raw()) {
+            target.push(card);
+        }
+    }
+
+    // Are the current positions unambiguous? `ORDER BY position ASC` has no
+    // tiebreak, so as soon as two cards share a value the order above is
+    // whatever the database happened to return — not something to preserve or
+    // to compare against.
+    let existing: Vec<i32> = current.iter().map(|c| c.position).collect();
+    let unambiguous = existing.windows(2).all(|w| w[0] < w[1]);
+
+    // Nothing to do — every card is already where the caller wants it, in an
+    // order the database will reproduce. Bail out before writing anything so
+    // the operation is genuinely idempotent: no writes, no audit, no SSE.
+    let already_ordered = target
+        .iter()
+        .zip(current.iter())
+        .all(|(wanted, present)| wanted.id == present.id);
+    if unambiguous && already_ordered {
+        return Ok(Json(current.into_iter().map(DbCard::into_api).collect()));
+    }
+
+    // The slots to place cards into: reuse the position values already in use
+    // when they are unambiguous, so cards that do not move are never written;
+    // otherwise renumber the column onto the `POSITION_GAP` grid, repairing the
+    // duplicates on the way past (the same scheme `rebalance_column` uses).
+    let slots: Vec<i32> = if unambiguous {
+        existing
+    } else {
+        (0..current.len())
+            .map(|i| (i as i32 + 1) * POSITION_GAP)
+            .collect()
+    };
+
+    let editor = editor_sub(&claims);
+    let batch = audit::new_batch_group();
+    let mut moved: Vec<shared::Card> = Vec::new();
+
+    // The write loop is wrapped rather than run inline so its error exits do
+    // not skip the fan-out below. Every `?` in here returns `Err(500)` after
+    // some cards have already had their `position` committed and audited; if
+    // that error went straight out of the handler, `moved` would be dropped
+    // and not one of those committed writes would ever be announced. Every
+    // other open browser would keep rendering the pre-sort order indefinitely
+    // — `sse_handler` drops lagged and missed events with no reconciliation
+    // (events.rs), so nothing short of a manual reload would repair it.
+    //
+    // Holding the outcome instead lets the broadcast run on both paths: what
+    // was stored is what gets announced, even when the batch aborts part way.
+    let outcome: Result<(), StatusCode> = async {
+        for (card, &position) in target.iter().zip(slots.iter()) {
+            if card.position == position {
+                continue;
+            }
+            let card_id = card.id.id.to_raw();
+            let snapshot_before = serde_json::to_value((*card).clone().into_api())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            // RETURN AFTER in the same statement: never write a position without a
+            // confirmed row to audit, and never audit a write that did not land.
+            // The WHERE clause re-asserts the column so a card moved out from under
+            // this request matches zero rows rather than being dragged back.
+            let updated: Vec<DbCard> = state
+                .db
+                .query(
+                    "UPDATE type::thing('cards', $id) SET position = $pos, last_edited_by = $editor \
+                     WHERE column = type::thing('columns', $col_id) RETURN AFTER",
+                )
+                .bind(("id", card_id.clone()))
+                .bind(("pos", position))
+                .bind(("col_id", col_id.clone()))
+                .bind(("editor", editor.clone()))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .take(0)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let mut it = updated.into_iter();
+            let Some(card_after) = it.next() else {
+                // Zero rows means the card left this column between the SELECT
+                // above and this UPDATE. It is no longer part of the order being
+                // applied, so skip it rather than failing a batch that has already
+                // written rows — the same policy `reorder_columns` uses for a
+                // column that no longer qualifies.
+                continue;
+            };
+            if it.next().is_some() {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+
+            let api_card = card_after.into_api();
+            let snapshot_after = serde_json::to_value(api_card.clone())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            audit::record_and_broadcast(
+                &state.db,
+                &state.events,
+                audit::AuditRecord {
+                    claims: &claims,
+                    board_id: board_id.clone(),
+                    entity_type: "card",
+                    entity_id: &card_id,
+                    action: "move",
+                    snapshot_before: Some(snapshot_before),
+                    snapshot_after: Some(snapshot_after),
+                    restored_from: None,
+                    batch_group: Some(batch.clone()),
+                    audit_edit_session: None,
+                },
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            moved.push(api_card);
+        }
+        Ok(())
+    }
+    .await;
+
+    // Broadcast only once the loop has finished, so no `CardMoved` — the event
+    // that actually repositions a card — describes a column that is still
+    // mid-write. (The loop above is not silent: `record_and_broadcast` emits an
+    // `AuditAppended` per row as it goes. Those do not move cards, so a
+    // listener acting only on `CardMoved` never sees the transient state.)
+    //
+    // This runs whether the loop succeeded or failed. On the failure path
+    // `moved` holds exactly the cards whose `UPDATE` was confirmed, so what is
+    // announced still matches what is stored; the column is left part-sorted,
+    // but every listener agrees on that same part-sorted state instead of
+    // diverging from it silently.
+    //
+    // Cost of doing it this way: `BROADCAST_CAPACITY` is 128 (events.rs:25)
+    // and each moved card spends two slots (`AuditAppended` + `CardMoved`), so
+    // a very large column reordered twice in quick succession could lag a slow
+    // tab into `Lagged`. The escape hatch is an aggregate `CardsReordered`
+    // variant, deliberately not built until something needs it.
+    for card in moved {
+        let _ = state.events.send(BroadcastEvent {
+            board_id: board_id.clone(),
+            event: BoardEvent::CardMoved {
+                card,
+                // A reorder never leaves the column, so source and destination
+                // are the same — the browser treats that as an in-place move.
+                from_column_id: col_id.clone(),
+            },
+        });
+    }
+
+    // Now that the committed writes have been announced, a failed batch can
+    // surface as the 500 it is.
+    outcome?;
+
+    let ordered: Vec<DbCard> = state
+        .db
+        .query(
+            "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
+        )
+        .bind(("id", col_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ordered.into_iter().map(DbCard::into_api).collect()))
 }
