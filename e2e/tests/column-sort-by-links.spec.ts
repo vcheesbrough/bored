@@ -44,6 +44,23 @@ async function expectCardOrder(column: ReturnType<typeof columnNamed>, expected:
   await expect.poll(() => cardOrder(column)).toEqual(expected);
 }
 
+/**
+ * The column's "Sort by links" button, once it is safe to press.
+ *
+ * The board fetches its links *after* its columns, so a column is painted and
+ * its cards are listed a round trip before the link index exists. Clicking in
+ * that window computes an order from no edges at all, which is a no-op — the
+ * exact outcome the cross-column test asserts, so without this wait that test
+ * could pass for entirely the wrong reason. The button is disabled until
+ * `BoardLinkIndex::loaded` flips, so waiting for it to be enabled *is* the
+ * signal that the links have landed.
+ */
+async function sortButton(column: ReturnType<typeof columnNamed>) {
+  const button = column.getByRole('button', { name: 'Sort by links' });
+  await expect(button).toBeEnabled();
+  return button;
+}
+
 test.describe('sort a column by card links', () => {
   test('puts a predecessor above its successor and leaves unlinked cards alone', async ({
     page,
@@ -62,7 +79,7 @@ test.describe('sort a column by card links', () => {
     const column = columnNamed(page, 'Todo');
     await expectCardOrder(column, ['Gamma', 'Beta', 'Alpha']);
 
-    await column.getByRole('button', { name: 'Sort by links' }).click();
+    await (await sortButton(column)).click();
 
     // Beta is unlinked and was already between the two, so only Alpha and
     // Gamma swap around it.
@@ -92,11 +109,15 @@ test.describe('sort a column by card links', () => {
     const column = columnNamed(page, 'Todo');
     await expectCardOrder(column, ['Alpha', 'Beta']);
 
-    await column.getByRole('button', { name: 'Sort by links' }).click();
+    await (await sortButton(column)).click();
 
     // A real no-op, not a reorder that happened to land on the same order:
     // nothing was written, so no card was moved. The history check is the
     // decisive one — a late reorder would still show up as a move row.
+    //
+    // And a no-op for the right reason: `sortButton` waited for the link index,
+    // so the cross-column edge was known to the browser and deliberately
+    // dropped, rather than never having arrived.
     await expectCardOrder(column, ['Alpha', 'Beta']);
     const history = await apiBoardHistory(request, board.name);
     expect(history.filter((e) => e.entity_type === 'card' && e.action === 'move')).toEqual([]);
