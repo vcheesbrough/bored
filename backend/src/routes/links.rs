@@ -116,13 +116,22 @@ async fn board_of_card(
     Ok(column.map(|c| c.board.id.to_raw()))
 }
 
-/// The board a link belongs to, via its predecessor card.
+/// The board a link belongs to, via its predecessor card, falling back to the
+/// successor when the predecessor (or its column) is already gone — possible
+/// when the link outlives one of its ends mid-cascade. `None` only when
+/// neither end resolves to a board.
 async fn board_of_link(
     db: &Surreal<Db>,
     link: &DbCardLink,
 ) -> Result<Option<String>, surrealdb::Error> {
-    let card: Option<DbCard> = db.select(("cards", link.predecessor.id.to_raw())).await?;
-    match card {
+    let predecessor: Option<DbCard> = db.select(("cards", link.predecessor.id.to_raw())).await?;
+    if let Some(card) = predecessor {
+        if let Some(board_id) = board_of_card(db, &card).await? {
+            return Ok(Some(board_id));
+        }
+    }
+    let successor: Option<DbCard> = db.select(("cards", link.successor.id.to_raw())).await?;
+    match successor {
         Some(card) => board_of_card(db, &card).await,
         None => Ok(None),
     }
@@ -224,6 +233,25 @@ pub async fn create_card_link(
         let edges = pairs.iter().map(|(p, s)| (p.as_str(), s.as_str()));
         if shared::links::would_create_cycle(edges, &predecessor_id, &successor_id) {
             return Err(CYCLE);
+        }
+
+        // The card lookups above ran before this lock was taken, so a
+        // concurrent delete could have removed either card in the meantime —
+        // cascade deletes do not hold `link_lock`. Re-check right before the
+        // write so the CREATE below never targets a card that is already
+        // gone (an orphan link, invisible or showing as `#0` on the board).
+        let predecessor_still_exists: Option<DbCard> = state
+            .db
+            .select(("cards", predecessor_id.as_str()))
+            .await
+            .map_err(internal)?;
+        let successor_still_exists: Option<DbCard> = state
+            .db
+            .select(("cards", successor_id.as_str()))
+            .await
+            .map_err(internal)?;
+        if predecessor_still_exists.is_none() || successor_still_exists.is_none() {
+            return Err(NOT_FOUND);
         }
 
         let id = ulid::Ulid::new().to_string().to_lowercase();

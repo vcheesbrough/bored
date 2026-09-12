@@ -345,12 +345,14 @@ pub async fn list_column_history(
 ///
 /// Two queries rather than one `OR`: the card rows hit the
 /// `(entity_type, entity_id, created_at)` index directly, and the link rows
-/// still narrow on `entity_type` before the snapshot comparison. The merged
-/// list is re-sorted on the row timestamp, which SurrealDB's `Datetime`
-/// compares chronologically.
+/// narrow on `board_id` first (via `audit_board_time`) before the snapshot
+/// comparison, rather than scanning every board's `card_link` history. The
+/// merged list is re-sorted on the row timestamp, which SurrealDB's
+/// `Datetime` compares chronologically.
 pub async fn list_card_history(
     db: &Surreal<Db>,
     card_id: &str,
+    board_ulid: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, surrealdb::Error> {
     let mut rows: Vec<DbAuditLog> = db
         .query(
@@ -366,11 +368,12 @@ pub async fn list_card_history(
     let link_rows: Vec<DbAuditLog> = db
         .query(
             "SELECT * FROM audit_log \
-             WHERE entity_type = 'card_link' AND ( \
+             WHERE board_id = $bid AND entity_type = 'card_link' AND ( \
                  snapshot_before.predecessor_id = $cid OR snapshot_before.successor_id = $cid OR \
                  snapshot_after.predecessor_id = $cid OR snapshot_after.successor_id = $cid \
              ) ORDER BY created_at DESC",
         )
+        .bind(("bid", board_ulid.to_string()))
         .bind(("cid", card_id.to_string()))
         .await?
         .take(0)?;
