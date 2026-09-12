@@ -26,7 +26,12 @@ pub fn SearchSuggestions(
             <ul class="search-suggestions" id="search-hash-suggestions" role="listbox">
                 <For
                     each=move || { suggestions.get().into_iter().enumerate().collect::<Vec<_>>() }
-                    key=|(_, s): &(usize, HashSuggestion)| s.label()
+                    // The index is part of the key: a keyed `<For>` retains an
+                    // existing view when its key is unchanged, so a row that
+                    // merely moves would keep the `index` captured by value in
+                    // the highlight closures below and compare against a stale
+                    // position. Keying on position too forces a fresh view.
+                    key=|(index, s): &(usize, HashSuggestion)| { format!("{index}:{}", s.label()) }
                     children=move |(index, suggestion): (usize, HashSuggestion)| {
                         let label = suggestion.label();
                         let picked = suggestion;
