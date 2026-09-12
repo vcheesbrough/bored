@@ -46,9 +46,17 @@ ENV RELEASE_TAG=${RELEASE_TAG}
 # toolchain. It only affects diagnostics, never codegen. Setting it in RUSTFLAGS
 # does change the fingerprint, so the first build after this lands recompiles;
 # every build after that hits the cache as usual.
-RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
+# These cache ids are `-wasm`-suffixed and distinct from backend-builder's,
+# even though both stages have no data dependency on each other and BuildKit
+# could otherwise run them in parallel. A `locked` mount is held for the whole
+# `RUN`, so a mount id shared across stages serialises them regardless. Cargo's
+# own registry lock (`.package-cache`) lives in `$CARGO_HOME` root, outside the
+# mounted dir, so `sharing=shared` on a shared registry mount would not
+# mutually exclude the two stages' writes — per-stage ids are the safe fix.
+# Cost: the agent stores a second copy of the registry/git checkout.
+RUN --mount=type=cache,id=bored-cargo-registry-wasm,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=bored-cargo-git-wasm,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=bored-cargo-target-wasm,target=/app/target,sharing=locked \
     --mount=type=cache,id=bored-trunk-cache,target=/root/.cache/trunk,sharing=locked \
     --mount=type=secret,id=github_token \
     set -eu; \
