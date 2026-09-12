@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub mod history;
+pub mod tags;
 
 /// Deployed application version.
 ///
@@ -65,14 +66,22 @@ pub struct Card {
     pub body: String,
     pub position: i32,
     pub number: u32,
+    /// Free-form labels attached to this card. Always present in API output —
+    /// `#[serde(default)]` covers rows written before tags existed, which
+    /// deserialize as an empty list rather than failing.
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub last_edited_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CreateCardRequest {
     pub body: String,
+    /// Optional tags for the new card; omitted means "no tags".
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -83,6 +92,11 @@ pub struct UpdateCardRequest {
     pub position: Option<i32>,
     #[serde(default)]
     pub column_id: Option<String>,
+    /// Full replacement for the card's tag list. `None` leaves tags untouched;
+    /// `Some(list)` replaces them wholesale (there is no add/remove verb — the
+    /// client always sends the complete set it wants the card to end up with).
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
     /// Client-generated id for one uninterrupted editing stretch; repeated
     /// body saves with the same token merge into a single audit row.
     #[serde(default)]

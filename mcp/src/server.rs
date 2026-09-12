@@ -74,6 +74,10 @@ pub struct CreateCardParams {
     pub column_id: String,
     /// The markdown body of the card.
     pub body: String,
+    /// Optional tags for the new card. Each tag is a whitespace-free token;
+    /// a leading `#` is stripped and duplicates are removed case-insensitively.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -120,8 +124,15 @@ pub struct ReorderColumnsParams {
 pub struct UpdateCardParams {
     /// The ID of the card to update.
     pub card_id: String,
-    /// The new markdown body.
-    pub body: String,
+    /// The new markdown body. Omit to leave the body unchanged (useful when
+    /// only `tags` is being set).
+    #[serde(default)]
+    pub body: Option<String>,
+    /// The card's complete new tag list — this **replaces** any existing tags
+    /// rather than adding to them. Omit to leave tags unchanged; pass an empty
+    /// list to clear them.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -722,40 +733,67 @@ impl BoredMcp {
     }
 
     #[tool(
-        description = "Create a new card with a markdown body in a column. Returns the created card object including its id."
+        description = "Create a new card with a markdown body in a column, optionally tagged. Returns the created card object including its id."
     )]
     async fn create_card(
         &self,
-        Parameters(CreateCardParams { column_id, body }): Parameters<CreateCardParams>,
+        Parameters(CreateCardParams {
+            column_id,
+            body,
+            tags,
+        }): Parameters<CreateCardParams>,
     ) -> Result<CallToolResult, McpError> {
         if column_id.len() != 26 || !column_id.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(mcp_err("column_id must be a 26-character ULID"));
+        }
+        let mut payload = serde_json::json!({ "body": body });
+        // Only send `tags` when the caller supplied it, so the server keeps
+        // applying its own default for an untagged create.
+        if let Some(tags) = tags {
+            payload["tags"] = serde_json::json!(tags);
         }
         let resp = self
             .send(
                 self.client
                     .post(self.api(&format!("columns/{column_id}/cards")))
-                    .json(&serde_json::json!({ "body": body })),
+                    .json(&payload),
             )
             .await?;
         json_text(require_ok(resp).await?).await
     }
 
     #[tool(
-        description = "Update the markdown body of an existing card. Returns the updated card object."
+        description = "Update an existing card's markdown body and/or its tags. Both are optional; omitting one leaves it unchanged. Tags replace the card's existing list. Returns the updated card object."
     )]
     async fn update_card(
         &self,
-        Parameters(UpdateCardParams { card_id, body }): Parameters<UpdateCardParams>,
+        Parameters(UpdateCardParams {
+            card_id,
+            body,
+            tags,
+        }): Parameters<UpdateCardParams>,
     ) -> Result<CallToolResult, McpError> {
         if card_id.len() != 26 || !card_id.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(mcp_err("card_id must be a 26-character ULID"));
+        }
+        if body.is_none() && tags.is_none() {
+            return Err(mcp_err("update_card needs at least one of body or tags"));
+        }
+        // Build the payload key by key rather than always sending both fields:
+        // `UpdateCardRequest` reads a missing key as "leave this alone", so an
+        // omitted `body` must not become `""` — that would blank the card.
+        let mut payload = serde_json::Map::new();
+        if let Some(body) = body {
+            payload.insert("body".to_string(), serde_json::json!(body));
+        }
+        if let Some(tags) = tags {
+            payload.insert("tags".to_string(), serde_json::json!(tags));
         }
         let resp = self
             .send(
                 self.client
                     .put(self.api(&format!("cards/{card_id}")))
-                    .json(&serde_json::json!({ "body": body })),
+                    .json(&serde_json::Value::Object(payload)),
             )
             .await?;
         json_text(require_ok(resp).await?).await
@@ -816,13 +854,14 @@ impl BoredMcp {
 #[tool_handler]
 impl ServerHandler for BoredMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            Implementation::new(
                 "bored",
                 match option_env!("RELEASE_TAG") {
                     Some(tag) if !tag.is_empty() => tag,
                     _ => env!("CARGO_PKG_VERSION"),
                 },
-            ))
+            ),
+        )
     }
 }

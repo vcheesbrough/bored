@@ -8,9 +8,13 @@ use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel, HistoryScope};
+use crate::components::search_suggestions::SearchSuggestions;
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
-use crate::search::BoardSearchQuery;
+use crate::search::{
+    active_hash_prefix, apply_hash_suggestion, hash_suggestions, BoardCardIndex, BoardSearchQuery,
+    ColumnCardsEntry, HashSuggestion,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ColumnGhostSide {
@@ -125,6 +129,39 @@ pub fn BoardView() -> impl IntoView {
     // Handle on the navbar search `<input>`, used to focus it programmatically
     // (Enter-to-focus shortcut below and the clear button's refocus).
     let search_input_ref = NodeRef::<leptos::html::Input>::new();
+    // Every column registers its card list here on mount; the `#` search popup
+    // reads the aggregate to suggest tags and card numbers.
+    let board_card_index: RwSignal<Vec<ColumnCardsEntry>> = RwSignal::new(Vec::new());
+    let card_index = BoardCardIndex(board_card_index);
+    provide_context(card_index);
+
+    // ── `#` search suggestions ─────────────────────────────────────────────
+    // Typing `#` opens a helper listing the tags and card numbers that could
+    // follow it. Purely client-side: the board's cards are already in memory.
+    let suggestions = Signal::derive(move || match active_hash_prefix(&search_query.get()) {
+        Some(prefix) => hash_suggestions(prefix, &card_index.all_tags(), &card_index.all_cards()),
+        None => Vec::new(),
+    });
+    // Index of the arrow-key-highlighted row; `None` means nothing is picked and
+    // Enter falls through to its normal "focus the search box" behaviour.
+    let active_suggestion: RwSignal<Option<usize>> = RwSignal::new(None);
+    // Set when the user dismisses the popup with Escape, so it stays shut until
+    // the token changes rather than reopening on the next keystroke.
+    let suggestions_dismissed = RwSignal::new(false);
+    let suggestions_open =
+        Signal::derive(move || !suggestions_dismissed.get() && !suggestions.get().is_empty());
+
+    let accept_suggestion = move |suggestion: &HashSuggestion| {
+        search_query.update(|q| *q = apply_hash_suggestion(q, &suggestion.value()));
+        active_suggestion.set(None);
+        if let Some(input) = search_input_ref.get_untracked() {
+            let _ = input.focus();
+        }
+    };
+    // Callback form for `SearchSuggestions`, which needs to accept a row by
+    // value from its own click handler.
+    let accept_suggestion_cb =
+        Callback::new(move |suggestion: HashSuggestion| accept_suggestion(&suggestion));
 
     // Enter on the "bare" board — when nothing interactive is focused — jumps
     // straight into the search input so the whole search flow is mouse-free.
@@ -469,21 +506,76 @@ pub fn BoardView() -> impl IntoView {
                     class="navbar-search-input"
                     type="text"
                     placeholder="Search"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded=move || suggestions_open.get().to_string()
+                    aria-controls="search-hash-suggestions"
                     prop:value=move || search_query.get()
-                    on:input=move |ev| search_query.set(event_target_value(&ev))
+                    on:input=move |ev| {
+                        search_query.set(event_target_value(&ev));
+                        // A new keystroke is a new token: re-open the popup and
+                        // drop any highlight from the previous one.
+                        suggestions_dismissed.set(false);
+                        active_suggestion.set(None);
+                    }
                     on:keydown=move |ev: web_sys::KeyboardEvent| {
-                        // Esc clears a non-empty query; on an already-empty box it
-                        // steps back out of the search entirely by blurring.
-                        if ev.key() == "Escape" {
-                            if search_query.get_untracked().is_empty() {
-                                if let Some(input) = search_input_ref.get_untracked() {
-                                    let _ = input.blur();
+                        match ev.key().as_str() {
+                            // Esc closes an open popup first; only once it is shut
+                            // does Esc clear the query, then blur the empty box.
+                            "Escape" => {
+                                if suggestions_open.get_untracked() {
+                                    ev.stop_propagation();
+                                    suggestions_dismissed.set(true);
+                                    active_suggestion.set(None);
+                                } else if search_query.get_untracked().is_empty() {
+                                    if let Some(input) = search_input_ref.get_untracked() {
+                                        let _ = input.blur();
+                                    }
+                                } else {
+                                    search_query.set(String::new());
                                 }
-                            } else {
-                                search_query.set(String::new());
                             }
+                            "ArrowDown" | "ArrowUp" => {
+                                let len = suggestions.get_untracked().len();
+                                if !suggestions_open.get_untracked() || len == 0 {
+                                    return;
+                                }
+                                ev.prevent_default();
+                                let down = ev.key() == "ArrowDown";
+                                active_suggestion.update(|i| {
+                                    *i = Some(match (*i, down) {
+                                        (None, true) => 0,
+                                        (None, false) => len - 1,
+                                        (Some(current), true) => (current + 1) % len,
+                                        (Some(0), false) => len - 1,
+                                        (Some(current), false) => current - 1,
+                                    });
+                                });
+                            }
+                            "Enter" | "Tab" => {
+                                // Only intercept when a row is actually picked, so
+                                // Tab still moves focus and Enter still does nothing
+                                // special in the plain search case.
+                                let Some(picked) = active_suggestion
+                                    .get_untracked()
+                                    .and_then(|i| suggestions.get_untracked().get(i).cloned())
+                                else {
+                                    return;
+                                };
+                                ev.prevent_default();
+                                ev.stop_propagation();
+                                accept_suggestion(&picked);
+                            }
+                            _ => {}
                         }
                     }
+                />
+
+                <SearchSuggestions
+                    suggestions=suggestions
+                    open=suggestions_open
+                    active=active_suggestion
+                    on_accept=accept_suggestion_cb
                 />
                 <Show when=move || !search_query.get().is_empty() fallback=|| ()>
                     <button
@@ -493,6 +585,8 @@ pub fn BoardView() -> impl IntoView {
                         title="Clear search"
                         on:click=move |_| {
                             search_query.set(String::new());
+                            suggestions_dismissed.set(false);
+                            active_suggestion.set(None);
                             // Keep the caret in the box so typing can continue.
                             if let Some(input) = search_input_ref.get_untracked() {
                                 let _ = input.focus();

@@ -8,6 +8,7 @@ use crate::components::column::ColumnCards;
 use crate::components::confirm_modal::ConfirmModal;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
 use crate::components::markdown::MarkdownPreview;
+use crate::components::tag_editor::{TagChips, TagEditor};
 use crate::events::DragPayload;
 use crate::search::{query_matches_number, BoardSearchQuery};
 
@@ -174,6 +175,52 @@ pub fn CardItem(
             number.try_get().unwrap_or(0),
             &highlight.try_get().unwrap_or_default(),
         )
+    });
+
+    // Tags are read straight off the card signal rather than mirrored into local
+    // state: unlike the body there is no in-progress edit to protect from
+    // overwrites, so an SSE update can land the moment it arrives.
+    let tags = Signal::derive(move || card.try_get().map(|c| c.tags).unwrap_or_default());
+
+    // Persist a complete replacement tag list. Deliberately carries no
+    // `audit_edit_session`: a tag change is its own discrete history row, never
+    // folded into an in-flight body edit.
+    let save_tags = Callback::new(move |next: Vec<String>| {
+        let existing = card.get_untracked();
+        let card_id = existing.id.clone();
+        let previous = existing.tags;
+        // Apply locally first. Adding two tags in quick succession is normal, and
+        // without this the second edit would be computed from the list the server
+        // last echoed back — silently dropping the first.
+        card.update(|c| c.tags = next.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let req = shared::UpdateCardRequest {
+                tags: Some(next.clone()),
+                ..Default::default()
+            };
+            let result = crate::api::update_card(&card_id, req).await;
+            // Only this call's own optimistic write may be acted on. If the tags
+            // have moved on since — a second edit was fired while this request
+            // was in flight — this response is stale whatever it says, and both
+            // applying its echo and rolling it back would undo the newer edit.
+            // Responses can also arrive out of order, so this covers success as
+            // well as failure.
+            if card.get_untracked().tags != next {
+                if let Err(e) = result {
+                    leptos::logging::error!("superseded tag save failed: {e}");
+                }
+                return;
+            }
+            match result {
+                Ok(updated) => card.set(updated),
+                Err(e) => {
+                    // Put the optimistic change back the way it was, so the chips
+                    // never claim a tag the server rejected.
+                    card.update(|c| c.tags = previous);
+                    leptos::logging::error!("tag save failed: {e}");
+                }
+            }
+        });
     });
 
     // ── Save helpers ──────────────────────────────────────────────────────
@@ -438,6 +485,7 @@ pub fn CardItem(
                     class="card-number"
                     class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
                 >{move || format!("#{}", number.get())}</span>
+                <TagChips tags=tags highlight=highlight />
                 <MarkdownPreview body=body_signal class="card-preview" highlight=highlight />
             </Show>
 
@@ -495,6 +543,8 @@ pub fn CardItem(
                         on:click=on_delete_click
                     >"✕"</button>
                 </div>
+
+                <TagEditor tags=tags on_change=save_tags />
 
                 // Grid-stack body: rendered and textarea share one cell.
                 <div class="card-body-wrapper">

@@ -54,6 +54,11 @@ pub struct DbCard {
     pub body: String,
     pub position: i32,
     pub number: Option<i32>,
+    /// Absent on rows written before tags existed and on any row the schema
+    /// backfill has not reached yet, so it defaults to an empty list rather
+    /// than failing the whole card's deserialization.
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub last_edited_by: Option<String>,
     pub created_at: surrealdb::sql::Datetime,
     pub updated_at: surrealdb::sql::Datetime,
@@ -67,6 +72,7 @@ impl DbCard {
             body: self.body,
             position: self.position,
             number: self.number.unwrap_or(0) as u32,
+            tags: self.tags,
             last_edited_by: self.last_edited_by,
             created_at: self.created_at.to_string(),
             updated_at: self.updated_at.to_string(),

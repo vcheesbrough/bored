@@ -89,7 +89,11 @@ fn i64_field(snap: Option<&Value>, field: &str) -> Option<i64> {
 /// markdown `#`-heading; falls back to the first non-empty line. Truncated
 /// to ~60 chars with an ellipsis so very long titles don't blow out the
 /// drawer width.
-fn card_title_from_body(body: &str) -> String {
+///
+/// Public because the board search popup labels its card-number suggestions the
+/// same way the history drawer labels rows — one definition of "a card's title"
+/// for the whole app.
+pub fn card_title_from_body(body: &str) -> String {
     for raw in body.lines() {
         let line = raw.trim();
         if line.is_empty() {
@@ -235,6 +239,10 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
     let title_before = body_before.map(card_title_from_body);
     let title_after = body_after.map(card_title_from_body);
 
+    let tags_before = tags_field(before);
+    let tags_after = tags_field(after);
+    let tag_delta = tags_delta_label(&tags_before, &tags_after);
+
     let new_col = str_field(after, "column_id");
     let old_col = str_field(before, "column_id");
     let column_changed = match (old_col, new_col) {
@@ -250,7 +258,9 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
             .or(title_before)
             .unwrap_or_else(|| fallback_id_label(entity_id));
         let mut s = Summary::new(format!("Moved card {}", quoted(&title)));
-        if let Some(sub) = card_sub(after, before) {
+        // A move that also retags carries the tag delta, so no change a single
+        // row recorded is invisible in the drawer.
+        if let Some(sub) = join_sub(&[card_sub(after, before), tag_delta]) {
             s = s.with_sub(sub);
         }
         return s;
@@ -267,7 +277,11 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
                 Some(n) => format!("{was} · {n}"),
                 None => was,
             };
-            return Summary::new(headline).with_sub(sub);
+            let mut summary = Summary::new(headline);
+            if let Some(sub) = join_sub(&[Some(sub), tag_delta]) {
+                summary = summary.with_sub(sub);
+            }
+            return summary;
         }
     }
 
@@ -283,8 +297,14 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
         _ => false,
     };
 
+    // Tags-only change: its own verb, so a tag edit never reads as a body edit
+    // in the drawer. "Untagged" is reserved for a change that only removed.
     let headline = if body_changed {
         format!("Edited card {}", quoted(&title))
+    } else if tag_delta.is_some() {
+        let only_removals = tags_added(&tags_before, &tags_after).is_empty();
+        let verb = if only_removals { "Untagged" } else { "Tagged" };
+        format!("{verb} card {}", quoted(&title))
     } else {
         format!("Updated card {}", quoted(&title))
     };
@@ -295,17 +315,66 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
     } else {
         None
     };
-    let sub = match (card_n, body_delta) {
-        (Some(n), Some(d)) => Some(format!("{n} · {d}")),
-        (Some(n), None) => Some(n),
-        (None, Some(d)) => Some(d),
-        (None, None) => None,
-    };
+    let sub = join_sub(&[card_n, body_delta, tag_delta]);
     let mut s = Summary::new(headline);
     if let Some(sub) = sub {
         s = s.with_sub(sub);
     }
     s
+}
+
+/// The `tags` array from a snapshot, or an empty list when the key is absent
+/// (rows recorded before cards had tags).
+fn tags_field(snap: Option<&Value>) -> Vec<String> {
+    snap.and_then(|v| v.get("tags"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Tags present in `after` but not in `before`, compared case-insensitively so
+/// a pure re-spelling (`bug` → `Bug`) doesn't read as add-plus-remove.
+fn tags_added(before: &[String], after: &[String]) -> Vec<String> {
+    after
+        .iter()
+        .filter(|t| !before.iter().any(|b| crate::tags::eq_ignore_case(b, t)))
+        .cloned()
+        .collect()
+}
+
+/// Compact tag delta for a card update: `+bug, −stale`. `None` when the tag
+/// list is unchanged.
+///
+/// The minus is U+2212, matching [`body_delta_label`] so a sub-line carrying
+/// both deltas doesn't mix two different dashes.
+fn tags_delta_label(before: &[String], after: &[String]) -> Option<String> {
+    let added = tags_added(before, after);
+    let removed = tags_added(after, before);
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = added
+        .iter()
+        .map(|t| format!("+{t}"))
+        .chain(removed.iter().map(|t| format!("\u{2212}{t}")))
+        .collect();
+    Some(parts.join(", "))
+}
+
+/// Join the non-empty pieces of a sub-line with the drawer's ` · ` separator.
+fn join_sub(parts: &[Option<String>]) -> Option<String> {
+    let joined: Vec<&str> = parts.iter().filter_map(|p| p.as_deref()).collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join(" · "))
+    }
 }
 
 fn card_move(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -> Summary {
@@ -385,12 +454,32 @@ mod tests {
     }
 
     fn card_snap(body: &str, column_id: &str, number: u64) -> Value {
+        tagged_card_snap(body, column_id, number, &[])
+    }
+
+    /// A snapshot shaped like the ones written before cards had tags — no
+    /// `tags` key at all, rather than an empty list.
+    fn card_snap_untagged(body: &str, column_id: &str, number: u64) -> Value {
         json!({
             "id": "card-1",
             "column_id": column_id,
             "body": body,
             "position": 0,
             "number": number,
+            "last_edited_by": null,
+            "created_at": "x",
+            "updated_at": "x",
+        })
+    }
+
+    fn tagged_card_snap(body: &str, column_id: &str, number: u64, tags: &[&str]) -> Value {
+        json!({
+            "id": "card-1",
+            "column_id": column_id,
+            "body": body,
+            "position": 0,
+            "number": number,
+            "tags": tags,
             "last_edited_by": null,
             "created_at": "x",
             "updated_at": "x",
@@ -521,6 +610,93 @@ mod tests {
         let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
         assert_eq!(s.headline, "Updated card «Title»");
         assert_eq!(s.sub.as_deref(), Some("Card #7"));
+    }
+
+    #[test]
+    fn card_update_adding_tags_says_tagged_with_plus_delta() {
+        let before = tagged_card_snap("# Title", "col-a", 7, &[]);
+        let after = tagged_card_snap("# Title", "col-a", 7, &["bug", "urgent"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Tagged card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · +bug, +urgent"));
+    }
+
+    #[test]
+    fn card_update_removing_all_tags_says_untagged() {
+        let before = tagged_card_snap("# Title", "col-a", 7, &["bug"]);
+        let after = tagged_card_snap("# Title", "col-a", 7, &[]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Untagged card «Title»");
+        // Removals use a Unicode minus (U+2212), matching the body char delta.
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · \u{2212}bug"));
+    }
+
+    #[test]
+    fn card_update_swapping_tags_says_tagged_with_both_signs() {
+        let before = tagged_card_snap("# Title", "col-a", 7, &["stale"]);
+        let after = tagged_card_snap("# Title", "col-a", 7, &["fresh"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Tagged card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · +fresh, \u{2212}stale"));
+    }
+
+    #[test]
+    fn card_update_tag_respelling_is_not_a_change() {
+        // Case-insensitive comparison: `bug` → `Bug` is the same tag, so the
+        // row falls back to the plain "Updated" wording with no tag delta.
+        let before = tagged_card_snap("# Title", "col-a", 7, &["bug"]);
+        let after = tagged_card_snap("# Title", "col-a", 7, &["Bug"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Updated card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7"));
+    }
+
+    #[test]
+    fn card_update_tag_reorder_is_not_a_change() {
+        let before = tagged_card_snap("# Title", "col-a", 7, &["a", "b"]);
+        let after = tagged_card_snap("# Title", "col-a", 7, &["b", "a"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Updated card «Title»");
+    }
+
+    #[test]
+    fn card_update_body_edit_keeps_edited_headline_and_appends_tag_delta() {
+        // Body wins the headline; the tag delta still rides along in the sub so
+        // nothing about the change is lost.
+        let before = tagged_card_snap("# Title\n\nshort", "col-a", 7, &[]);
+        let after = tagged_card_snap("# Title\n\nshorter body", "col-a", 7, &["bug"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Edited card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · +7 chars · +bug"));
+    }
+
+    #[test]
+    fn card_rename_appends_tag_delta_to_sub() {
+        let before = tagged_card_snap("# Old title", "col-a", 7, &[]);
+        let after = tagged_card_snap("# New title", "col-a", 7, &["bug"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Renamed card to «New title»");
+        assert_eq!(s.sub.as_deref(), Some("was «Old title» · Card #7 · +bug"));
+    }
+
+    #[test]
+    fn card_move_in_the_same_update_still_reports_the_tag_delta() {
+        let before = tagged_card_snap("# Title", "col-a", 7, &[]);
+        let after = tagged_card_snap("# Title", "col-b", 7, &["bug"]);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Moved card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · +bug"));
+    }
+
+    #[test]
+    fn card_update_tolerates_snapshots_without_a_tags_key() {
+        // Rows recorded before tags existed have no `tags` field at all; they
+        // must read exactly as they did before, with no phantom tag delta.
+        let before = card_snap_untagged("# Title\n\nold", "col-a", 7);
+        let after = card_snap_untagged("# Title\n\nold text", "col-a", 7);
+        let s = derive_summary(&entry("update", "card", Some(before), Some(after)));
+        assert_eq!(s.headline, "Edited card «Title»");
+        assert_eq!(s.sub.as_deref(), Some("Card #7 · +5 chars"));
     }
 
     #[test]

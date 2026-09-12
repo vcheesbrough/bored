@@ -25,6 +25,20 @@ RUN mkdir -p backend/src && touch backend/src/main.rs \
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
 ARG RELEASE_TAG=""
 ENV RELEASE_TAG=${RELEASE_TAG}
+# This is the longest step in the build, and cargo says nothing between
+# "Compiling frontend" and the finished artifact — so a slow compile and a hung
+# one look identical, and neither says *why*.
+#
+# `-Ztime-passes` is rustc's own instrumentation: it prints each pass with its
+# wall time and RSS as the pass completes. That distinguishes the cases that
+# actually matter for this crate — `monomorphization_collector_graph_walk` and
+# `type_check_crate` blowing up (Leptos `view!` nesting) versus `LLVM_passes`
+# (codegen/optimisation) — which elapsed-time alone can never do.
+#
+# The flag is nightly-gated; `RUSTC_BOOTSTRAP=1` enables it on the pinned stable
+# toolchain. It only affects diagnostics, never codegen. Setting it in RUSTFLAGS
+# does change the fingerprint, so the first build after this lands recompiles;
+# every build after that hits the cache as usual.
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
@@ -32,7 +46,9 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cd frontend && trunk build --release
+    cd frontend && \
+    RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Ztime-passes" CARGO_TERM_VERBOSE=true \
+    trunk build --release
 
 FROM rust:1.94.1@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS backend-builder
 RUN rustup component add rustfmt clippy
