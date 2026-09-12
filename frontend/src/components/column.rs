@@ -48,10 +48,8 @@ fn persist_column_collapsed(board_id: &str, column_id: &str, collapsed: bool) {
 }
 
 #[component]
-pub fn ColumnView(
-    column: RwSignal<shared::Column>,
-    on_column_drop: Callback<String>,
-) -> impl IntoView {
+pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<String>) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     let cards: RwSignal<Vec<RwSignal<shared::Card>>> = RwSignal::new(Vec::new());
     // Tracks which card ID (if any) should open in editing mode on mount.
     // Set just before inserting the card into `cards` so the matching
@@ -562,4 +560,5 @@ pub fn ColumnView(
 
         </div>
     }
+    .into_any()
 }

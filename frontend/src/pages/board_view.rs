@@ -50,7 +50,8 @@ fn ColumnGhost(
     columns: RwSignal<Vec<RwSignal<shared::Column>>>,
     drag_payload: RwSignal<DragPayload>,
     on_drop: Callback<()>,
-) -> impl IntoView {
+) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     view! {
         <div
             class="column-ghost"
@@ -80,10 +81,12 @@ fn ColumnGhost(
             </span>
         </div>
     }
+    .into_any()
 }
 
 #[component]
-pub fn BoardView() -> impl IntoView {
+pub fn BoardView() -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     let params = use_params_map();
     let query = use_query_map();
     let navigate = use_navigate();
@@ -690,4 +693,5 @@ pub fn BoardView() -> impl IntoView {
 
         <HistoryPanel board_slug=board_name board_ulid=board_ulid sse_event=sse_event />
     }
+    .into_any()
 }

@@ -11,7 +11,8 @@ pub fn BoardChooser(
     /// that owns `columns`, so the signals outlive anything here — see
     /// [`crate::columns::insert_absent`].
     column_owner: Owner,
-) -> impl IntoView {
+) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     let params = use_params_map();
     // Reads the `:slug` route parameter — the board name, which doubles as the URL slug.
     let current_slug = move || params.with(|p| p.get("slug").unwrap_or_default());
@@ -464,4 +465,5 @@ pub fn BoardChooser(
             </div>
         </div>
     }
+    .into_any()
 }
