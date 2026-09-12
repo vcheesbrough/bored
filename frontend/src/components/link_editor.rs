@@ -24,6 +24,11 @@ const MAX_SUGGESTIONS: usize = 6;
 /// a preview; the full title is one click away.
 const MAX_TITLE_CHARS: usize = 32;
 
+/// Longest column name shown as a chip prefix, in characters. Shorter than a
+/// title: the prefix is a status word ("todo", "in progress"), and the card it
+/// qualifies has to stay the part you read first.
+const MAX_COLUMN_CHARS: usize = 16;
+
 /// Which end of the card a group edits.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
@@ -67,6 +72,28 @@ fn card_label(cards: Option<BoardCardIndex>, card_id: &str, number: u32) -> Stri
         Some(title) => format!("#{number} {}", truncate(&title, MAX_TITLE_CHARS)),
         None => format!("#{number}"),
     }
+}
+
+/// The name of the column holding `card_id`, or `None` when the card or its
+/// column is not in the client's view of the board.
+///
+/// Two hops — card → `column_id` → column name — and either can miss: a card
+/// whose column has not loaded yet (or that was just deleted) is not in
+/// `cards`, and a card that has just moved can name a column the client has
+/// not seen. Both mean "no prefix" rather than a placeholder, so the chip
+/// degrades to the same bare `#12` that a missing title already produces.
+///
+/// Takes plain slices rather than the signals themselves so the lookup is
+/// testable without a reactive runtime; the caller does the reading, which is
+/// also what makes the prefix reactive.
+fn column_name_for(
+    cards: &[shared::Card],
+    columns: &[shared::Column],
+    card_id: &str,
+) -> Option<String> {
+    let column_id = &cards.iter().find(|c| c.id == card_id)?.column_id;
+    let name = &columns.iter().find(|col| &col.id == column_id)?.name;
+    Some(truncate(name, MAX_COLUMN_CHARS))
 }
 
 /// Editable before/after link groups for one card.
@@ -159,6 +186,9 @@ fn LinkGroup(
 fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>) -> AnyView {
     let links = expect_context::<BoardLinkIndex>();
     let cards = use_context::<BoardCardIndex>();
+    // Optional for the same reason `cards` is: the editor mounts wherever a
+    // card does, and only a board provides the column list.
+    let columns = use_context::<RwSignal<Vec<RwSignal<shared::Column>>>>();
     let params = use_params_map();
     let navigate = StoredValue::new(use_navigate());
 
@@ -168,7 +198,27 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
         Side::After => (link.successor_id.clone(), link.successor_number),
     };
     // Reactive: the title fills in once the other card's column has loaded.
+    let id_for_column = other_id.clone();
     let label = Signal::derive(move || card_label(cards, &other_id, other_number));
+    // Which column the linked card sits in, shown before its number. Reading
+    // the cards and the columns through their signals is what keeps this
+    // current: the prefix fills in when a column finishes loading and follows
+    // the card when it is moved, locally or over SSE.
+    let column = Signal::derive(move || {
+        let (Some(cards), Some(columns)) = (cards, columns) else {
+            return None;
+        };
+        // `try_get` throughout: a chip can outlive the board view it read
+        // these from by a frame, and a disposed signal should mean "no prefix"
+        // rather than a panic.
+        let columns: Vec<shared::Column> = columns
+            .try_get()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|col| col.try_get())
+            .collect();
+        column_name_for(&cards.all_cards(), &columns, &id_for_column)
+    });
 
     // Held in `StoredValue`s so the handlers below capture only `Copy`
     // handles: the same closure is then usable from several event attributes
@@ -261,6 +311,12 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
 
     view! {
         <span class="link-chip" title=reason_for_title>
+            // A sibling of the card button rather than part of its label, so
+            // the column name is not part of the link text and assertions on
+            // `.link-chip-card` still read just `#N Title`.
+            <Show when=move || column.get().is_some() fallback=|| ()>
+                <span class="link-chip-column">{move || column.get().unwrap_or_default()}</span>
+            </Show>
             <button
                 type="button"
                 class="link-chip-card"
@@ -668,5 +724,66 @@ mod tests {
     fn digits_never_match_a_title_that_contains_them() {
         // `2` is a number prefix, not a title substring.
         assert!(!candidate_matches(15, "Phase 2", "2"));
+    }
+
+    /// A card carrying only the fields `column_name_for` reads.
+    fn card(id: &str, column_id: &str) -> shared::Card {
+        shared::Card {
+            id: id.to_string(),
+            column_id: column_id.to_string(),
+            number: 1,
+            body: String::new(),
+            position: 0,
+            tags: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_edited_by: None,
+        }
+    }
+
+    fn column(id: &str, name: &str) -> shared::Column {
+        shared::Column {
+            id: id.to_string(),
+            board_id: "board".to_string(),
+            name: name.to_string(),
+            position: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_edited_by: None,
+        }
+    }
+
+    #[test]
+    fn resolves_the_column_of_a_card_on_the_board() {
+        let cards = vec![card("card-a", "col-1"), card("card-b", "col-2")];
+        let columns = vec![column("col-1", "todo"), column("col-2", "done")];
+        assert_eq!(
+            column_name_for(&cards, &columns, "card-b"),
+            Some("done".to_string())
+        );
+    }
+
+    #[test]
+    fn no_column_for_a_card_outside_the_index() {
+        // Its column has not loaded yet, or the card has just been deleted.
+        let columns = vec![column("col-1", "todo")];
+        assert_eq!(column_name_for(&[], &columns, "card-a"), None);
+    }
+
+    #[test]
+    fn no_column_when_the_cards_column_is_unknown() {
+        // The card names a column the client has not seen.
+        let cards = vec![card("card-a", "col-9")];
+        let columns = vec![column("col-1", "todo")];
+        assert_eq!(column_name_for(&cards, &columns, "card-a"), None);
+    }
+
+    #[test]
+    fn a_long_column_name_is_truncated() {
+        let cards = vec![card("card-a", "col-1")];
+        let columns = vec![column("col-1", "waiting on review from ops")];
+        let name = column_name_for(&cards, &columns, "card-a").expect("column resolves");
+        assert_eq!(name.chars().count(), MAX_COLUMN_CHARS);
+        assert!(name.ends_with('…'), "{name} should be elided");
     }
 }

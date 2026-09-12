@@ -1815,6 +1815,19 @@ mark.search-hit {
   white-space: nowrap;
 }
 
+/* The linked card's column, muted before its number: "todo · #12 Beta". The
+   separator is a pseudo-element so it stays out of the element's text. */
+.link-chip-column {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.link-chip-column::after {
+  content: " ·";
+}
+
 .link-chip-card {
   padding: 0;
   border: none;
