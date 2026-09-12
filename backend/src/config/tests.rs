@@ -174,9 +174,11 @@ fn oidc_blank_required_scope_is_rejected() {
 #[test]
 fn load_optional_oidc_returns_none_when_issuer_is_absent() {
     let config = cfg(&[]);
-    assert!(load_optional_oidc(&config)
-        .expect("should not error")
-        .is_none());
+    assert!(
+        load_optional_oidc(&config)
+            .expect("should not error")
+            .is_none()
+    );
 }
 
 #[test]
@@ -184,9 +186,11 @@ fn load_optional_oidc_returns_none_when_issuer_is_blank() {
     // Mirrors `deploy/docker-compose.yml`'s `${OIDC_ISSUER_URL:-}` forwarding an
     // unset host var as an empty string rather than an absent one.
     let config = cfg(&[("BORED__OIDC__ISSUER-URL", "")]);
-    assert!(load_optional_oidc(&config)
-        .expect("should not error")
-        .is_none());
+    assert!(
+        load_optional_oidc(&config)
+            .expect("should not error")
+            .is_none()
+    );
 }
 
 #[test]
@@ -388,9 +392,11 @@ fn required_scope_with_surrounding_whitespace_is_trimmed() {
 
     assert_eq!(oidc.required_scope, "bored:dev:access");
     // The comparison auth.rs performs must now succeed.
-    assert!("openid profile bored:dev:access"
-        .split_whitespace()
-        .any(|value| value == oidc.required_scope));
+    assert!(
+        "openid profile bored:dev:access"
+            .split_whitespace()
+            .any(|value| value == oidc.required_scope)
+    );
 }
 
 /// Trimming is applied to every string leaf, not a curated list — including

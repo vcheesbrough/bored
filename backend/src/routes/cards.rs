@@ -1,15 +1,15 @@
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    Extension, Json,
 };
-use surrealdb::{engine::local::Db, Surreal};
+use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
-use crate::routes::boards::{editor_sub, AppState};
+use crate::routes::boards::{AppState, editor_sub};
 
 /// Gap between adjacent card positions in the sparse ordering scheme.
 /// Large enough to allow ~10 bisections between any two cards before a rebalance

@@ -7,8 +7,8 @@ use surrealdb::engine::local::Mem;
 use std::time::Duration;
 use surrealdb::opt::Config;
 use surrealdb::{
-    engine::local::{Db, SurrealKv}, // `SurrealKv` is the persistent on-disk backend
     Surreal,
+    engine::local::{Db, SurrealKv}, // `SurrealKv` is the persistent on-disk backend
 };
 
 // SurrealDB's local engine spawns several always-on background tasks (node-membership

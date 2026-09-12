@@ -33,13 +33,13 @@ use std::{
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{request::Parts, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
 use base64::Engine;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
@@ -1078,8 +1078,8 @@ where
 mod tests {
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -1088,8 +1088,8 @@ mod tests {
     use base64::Engine;
 
     use super::{
-        access_needs_refresh, AuthSessionManager, Claims, TokenEndpointResponse, TokenSet,
-        AUTH_COOKIE, ID_COOKIE, REFRESH_COOKIE,
+        AUTH_COOKIE, AuthSessionManager, Claims, ID_COOKIE, REFRESH_COOKIE, TokenEndpointResponse,
+        TokenSet, access_needs_refresh,
     };
 
     fn test_manager() -> AuthSessionManager {

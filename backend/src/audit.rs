@@ -5,8 +5,8 @@
 //! included — is append-only.
 
 use axum::http::StatusCode;
-use serde_json::{json, Value};
-use surrealdb::{engine::local::Db, Surreal};
+use serde_json::{Value, json};
+use surrealdb::{Surreal, engine::local::Db};
 use tokio::sync::broadcast::Sender;
 use ulid::Ulid;
 

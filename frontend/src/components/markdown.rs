@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
 use crate::search::highlight_spans;
 

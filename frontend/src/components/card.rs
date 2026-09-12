@@ -1,8 +1,8 @@
 use gloo_timers::future::TimeoutFuture;
-use leptos::leptos_dom::helpers::{window_event_listener, WindowListenerHandle};
+use leptos::leptos_dom::helpers::{WindowListenerHandle, window_event_listener};
 use leptos::prelude::*;
-use leptos_router::hooks::{use_navigate, use_params_map};
 use leptos_router::NavigateOptions;
+use leptos_router::hooks::{use_navigate, use_params_map};
 
 use crate::components::column::ColumnCards;
 use crate::components::confirm_modal::ConfirmModal;
@@ -11,7 +11,7 @@ use crate::components::link_editor::{LinkBadges, LinkEditor};
 use crate::components::markdown::MarkdownPreview;
 use crate::components::tag_editor::{TagChips, TagEditor};
 use crate::events::DragPayload;
-use crate::search::{query_matches_number, BoardSearchQuery};
+use crate::search::{BoardSearchQuery, query_matches_number};
 
 /// Newtype wrapping the board-level "which card is currently expanded" signal.
 /// Using a newtype avoids type collisions with other `RwSignal<Option<String>>`
@@ -103,9 +103,7 @@ pub fn CardItem(
                         show_move_submenu.set(false);
                     }
                 }));
-            } else if !menu_open
-                && let Some(listener) = listener.take()
-            {
+            } else if !menu_open && let Some(listener) = listener.take() {
                 listener.remove();
             }
         });

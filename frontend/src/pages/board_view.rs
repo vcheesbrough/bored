@@ -13,8 +13,8 @@ use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::links::BoardLinkIndex;
 use crate::search::{
-    active_hash_prefix, apply_hash_suggestion, hash_suggestions, BoardCardIndex, BoardSearchQuery,
-    ColumnCardsEntry, HashSuggestion,
+    BoardCardIndex, BoardSearchQuery, ColumnCardsEntry, HashSuggestion, active_hash_prefix,
+    apply_hash_suggestion, hash_suggestions,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]

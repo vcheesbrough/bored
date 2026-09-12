@@ -4,7 +4,7 @@ use leptos::prelude::*;
 
 use crate::components::card::CardItem;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
-use crate::search::{card_matches_query, BoardCardIndex, BoardSearchQuery};
+use crate::search::{BoardCardIndex, BoardSearchQuery, card_matches_query};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
