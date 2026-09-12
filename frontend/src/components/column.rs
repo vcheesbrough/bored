@@ -353,7 +353,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
 
         // Every link on the board; `order_by_dependency` drops the ones that
         // reach outside this column.
-        let links = links_index.0.get_untracked();
+        let links = links_index.links.get_untracked();
         let edges = links
             .iter()
             .map(|link| (link.predecessor_id.as_str(), link.successor_id.as_str()));
@@ -382,11 +382,21 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
         let order: Vec<String> = ordered.into_iter().map(str::to_string).collect();
         let col_id = col_id_sort.clone();
         sorting.set(true);
-        // No optimistic update: the cards re-settle when the server's
-        // `CardMoved` events arrive, the same way a drag does.
+        // No optimistic update: the column does not move until the server has
+        // spoken. It just does not wait for SSE to relay what the server
+        // already said — see the `Ok` arm.
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(err) = crate::api::reorder_cards(&col_id, order).await {
-                leptos::logging::error!("reorder_cards failed: {err}");
+            match crate::api::reorder_cards(&col_id, order).await {
+                // The response body *is* the column's new order, authoritative
+                // and already in hand. Applying it directly rather than
+                // waiting for the `CardMoved` events to come back round closes
+                // two gaps at once: a big reorder spends two broadcast slots
+                // per card and can lag the initiating tab out of the channel
+                // (`backend/src/events.rs`), where lagged events are dropped
+                // with no reconciliation short of a reload; and the sort now
+                // works whether or not SSE is connected at all.
+                Ok(server_cards) => apply_server_order(cards, server_cards),
+                Err(err) => leptos::logging::error!("reorder_cards failed: {err}"),
             }
             sorting.set(false);
         });
@@ -490,7 +500,12 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                         type="button"
                         title="Sort by links"
                         aria-label="Sort by links"
-                        prop:disabled=move || sorting.get()
+                        // Disabled until the board's links have been fetched as
+                        // well as while a sort is in flight: columns paint one
+                        // round trip ahead of the link index, and a click in
+                        // that window would compute an order from no edges and
+                        // silently do nothing.
+                        prop:disabled=move || sorting.get() || !links_index.loaded.get()
                         on:click=on_sort_by_links
                     >"⇅"</button>
                     <button
@@ -635,4 +650,135 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
         </div>
     }
     .into_any()
+}
+
+/// Indices into `current_ids`, reordered to follow `server_ids`.
+///
+/// Splitting this out from [`apply_server_order`] keeps the interesting part —
+/// what happens when the two lists disagree — testable without a reactive
+/// runtime.
+///
+/// Both kinds of disagreement are tolerated rather than trusted:
+///
+/// * An id the server reports that this browser does not hold is **skipped**.
+///   The card exists, but this tab has not been told about it yet; its own
+///   `CardCreated` / `CardMoved` event will place it in the normal way.
+/// * An id this browser holds that the server does not report **keeps its
+///   relative order at the end**. Usually it left the column, and its
+///   `CardMoved` will remove it shortly. But it can also be a card created here
+///   between the server's read and this response landing, and dropping that one
+///   would make a card the user just created vanish until a reload.
+///
+/// A repeated id in `server_ids` is honoured once; the repeat finds an
+/// already-claimed slot and is skipped.
+fn server_order(current_ids: &[String], server_ids: &[String]) -> Vec<usize> {
+    let mut claimed = vec![false; current_ids.len()];
+    let mut out = Vec::with_capacity(current_ids.len());
+    for id in server_ids {
+        if let Some(i) = current_ids.iter().position(|c| c == id)
+            && !claimed[i]
+        {
+            claimed[i] = true;
+            out.push(i);
+        }
+    }
+    // Everything the server did not mention, in the order it is already in.
+    out.extend(
+        claimed
+            .iter()
+            .enumerate()
+            .filter(|(_, taken)| !**taken)
+            .map(|(i, _)| i),
+    );
+    out
+}
+
+/// Rewrites `cards` to the order the server returned, reusing the existing
+/// signals.
+///
+/// Reuse is the point: the column renders through a keyed `<For>`, so building
+/// fresh signals would remount every card component — losing focus, collapsing
+/// anything expanded, and flashing the whole column. Moving the existing
+/// signals mirrors what the `CardMoved` SSE handler does for a single card.
+fn apply_server_order(
+    cards: RwSignal<Vec<RwSignal<shared::Card>>>,
+    server_cards: Vec<shared::Card>,
+) {
+    cards.update(|cs| {
+        let current_ids: Vec<String> = cs.iter().map(|s| s.get_untracked().id).collect();
+        let server_ids: Vec<String> = server_cards.iter().map(|c| c.id.clone()).collect();
+        let order = server_order(&current_ids, &server_ids);
+
+        let mut slots: Vec<Option<RwSignal<shared::Card>>> = cs.drain(..).map(Some).collect();
+        *cs = order.into_iter().filter_map(|i| slots[i].take()).collect();
+
+        // Refresh each card's data from the response as well as its slot. The
+        // SSE `CardMoved` handler inserts by comparing `position` values, so
+        // leaving the stale pre-sort positions in place would make the next
+        // event land a card in the wrong slot.
+        for card in server_cards {
+            if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == card.id) {
+                sig.set(card);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_order;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    #[test]
+    fn follows_the_server_order() {
+        assert_eq!(
+            server_order(&ids(&["a", "b", "c"]), &ids(&["c", "a", "b"])),
+            vec![2, 0, 1]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_order_is_the_identity() {
+        assert_eq!(
+            server_order(&ids(&["a", "b", "c"]), &ids(&["a", "b", "c"])),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn skips_server_ids_this_browser_does_not_hold() {
+        // `b` was created in another tab and its SSE event has not arrived yet.
+        assert_eq!(
+            server_order(&ids(&["a", "c"]), &ids(&["c", "b", "a"])),
+            vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn keeps_locally_known_cards_the_server_did_not_report() {
+        // `d` was created here after the server read the column; it must not
+        // disappear just because the response predates it.
+        assert_eq!(
+            server_order(&ids(&["a", "d", "b"]), &ids(&["b", "a"])),
+            vec![2, 0, 1]
+        );
+    }
+
+    #[test]
+    fn honours_a_repeated_server_id_once() {
+        assert_eq!(
+            server_order(&ids(&["a", "b"]), &ids(&["b", "b", "a"])),
+            vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn empty_lists_are_no_ops() {
+        assert_eq!(server_order(&[], &[]), Vec::<usize>::new());
+        assert_eq!(server_order(&ids(&["a"]), &[]), vec![0]);
+        assert_eq!(server_order(&[], &ids(&["a"])), Vec::<usize>::new());
+    }
 }
