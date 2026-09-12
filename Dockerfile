@@ -35,17 +35,6 @@ ENV RELEASE_TAG=${RELEASE_TAG}
 # This is the longest step in the build, and cargo says nothing between
 # "Compiling frontend" and the finished artifact — so a slow compile and a hung
 # one look identical, and neither says *why*.
-#
-# `-Ztime-passes` is rustc's own instrumentation: it prints each pass with its
-# wall time and RSS as the pass completes. That distinguishes the cases that
-# actually matter for this crate — `monomorphization_collector_graph_walk` and
-# `type_check_crate` blowing up (Leptos `view!` nesting) versus `LLVM_passes`
-# (codegen/optimisation) — which elapsed-time alone can never do.
-#
-# The flag is nightly-gated; `RUSTC_BOOTSTRAP=1` enables it on the pinned stable
-# toolchain. It only affects diagnostics, never codegen. Setting it in RUSTFLAGS
-# does change the fingerprint, so the first build after this lands recompiles;
-# every build after that hits the cache as usual.
 # These cache ids are `-wasm`-suffixed and distinct from backend-builder's,
 # even though both stages have no data dependency on each other and BuildKit
 # could otherwise run them in parallel. A `locked` mount is held for the whole
@@ -66,7 +55,6 @@ RUN --mount=type=cache,id=bored-cargo-registry-wasm,target=/usr/local/cargo/regi
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
     cd frontend && \
-    RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Ztime-passes" CARGO_TERM_VERBOSE=true \
     trunk build --release
 
 FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS backend-builder
