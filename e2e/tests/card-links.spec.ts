@@ -5,6 +5,7 @@ import {
   apiCreateColumn,
   apiCreateLink,
   apiListLinks,
+  apiMoveCard,
   gotoBoardView,
 } from './helpers';
 
@@ -42,8 +43,10 @@ test.describe('card links', () => {
     await expect(option).toHaveText(`#${b.number} Beta card`);
     await option.click();
 
-    // The chip appears on Alpha's "after" side and the link round-trips.
+    // The chip appears on Alpha's "after" side and the link round-trips. The
+    // column name is a sibling span, so the button's own text is unchanged.
     await expect(after.locator('.link-chip-card')).toHaveText(`#${b.number} Beta card`);
+    await expect(after.locator('.link-chip-column')).toHaveText('Todo');
     await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
       expect.objectContaining({ predecessor_id: a.id, successor_id: b.id, reason: null }),
     ]);
@@ -63,6 +66,36 @@ test.describe('card links', () => {
     await expect(
       page.locator('.link-group[data-side="before"] .link-chip-card')
     ).toHaveText(`#${a.number} Alpha card`);
+    await expect(
+      page.locator('.link-group[data-side="before"] .link-chip-column')
+    ).toHaveText('Todo');
+  });
+
+  test('a chip names the column its card is in, and follows it when it moves', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `links-column-${Date.now()}`);
+    const todo = await apiCreateColumn(request, board.name, 'Todo', 0);
+    const doing = await apiCreateColumn(request, board.name, 'Doing', 1);
+    const done = await apiCreateColumn(request, board.name, 'Done', 2);
+    const a = await apiCreateCard(request, todo.id, '# Waiting card');
+    const b = await apiCreateCard(request, doing.id, '# Blocker card');
+    // Blocker comes before Waiting, so it shows on Waiting's "before" side.
+    await apiCreateLink(request, b.id, 'successor', a.id);
+
+    await gotoBoardView(page, board.name);
+    await cardWith(page, 'Waiting card').click();
+
+    // The prefix is the linked card's column, not the open card's.
+    const chip = page.locator('.link-group[data-side="before"] .link-chip');
+    await expect(chip.locator('.link-chip-card')).toHaveText(`#${b.number} Blocker card`);
+    await expect(chip.locator('.link-chip-column')).toHaveText('Doing');
+
+    // Moving the linked card updates the prefix in place — this is the whole
+    // point of the prefix, so it must not need a reload to be right.
+    await apiMoveCard(request, b.id, done.id);
+    await expect(chip.locator('.link-chip-column')).toHaveText('Done', { timeout: 5000 });
   });
 
   test('a card that would close a loop is not offered, and the server refuses it', async ({
@@ -254,6 +287,10 @@ test.describe('card links', () => {
     await expect(page.locator('.modal .link-group[data-side="after"] .link-chip-card')).toHaveText(
       `#${b.number} Modal target`
     );
+    // The maximised surface carries the column prefix too.
+    await expect(
+      page.locator('.modal .link-group[data-side="after"] .link-chip-column')
+    ).toHaveText('Todo');
     await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
       expect.objectContaining({ predecessor_id: a.id, successor_id: b.id }),
     ]);
