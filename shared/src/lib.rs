@@ -208,6 +208,23 @@ pub struct ColumnsReorderRequest {
     pub order: Vec<String>,
 }
 
+/// Body of `PUT /api/columns/:id/cards/reorder`.
+/// The complete desired top-to-bottom order of one column's cards; the server
+/// applies it and knows nothing about *why* that order was chosen.
+///
+/// Unlike [`ColumnsReorderRequest`] the contract is deliberately tolerant:
+/// ids that are not in the column (including ids from another column) are
+/// ignored, and cards the client did not mention keep their relative order at
+/// the **end** of the column. Cards are created at the top, so a card added
+/// between the client reading the column and sending this request would
+/// otherwise turn a reorder into an error; instead it simply sinks to the
+/// bottom and the user can move it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardsReorderRequest {
+    /// Desired order of the column's card IDs, top first.
+    pub order: Vec<String>,
+}
+
 /// One append-only row from `audit_log` — returned by history endpoints and
 /// pushed over SSE as `audit_appended`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

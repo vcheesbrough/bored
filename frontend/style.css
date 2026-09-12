@@ -618,7 +618,8 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   text-align: center;
 }
 
-.column-collapse-btn {
+.column-collapse-btn,
+.column-sort-links-btn {
   width: 30px;
   height: 28px;
 }

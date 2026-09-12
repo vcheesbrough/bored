@@ -4,6 +4,7 @@ use leptos::prelude::*;
 
 use crate::components::card::CardItem;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
+use crate::links::BoardLinkIndex;
 use crate::search::{BoardCardIndex, BoardSearchQuery, card_matches_query};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
@@ -118,6 +119,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     let board_id_collapse = board_id.clone();
     let board_id_expand = board_id.clone();
     let col_id_collapsed_drop = col_id.clone();
+    let col_id_sort = col_id.clone();
 
     // ── Initial card fetch ─────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -326,6 +328,63 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
         }
     };
 
+    // ── Sort this column's cards by their links ────────────────────────────
+    // Guards against a double-click firing two overlapping reorders — the
+    // second would be computed from a card order the server has already
+    // replaced.
+    let sorting = RwSignal::new(false);
+    // Always present: `ColumnView` only ever renders inside `BoardView`,
+    // which provides the board's links before rendering any column.
+    let links_index = expect_context::<BoardLinkIndex>();
+    let on_sort_by_links = move |_: web_sys::MouseEvent| {
+        if sorting.get_untracked() {
+            return;
+        }
+        // The *whole* column, deliberately read from `cards` rather than from
+        // the `<For>`'s `each` closure: that closure filters by the search
+        // query, so sorting it would quietly sink every card hidden by a
+        // search to the bottom of the column.
+        let current: Vec<shared::Card> = cards
+            .get_untracked()
+            .iter()
+            .map(|sig| sig.get_untracked())
+            .collect();
+        let current_ids: Vec<&str> = current.iter().map(|c| c.id.as_str()).collect();
+
+        // Every link on the board; `order_by_dependency` drops the ones that
+        // reach outside this column.
+        let links = links_index.0.get_untracked();
+        let edges = links
+            .iter()
+            .map(|link| (link.predecessor_id.as_str(), link.successor_id.as_str()));
+
+        let ordered = match shared::links::order_by_dependency(&current_ids, edges) {
+            Ok(ordered) => ordered,
+            Err(err) => {
+                // Only reachable from link rows that predate the cycle check.
+                leptos::logging::error!("cannot sort column by links: {err}");
+                return;
+            }
+        };
+        if ordered == current_ids {
+            // Already satisfies its links — do not spend a request, an audit
+            // row, or an SSE burst saying so.
+            return;
+        }
+
+        let order: Vec<String> = ordered.into_iter().map(str::to_string).collect();
+        let col_id = col_id_sort.clone();
+        sorting.set(true);
+        // No optimistic update: the cards re-settle when the server's
+        // `CardMoved` events arrive, the same way a drag does.
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(err) = crate::api::reorder_cards(&col_id, order).await {
+                leptos::logging::error!("reorder_cards failed: {err}");
+            }
+            sorting.set(false);
+        });
+    };
+
     // ── Drag-and-drop: column reorder via drop onto column ─────────────────
     let on_col_dragover = move |e: web_sys::DragEvent| {
         if matches!(drag_payload.get_untracked(), DragPayload::Column { .. }) {
@@ -419,6 +478,14 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                     >"⠿"</span>
                     <span class="column-name">{move || column.get().name.clone()}</span>
                     <span class="card-count-badge">{card_count}</span>
+                    <button
+                        class="card-toolbar-btn column-sort-links-btn"
+                        type="button"
+                        title="Sort by links"
+                        aria-label="Sort by links"
+                        prop:disabled=move || sorting.get()
+                        on:click=on_sort_by_links
+                    >"⇅"</button>
                     <button
                         class="card-toolbar-btn column-collapse-btn"
                         type="button"

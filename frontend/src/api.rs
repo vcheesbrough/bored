@@ -233,6 +233,26 @@ pub async fn reorder_columns(
     .await
 }
 
+/// `PUT /api/columns/:id/cards/reorder`
+///
+/// Sends the complete desired top-to-bottom order of one column's cards. The
+/// server applies it and broadcasts a `CardMoved` for each card it actually had
+/// to write, so the view updates over SSE like any other move; the returned
+/// list is the authoritative order for callers that want it.
+pub async fn reorder_cards(
+    column_id: &str,
+    order: Vec<String>,
+) -> Result<Vec<shared::Card>, gloo_net::Error> {
+    check_auth(
+        Request::put(&format!("/api/columns/{column_id}/cards/reorder"))
+            .json(&shared::CardsReorderRequest { order })?
+            .send()
+            .await?,
+    )?
+    .json::<Vec<shared::Card>>()
+    .await
+}
+
 pub async fn fetch_board_history(
     board_slug: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, gloo_net::Error> {
