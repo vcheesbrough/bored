@@ -77,6 +77,9 @@ fn card_label(cards: Option<BoardCardIndex>, card_id: &str, number: u32) -> Stri
 /// The name of the column holding `card_id`, or `None` when the card or its
 /// column is not in the client's view of the board.
 ///
+/// A whitespace-only name counts as missing too: nothing stops the API from
+/// creating one, and an empty prefix still draws its separator.
+///
 /// Two hops — card → `column_id` → column name — and either can miss: a card
 /// whose column has not loaded yet (or that was just deleted) is not in
 /// `cards`, and a card that has just moved can name a column the client has
@@ -93,6 +96,13 @@ fn column_name_for(
 ) -> Option<String> {
     let column_id = &cards.iter().find(|c| c.id == card_id)?.column_id;
     let name = &columns.iter().find(|col| &col.id == column_id)?.name;
+    // A blank name is treated as no name at all: column creation over the API
+    // does not reject one (the UI rename path does), and `Some("")` would
+    // render an empty prefix whose `::after` separator still fires, giving the
+    // user a leading "· #12 Title".
+    if name.trim().is_empty() {
+        return None;
+    }
     Some(truncate(name, MAX_COLUMN_CHARS))
 }
 
@@ -204,13 +214,22 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
     // the cards and the columns through their signals is what keeps this
     // current: the prefix fills in when a column finishes loading and follows
     // the card when it is moved, locally or over SSE.
-    let column = Signal::derive(move || {
+    // A `Memo`, not a `Signal::derive`: the lookup walks every card on the
+    // board (and `all_cards()` clones each one), so it must run at most once
+    // per dependency change rather than once per read, and it must not
+    // re-render the prefix when an unrelated card edit leaves the name the
+    // same.
+    let column = Memo::new(move |_| {
         let (Some(cards), Some(columns)) = (cards, columns) else {
             return None;
         };
-        // `try_get` throughout: a chip can outlive the board view it read
-        // these from by a frame, and a disposed signal should mean "no prefix"
-        // rather than a panic.
+        // The column reads are `try_get`: a chip can outlive the board view it
+        // read them from by a frame, and a disposed column should mean "no
+        // prefix" rather than a panic. The cards side goes through
+        // `all_cards()`, which reads the index and each column's list with
+        // plain `get`, so it carries the same disposal exposure `card_label`
+        // already has — guarding it belongs in `BoardCardIndex`, for both
+        // call sites at once.
         let columns: Vec<shared::Column> = columns
             .try_get()
             .unwrap_or_default()
@@ -313,10 +332,14 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
         <span class="link-chip" title=reason_for_title>
             // A sibling of the card button rather than part of its label, so
             // the column name is not part of the link text and assertions on
-            // `.link-chip-card` still read just `#N Title`.
-            <Show when=move || column.get().is_some() fallback=|| ()>
-                <span class="link-chip-column">{move || column.get().unwrap_or_default()}</span>
-            </Show>
+            // `.link-chip-card` still read just `#N Title`. Mapped from a
+            // single read instead of a `Show` wrapping a second one: `None`
+            // renders nothing either way, and one read means one board walk.
+            {move || {
+                column
+                    .get()
+                    .map(|name| view! { <span class="link-chip-column">{name}</span> })
+            }}
             <button
                 type="button"
                 class="link-chip-card"
@@ -776,6 +799,21 @@ mod tests {
         let cards = vec![card("card-a", "col-9")];
         let columns = vec![column("col-1", "todo")];
         assert_eq!(column_name_for(&cards, &columns, "card-a"), None);
+    }
+
+    #[test]
+    fn no_column_when_the_name_is_blank() {
+        // Column creation over the API does not reject a blank name; a blank
+        // prefix would render as a bare separator, so treat it as missing.
+        let cards = vec![card("card-a", "col-1")];
+        for blank in ["", "   ", "\t\n"] {
+            let columns = vec![column("col-1", blank)];
+            assert_eq!(
+                column_name_for(&cards, &columns, "card-a"),
+                None,
+                "{blank:?} should yield no prefix"
+            );
+        }
     }
 
     #[test]

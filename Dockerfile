@@ -92,13 +92,18 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
 # running the previous `--lib` invocation locally — it executed only
 # `shared`'s 47 tests, never `backend`'s 91). Without it, cargo runs each
 # package's actual target (backend's `src/main.rs` tests, shared's lib tests).
+#
+# `frontend` is included so its unit tests are actually enforced — `trunk`
+# builds the crate but never compiles its `#[cfg(test)]` code. No `--target`
+# here on purpose: the tests are plain logic and must build for the host, as
+# wasm test binaries cannot run in this stage.
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo test -p backend -p shared
+    cargo test -p backend -p shared -p frontend
 # Release tag burned into the backend binary (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # fmt/clippy/test layers so a tag change only recompiles the crates that read it.

@@ -1818,7 +1818,12 @@ mark.search-hit {
 /* The linked card's column, muted before its number: "todo · #12 Beta". The
    separator is a pseudo-element so it stays out of the element's text. */
 .link-chip-column {
-  max-width: 96px;
+  /* Wide enough for MAX_COLUMN_CHARS (16) mono glyphs at 11px plus the
+     `::after` separator, which shares this overflow box: the Rust `truncate`
+     is then the only limit that normally fires, and the ellipsis here is a
+     safety net for unusually wide glyphs rather than a second cap that would
+     clip the separator away. */
+  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-muted);
