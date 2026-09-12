@@ -1741,18 +1741,37 @@ mark.search-hit {
 
 /* ── Card links (iteration 42 / card #76) ────────────────────────────────── */
 
-/* Collapsed card: `↑n ↓n` counts, leading the tag chips on the metadata line
-   (`.card-meta-row`). Reuses the chip look so the two read as one kind of
-   metadata, and never shrinks — when the tags overflow, the counts stay. */
+/* Collapsed card: one pill per link — an arrow plus the other card's `#n` —
+   leading the tag chips on the metadata line (`.card-meta-row`). Never
+   shrinks — when the tags overflow, the pills stay. */
 .card-link-badges {
   display: flex;
   flex-shrink: 0;
+  flex-wrap: nowrap;
   gap: 4px;
   margin-bottom: 4px;
 }
 
 .link-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
   color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* Ticket numbers are yellow everywhere on a card (`.card-number`); the
+   badge's arrow stays muted so only the number itself carries that meaning. */
+.link-badge-number {
+  color: var(--yellow);
 }
 
 /* Expanded card and modal: one row per side, chips then the picker. */
