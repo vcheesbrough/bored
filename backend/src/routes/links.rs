@@ -11,17 +11,17 @@
 //! the editor needs to tell the user which one it hit.
 
 use axum::{
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    Extension, Json,
 };
-use surrealdb::{engine::local::Db, Surreal};
+use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardLink, DbColumn};
-use crate::routes::boards::{editor_sub, find_board_by_slug, AppState};
+use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
 
 /// Status plus a human-readable reason. Axum renders the tuple as a plain-text
 /// response with that status; an empty string is a bodiless response.

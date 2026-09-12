@@ -12,16 +12,16 @@ mod routes;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     middleware,
     routing::{delete, get, post, put}, // HTTP method helpers for the router
-    Router,
 };
 use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rust TLS)
 use routes::boards::AppState;
 use std::net::SocketAddr;
 use tower_http::{services::ServeDir, trace::TraceLayer}; // Middleware: static files + request tracing
 
-use crate::auth::{auth_middleware, AuthConfig, AuthSessionManager, JwksCache};
+use crate::auth::{AuthConfig, AuthSessionManager, JwksCache, auth_middleware};
 
 // Wraps ServeDir and replaces any 404 response with index.html so that SPA
 // deep-links (e.g. /boards/123) survive a browser reload.
@@ -780,9 +780,11 @@ mod tests {
         assert!(hist_a.iter().any(|e| {
             e.entity_type == "card" && e.entity_id == card.id && e.action == "create"
         }));
-        assert!(!hist_a
-            .iter()
-            .any(|e| e.entity_type == "column" && e.entity_id == col_b.id));
+        assert!(
+            !hist_a
+                .iter()
+                .any(|e| e.entity_type == "column" && e.entity_id == col_b.id)
+        );
     }
 
     #[tokio::test]
@@ -2726,9 +2728,11 @@ mod tests {
             .get(&format!("/api/cards/{}/history", a.id))
             .await
             .json();
-        assert!(hist
-            .iter()
-            .any(|e| e.entity_type == "card_link" && e.entity_id == ab.id && e.action == "delete"));
+        assert!(
+            hist.iter().any(|e| e.entity_type == "card_link"
+                && e.entity_id == ab.id
+                && e.action == "delete")
+        );
         assert!(!hist.iter().any(|e| e.entity_id == bc.id));
 
         // The link delete rows land before the card delete row in time, so a

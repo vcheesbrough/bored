@@ -23,8 +23,8 @@
 
 use base64::Engine;
 use config::{Config, ConfigBuilder, Environment};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use sovereign_config_provider::SovereignConfigSource;
 
 /// Env vars whose presence enables the sovereign-config source layer.
@@ -299,7 +299,7 @@ pub fn load_optional_oidc(cfg: &Config) -> Result<Option<OidcConfig>, ConfigErro
             return Err(ConfigError::Load {
                 group: "oidc".to_string(),
                 source,
-            })
+            });
         }
     };
     if !issuer_present {

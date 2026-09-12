@@ -22,10 +22,10 @@
 // is the only flow we use here. Strict would break the callback.
 
 use axum::{
+    Extension, Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Redirect, Response},
-    Extension, Json,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
