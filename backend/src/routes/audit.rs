@@ -52,10 +52,19 @@ pub async fn card_history(
         .select(("cards", &card_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if card.is_none() {
+    let Some(card) = card else {
         return Err(StatusCode::NOT_FOUND);
-    }
-    let rows = audit::list_card_history(&state.db, &card_id)
+    };
+    let col: Option<DbColumn> = state
+        .db
+        .select(("columns", card.column.id.to_raw()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The column is normally still there; if it is not (mid-cascade), the
+    // card's own history rows still come back and only the link half narrows
+    // to nothing rather than scanning every board's link history.
+    let board_ulid = col.map(|c| c.board.id.to_raw()).unwrap_or_default();
+    let rows = audit::list_card_history(&state.db, &card_id, &board_ulid)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows))

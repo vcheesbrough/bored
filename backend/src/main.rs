@@ -2577,6 +2577,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn omitting_reason_on_update_clears_it() {
+        // Pins the current behaviour: `UpdateCardLinkRequest.reason` is
+        // `#[serde(default)]`, so a body with the key left out entirely
+        // deserialises the same as `reason: None` and wipes it — unlike
+        // `update_card`, which treats an absent field as untouched. If this
+        // ever changes to match that convention, this test should change too.
+        let server = test_app().await;
+        let (_, _, [a, b, _]) = setup_three_cards(&server).await;
+        let link: shared::CardLink = link_after(&server, &a, &b, Some("first")).await.json();
+
+        let cleared: shared::CardLink = server
+            .put(&format!("/api/links/{}", link.id))
+            .json(&serde_json::json!({}))
+            .await
+            .json();
+        assert_eq!(cleared.reason, None);
+    }
+
+    #[tokio::test]
     async fn re_sending_the_same_reason_writes_no_history() {
         let server = test_app().await;
         let (board, _, [a, b, _]) = setup_three_cards(&server).await;

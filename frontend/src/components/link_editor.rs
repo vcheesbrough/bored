@@ -178,6 +178,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
     let reason_for_title = link.reason.clone().unwrap_or_default();
     let reason_for_display = link.reason.clone();
     let editing_reason = RwSignal::new(false);
+    let removing = RwSignal::new(false);
     let draft = RwSignal::new(link.reason.clone().unwrap_or_default());
     let reason_input_ref = NodeRef::<leptos::html::Input>::new();
 
@@ -233,6 +234,15 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
     };
 
     let remove = move || {
+        // Guards re-entry the same way `save_reason` does: the chip stays
+        // mounted (and its × button armed) until the response handler below
+        // removes it, so without this a double click could send a second
+        // DELETE that races the first and surfaces a spurious 404 error under
+        // an unlink that already succeeded.
+        if removing.get_untracked() {
+            return;
+        }
+        removing.set(true);
         let id = link_id.get_value();
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::delete_card_link(&id).await {
@@ -243,6 +253,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                 Err(e) => {
                     leptos::logging::error!("unlink failed: {e}");
                     error.set(Some(e.message));
+                    removing.set(false);
                 }
             }
         });
@@ -315,6 +326,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                 class="link-chip-btn link-chip-remove"
                 aria-label=format!("Remove link to #{other_number}")
                 title="Remove link"
+                prop:disabled=move || removing.get()
                 on:mousedown=move |e: leptos::ev::MouseEvent| {
                     e.prevent_default();
                     e.stop_propagation();
