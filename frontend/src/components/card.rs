@@ -56,7 +56,8 @@ pub fn CardItem(
     /// should start in editing mode.  The matching `CardItem` claims the
     /// board-level expanded-card lock, enters `Editing`, then clears the signal.
     new_card_id: RwSignal<Option<String>>,
-) -> impl IntoView {
+) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     // ── Contexts ─────────────────────────────────────────────────────────
     let drag_payload =
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
@@ -704,4 +705,5 @@ pub fn CardItem(
             </Show>
         </div>
     }
+    .into_any()
 }

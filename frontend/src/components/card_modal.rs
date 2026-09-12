@@ -35,7 +35,8 @@ pub fn CardModal(
     /// Invoked when the user closes or minimises the modal, after any pending
     /// save has been flushed. Use this to pop the route / query parameter.
     on_close: Callback<()>,
-) -> impl IntoView {
+) -> AnyView {
+    // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
     let body = RwSignal::new(String::new());
     let editing = RwSignal::new(false);
     let saved_body = RwSignal::new(String::new());
@@ -321,4 +322,5 @@ pub fn CardModal(
             </div>
         </Show>
     }
+    .into_any()
 }
