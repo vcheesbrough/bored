@@ -142,7 +142,13 @@ pub fn BoardView() -> AnyView {
     // current over SSE. Cards read it through the context so the inline card
     // and the modal show the same links.
     let board_links: RwSignal<Vec<shared::CardLink>> = RwSignal::new(Vec::new());
-    let link_index = BoardLinkIndex(board_links);
+    // Flipped true when the initial link fetch resolves; see `BoardLinkIndex`
+    // for why an empty `board_links` is not a usable stand-in for "loaded".
+    let board_links_loaded = RwSignal::new(false);
+    let link_index = BoardLinkIndex {
+        links: board_links,
+        loaded: board_links_loaded,
+    };
     provide_context(link_index);
 
     // ── `#` search suggestions ─────────────────────────────────────────────
@@ -437,6 +443,7 @@ pub fn BoardView() -> AnyView {
         board_name.set(slug.clone());
         columns.set(Vec::new());
         board_links.set(Vec::new());
+        board_links_loaded.set(false);
         loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(board) = crate::api::fetch_board(&slug).await
@@ -458,8 +465,11 @@ pub fn BoardView() -> AnyView {
                 Ok(fetched) => {
                     if board_slug() == slug {
                         board_links.set(fetched);
+                        board_links_loaded.set(true);
                     }
                 }
+                // Left false on failure: the index is genuinely unknown, and a
+                // sort computed from no edges would silently do nothing.
                 Err(e) => leptos::logging::error!("failed to fetch links: {e}"),
             }
             if board_slug() == slug {
