@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rmcp::{
+    // `ErrorData` is the MCP error envelope; we alias it for brevity.
+    ErrorData as McpError,
+    // `ServerHandler` is the trait we implement to wire the server into the
+    // MCP runtime; `tool_handler` is the macro that fills in the boilerplate.
+    ServerHandler,
     // `Parameters<T>` is a newtype wrapper used by the tool macro to
     // deserialise the incoming JSON params into a typed struct.
     handler::server::wrapper::Parameters,
@@ -26,11 +31,6 @@ use rmcp::{
     tool,
     tool_handler,
     tool_router,
-    // `ErrorData` is the MCP error envelope; we alias it for brevity.
-    ErrorData as McpError,
-    // `ServerHandler` is the trait we implement to wire the server into the
-    // MCP runtime; `tool_handler` is the macro that fills in the boilerplate.
-    ServerHandler,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -272,10 +272,10 @@ impl TokenManager {
     /// Returns the raw JWT string ready to drop into an Authorization header.
     pub async fn get_token(&self) -> Result<String, String> {
         let mut state = self.state.lock().await;
-        if let Some(s) = state.as_ref() {
-            if Instant::now() < s.refresh_at {
-                return Ok(s.access_token.clone());
-            }
+        if let Some(s) = state.as_ref()
+            && Instant::now() < s.refresh_at
+        {
+            return Ok(s.access_token.clone());
         }
         // Need to acquire/refresh. Holding the mutex across the network call
         // serialises concurrent refreshes — fine for an MCP server doing

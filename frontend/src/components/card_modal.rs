@@ -105,31 +105,31 @@ pub fn CardModal(
     let flush_and_close = move || {
         let current = body.get_untracked();
         let last_saved = saved_body.get_untracked();
-        if current != last_saved {
-            if let Some(c) = card.get_untracked() {
-                let card_id = c.id.clone();
-                save_status.set(SaveStatus::Saving);
-                wasm_bindgen_futures::spawn_local(async move {
-                    let req = shared::UpdateCardRequest {
-                        body: Some(current.clone()),
-                        audit_edit_session: modal_audit_session.get_untracked(),
-                        ..Default::default()
-                    };
-                    match crate::api::update_card(&card_id, req).await {
-                        Ok(updated) => {
-                            on_updated.run(updated);
-                            card.set(None);
-                            editing.set(false);
-                            on_close.run(());
-                        }
-                        Err(e) => {
-                            save_status.set(SaveStatus::Failed);
-                            leptos::logging::error!("modal flush save failed: {e}");
-                        }
+        if current != last_saved
+            && let Some(c) = card.get_untracked()
+        {
+            let card_id = c.id.clone();
+            save_status.set(SaveStatus::Saving);
+            wasm_bindgen_futures::spawn_local(async move {
+                let req = shared::UpdateCardRequest {
+                    body: Some(current.clone()),
+                    audit_edit_session: modal_audit_session.get_untracked(),
+                    ..Default::default()
+                };
+                match crate::api::update_card(&card_id, req).await {
+                    Ok(updated) => {
+                        on_updated.run(updated);
+                        card.set(None);
+                        editing.set(false);
+                        on_close.run(());
                     }
-                });
-                return;
-            }
+                    Err(e) => {
+                        save_status.set(SaveStatus::Failed);
+                        leptos::logging::error!("modal flush save failed: {e}");
+                    }
+                }
+            });
+            return;
         }
         card.set(None);
         editing.set(false);
@@ -225,10 +225,11 @@ pub fn CardModal(
     // Keep focus on the modal div when viewing (not editing) so keyboard Esc
     // is received without requiring a click first.
     Effect::new(move |_| {
-        if card.get().is_some() && !editing.get() {
-            if let Some(el) = modal_ref.get() {
-                let _ = el.focus();
-            }
+        if card.get().is_some()
+            && !editing.get()
+            && let Some(el) = modal_ref.get()
+        {
+            let _ = el.focus();
         }
     });
 
@@ -264,10 +265,10 @@ pub fn CardModal(
                             class="card-toolbar-btn"
                             title="Card history"
                             on:click=move |_| {
-                                if let Some(hd) = history_drawer {
-                                    if let Some(c) = card.get() {
-                                        hd.0.set(Some(HistoryScope::Card(c.id.clone())));
-                                    }
+                                if let Some(hd) = history_drawer
+                                    && let Some(c) = card.get()
+                                {
+                                    hd.0.set(Some(HistoryScope::Card(c.id.clone())));
                                 }
                             }
                         ><HistoryIcon /></button>

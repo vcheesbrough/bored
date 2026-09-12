@@ -174,9 +174,11 @@ fn oidc_blank_required_scope_is_rejected() {
 #[test]
 fn load_optional_oidc_returns_none_when_issuer_is_absent() {
     let config = cfg(&[]);
-    assert!(load_optional_oidc(&config)
-        .expect("should not error")
-        .is_none());
+    assert!(
+        load_optional_oidc(&config)
+            .expect("should not error")
+            .is_none()
+    );
 }
 
 #[test]
@@ -184,9 +186,11 @@ fn load_optional_oidc_returns_none_when_issuer_is_blank() {
     // Mirrors `deploy/docker-compose.yml`'s `${OIDC_ISSUER_URL:-}` forwarding an
     // unset host var as an empty string rather than an absent one.
     let config = cfg(&[("BORED__OIDC__ISSUER-URL", "")]);
-    assert!(load_optional_oidc(&config)
-        .expect("should not error")
-        .is_none());
+    assert!(
+        load_optional_oidc(&config)
+            .expect("should not error")
+            .is_none()
+    );
 }
 
 #[test]
@@ -388,9 +392,11 @@ fn required_scope_with_surrounding_whitespace_is_trimmed() {
 
     assert_eq!(oidc.required_scope, "bored:dev:access");
     // The comparison auth.rs performs must now succeed.
-    assert!("openid profile bored:dev:access"
-        .split_whitespace()
-        .any(|value| value == oidc.required_scope));
+    assert!(
+        "openid profile bored:dev:access"
+            .split_whitespace()
+            .any(|value| value == oidc.required_scope)
+    );
 }
 
 /// Trimming is applied to every string leaf, not a curated list — including
@@ -626,8 +632,14 @@ fn env_layer_overrides_the_defaults_layer_on_the_same_kebab_key() {
 fn sovereign_source_is_disabled_without_an_access_url() {
     // Guards the local-dev / e2e path: no access URL in this test process, so the
     // sovereign layer must be skipped and config must come from defaults + env.
-    std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL_FILE");
-    std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL");
+    // SAFETY: this file's tests never call `getenv` on the real process env —
+    // `cfg()`/`cfg_with_sovereign()` inject env values via
+    // `Environment::source(Some(..))` instead — so mutating real env vars here
+    // doesn't race a concurrent reader. (`#[serial]` only excludes the other
+    // `#[serial]` tests in this binary, not threads in general; it isn't what
+    // makes this safe.)
+    unsafe { std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL_FILE") };
+    unsafe { std::env::remove_var("SOVEREIGN_CONFIG_ACCESS_URL") };
     assert!(!sovereign_source_enabled());
 }
 
@@ -676,14 +688,17 @@ fn env_layer_still_overrides_the_sovereign_leaf() {
 #[test]
 #[serial]
 fn app_version_override_falls_back_to_none_when_unset_or_blank() {
-    std::env::remove_var("APP_VERSION");
+    // SAFETY: see the safety note on `sovereign_source_is_disabled_without_an_access_url`
+    // above — this file's tests don't read real process env, so mutating it here
+    // doesn't race a concurrent reader.
+    unsafe { std::env::remove_var("APP_VERSION") };
     assert_eq!(app_version_override(), None);
 
-    std::env::set_var("APP_VERSION", "");
+    unsafe { std::env::set_var("APP_VERSION", "") };
     assert_eq!(app_version_override(), None);
 
-    std::env::set_var("APP_VERSION", "1.2.3");
+    unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
     assert_eq!(app_version_override(), Some("1.2.3".to_string()));
 
-    std::env::remove_var("APP_VERSION");
+    unsafe { std::env::remove_var("APP_VERSION") };
 }
