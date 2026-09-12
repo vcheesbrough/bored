@@ -38,6 +38,12 @@ pub fn TagEditor(
         };
         let typed = draft.get();
         let typed = typed.trim();
+        // An empty prefix matches every tag, so completions only make sense
+        // once something has been typed. Without this the popup would be open
+        // on every expanded card that sits on a board with any tags at all.
+        if typed.is_empty() {
+            return Vec::new();
+        }
         let current = tags.get();
         index
             .all_tags()
@@ -53,7 +59,10 @@ pub fn TagEditor(
             .collect::<Vec<String>>()
     });
 
-    let popup_open = Signal::derive(move || !suggestions.get().is_empty());
+    // The popup belongs to the input, so it is only open while the input has
+    // focus — otherwise it would hang over the card whenever one is expanded.
+    let input_focused = RwSignal::new(false);
+    let popup_open = Signal::derive(move || input_focused.get() && !suggestions.get().is_empty());
 
     // Append `candidate` to the card's tags and publish the result.
     //
@@ -138,7 +147,9 @@ pub fn TagEditor(
                         // Any edit invalidates the highlighted suggestion.
                         active_suggestion.set(None);
                     }
+                    on:focus=move |_| input_focused.set(true)
                     on:blur=move |_| {
+                        input_focused.set(false);
                         // Closing the editor should not silently drop a tag the
                         // user has finished typing.
                         commit(draft.get_untracked());
