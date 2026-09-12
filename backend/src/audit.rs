@@ -340,11 +340,19 @@ pub async fn list_column_history(
         .collect())
 }
 
+/// Card-scoped history: the card's own rows plus every `card_link` row with the
+/// card at either end, newest first.
+///
+/// Two queries rather than one `OR`: the card rows hit the
+/// `(entity_type, entity_id, created_at)` index directly, and the link rows
+/// still narrow on `entity_type` before the snapshot comparison. The merged
+/// list is re-sorted on the row timestamp, which SurrealDB's `Datetime`
+/// compares chronologically.
 pub async fn list_card_history(
     db: &Surreal<Db>,
     card_id: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, surrealdb::Error> {
-    let rows: Vec<DbAuditLog> = db
+    let mut rows: Vec<DbAuditLog> = db
         .query(
             "SELECT * FROM audit_log \
              WHERE entity_type = 'card' AND entity_id = $cid \
@@ -353,6 +361,21 @@ pub async fn list_card_history(
         .bind(("cid", card_id.to_string()))
         .await?
         .take(0)?;
+    // A delete row only has `snapshot_before`, a create row only
+    // `snapshot_after`, so both sides are checked.
+    let link_rows: Vec<DbAuditLog> = db
+        .query(
+            "SELECT * FROM audit_log \
+             WHERE entity_type = 'card_link' AND ( \
+                 snapshot_before.predecessor_id = $cid OR snapshot_before.successor_id = $cid OR \
+                 snapshot_after.predecessor_id = $cid OR snapshot_after.successor_id = $cid \
+             ) ORDER BY created_at DESC",
+        )
+        .bind(("cid", card_id.to_string()))
+        .await?
+        .take(0)?;
+    rows.extend(link_rows);
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(rows.into_iter().map(DbAuditLog::into_api).collect())
 }
 
@@ -367,9 +390,15 @@ async fn batch_delete_entries(
     db: &Surreal<Db>,
     batch_group: &str,
 ) -> Result<Vec<DbAuditLog>, surrealdb::Error> {
+    // Link rows are excluded on purpose: a cascade batch records the links it
+    // removed, but a deleted link is not replayable — by the time the batch is
+    // restored another link may have closed the loop it would complete — so
+    // the cards and columns come back without them.
     let rows: Vec<DbAuditLog> = db
         .query(
-            "SELECT * FROM audit_log WHERE batch_group = $bg AND action = 'delete' ORDER BY created_at DESC",
+            "SELECT * FROM audit_log \
+             WHERE batch_group = $bg AND action = 'delete' AND entity_type != 'card_link' \
+             ORDER BY created_at DESC",
         )
         .bind(("bg", batch_group.to_string()))
         .await?

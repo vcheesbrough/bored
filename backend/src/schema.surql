@@ -73,3 +73,21 @@ DEFINE FIELD IF NOT EXISTS audit_edit_session ON audit_log TYPE option<string>;
 DEFINE FIELD OVERWRITE created_at ON audit_log TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS audit_board_time ON audit_log FIELDS board_id, created_at;
 DEFINE INDEX IF NOT EXISTS audit_entity_time ON audit_log FIELDS entity_type, entity_id, created_at;
+
+-- Predecessor/successor links between cards (iteration 42 — card #76).
+-- One row is one bidirectional fact: `predecessor` comes before `successor`.
+-- Links are their own table rather than a field on `cards` so a link is stored
+-- once, not once per end, and so restoring an old card body never has to decide
+-- whether to rewind links as well. The UNIQUE pair index makes an exact
+-- duplicate a database error (surfaced as 409); the reverse pair is a cycle
+-- and is rejected by the application before it reaches the database.
+DEFINE TABLE IF NOT EXISTS card_links SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS predecessor    ON TABLE card_links TYPE record<cards>;
+DEFINE FIELD IF NOT EXISTS successor      ON TABLE card_links TYPE record<cards>;
+DEFINE FIELD IF NOT EXISTS reason         ON TABLE card_links TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS last_edited_by ON TABLE card_links TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at     ON TABLE card_links TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at     ON TABLE card_links TYPE datetime VALUE time::now();
+DEFINE INDEX IF NOT EXISTS card_links_predecessor ON TABLE card_links FIELDS predecessor;
+DEFINE INDEX IF NOT EXISTS card_links_successor   ON TABLE card_links FIELDS successor;
+DEFINE INDEX IF NOT EXISTS card_links_pair        ON TABLE card_links FIELDS predecessor, successor UNIQUE;

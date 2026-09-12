@@ -3,6 +3,7 @@ use leptos::prelude::*;
 
 use crate::components::confirm_modal::ConfirmModal;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
+use crate::components::link_editor::LinkEditor;
 use crate::components::markdown::MarkdownPreview;
 use crate::components::tag_editor::TagEditor;
 use crate::search::BoardSearchQuery;
@@ -161,6 +162,7 @@ pub fn CardModal(
     // Same contract as the inline card: tags are read straight off the card and
     // written back as a full replacement list, on their own audit row.
     let tags = Signal::derive(move || card.try_get().flatten().map(|c| c.tags).unwrap_or_default());
+    let card_id_signal = Signal::derive(move || card.try_get().flatten().map(|c| c.id));
     let save_tags = Callback::new(move |next: Vec<String>| {
         let Some(current) = card.get_untracked() else {
             return;
@@ -282,6 +284,7 @@ pub fn CardModal(
                     </div>
 
                     <TagEditor tags=tags on_change=save_tags />
+                    <LinkEditor card_id=card_id_signal />
 
                     // ── Body region: rendered markdown ↔ textarea toggle ──────
                     <div class="modal-body-region">

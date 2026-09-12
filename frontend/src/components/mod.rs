@@ -4,6 +4,7 @@ pub mod card_modal;
 pub mod column;
 pub mod confirm_modal;
 pub mod history_panel;
+pub mod link_editor;
 pub mod markdown;
 pub mod search_suggestions;
 pub mod tag_editor;

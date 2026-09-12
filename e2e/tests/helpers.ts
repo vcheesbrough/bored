@@ -120,6 +120,43 @@ export async function apiRestoreAudit(
   return (await res.json()) as AuditLogEntry[];
 }
 
+/** Link as returned by the API — mirrors `shared::CardLink`. */
+export interface CardLink {
+  id: string;
+  predecessor_id: string;
+  successor_id: string;
+  predecessor_number: number;
+  successor_number: number;
+  reason: string | null;
+}
+
+/**
+ * `POST /api/cards/:id/links`. `direction` is the role of `otherCardId`
+ * relative to `cardId`: `'successor'` means `cardId → otherCardId`.
+ */
+export async function apiCreateLink(
+  request: APIRequestContext,
+  cardId: string,
+  direction: 'predecessor' | 'successor',
+  otherCardId: string,
+  reason?: string
+): Promise<CardLink> {
+  const res = await request.post(`/api/cards/${cardId}/links`, {
+    data: { direction, other_card_id: otherCardId, reason },
+  });
+  if (!res.ok()) throw new Error(`POST /api/cards/${cardId}/links failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as CardLink;
+}
+
+export async function apiListLinks(
+  request: APIRequestContext,
+  boardSlug: string
+): Promise<CardLink[]> {
+  const res = await request.get(`/api/boards/${boardSlug}/links`);
+  if (!res.ok()) throw new Error(`GET /api/boards/${boardSlug}/links failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as CardLink[];
+}
+
 // ── Browser helpers ───────────────────────────────────────────────────────
 
 /** Navigate to a board and wait for the columns row to be present. */

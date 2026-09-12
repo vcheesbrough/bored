@@ -231,7 +231,11 @@ pub fn HistoryPanel(
                                 let action = e.action.clone();
                                 let entity_id = e.entity_id.clone();
                                 let badge_class = format!("history-badge history-badge-{action}");
-                                let can_restore = e.action == "delete";
+                                // A deleted link is not replayable — another
+                                // link may have closed the loop it would
+                                // complete — so the server refuses (422) and
+                                // the control is not offered.
+                                let can_restore = e.action == "delete" && e.entity_type != "card_link";
                                 let is_card_scope = matches!(
                                     drawer.0.get_untracked(),
                                     Some(HistoryScope::Card(_))

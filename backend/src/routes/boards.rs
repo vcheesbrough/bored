@@ -6,7 +6,7 @@ use axum::{
     Extension, Json,
 };
 use surrealdb::{engine::local::Db, Surreal};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::audit;
 use crate::auth::{AuthConfig, AuthSessionManager, Claims, JwksCache};
@@ -42,6 +42,13 @@ pub struct AppState {
     /// Private-cookie cryptography, shared OIDC HTTP client, and refresh-token
     /// rotation coordinator. Present exactly when browser OIDC auth is enabled.
     pub auth_sessions: Option<Arc<AuthSessionManager>>,
+    /// Serialises card-link creation. The cycle check reads the board's
+    /// existing links and then writes a new one; two concurrent creates could
+    /// each pass the check against the *old* graph and together close a loop.
+    /// Holding this across check-and-write makes the pair atomic. One lock for
+    /// every board is deliberate — link creation is rare and human-paced, so
+    /// per-board locking would be complexity without a measurable win.
+    pub link_lock: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -58,6 +65,7 @@ impl AppState {
             auth: None,
             jwks_cache: None,
             auth_sessions: None,
+            link_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -292,6 +300,16 @@ pub async fn delete_board(
 
     for card in cards {
         let entity_id = card.id.id.to_raw();
+        // Links go first so their delete rows sit under the same batch as the
+        // card they belonged to.
+        crate::routes::links::cascade_delete_card_links(
+            &state,
+            &claims,
+            &id,
+            &entity_id,
+            Some(&batch),
+        )
+        .await?;
         let snapshot_before = serde_json::to_value(card.clone().into_api())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         audit::record_and_broadcast(
