@@ -125,10 +125,10 @@ async fn board_of_link(
     link: &DbCardLink,
 ) -> Result<Option<String>, surrealdb::Error> {
     let predecessor: Option<DbCard> = db.select(("cards", link.predecessor.id.to_raw())).await?;
-    if let Some(card) = predecessor {
-        if let Some(board_id) = board_of_card(db, &card).await? {
-            return Ok(Some(board_id));
-        }
+    if let Some(card) = predecessor
+        && let Some(board_id) = board_of_card(db, &card).await?
+    {
+        return Ok(Some(board_id));
     }
     let successor: Option<DbCard> = db.select(("cards", link.successor.id.to_raw())).await?;
     match successor {

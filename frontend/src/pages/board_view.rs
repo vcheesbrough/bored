@@ -436,12 +436,12 @@ pub fn BoardView() -> impl IntoView {
         board_links.set(Vec::new());
         loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(board) = crate::api::fetch_board(&slug).await {
-                if board_slug() == slug {
-                    board_name.set(board.name);
-                    // Set the ULID after fetch — triggers the SSE effect to connect.
-                    board_ulid.set(board.id);
-                }
+            if let Ok(board) = crate::api::fetch_board(&slug).await
+                && board_slug() == slug
+            {
+                board_name.set(board.name);
+                // Set the ULID after fetch — triggers the SSE effect to connect.
+                board_ulid.set(board.id);
             }
             match crate::api::fetch_columns(&slug).await {
                 Ok(fetched) => {

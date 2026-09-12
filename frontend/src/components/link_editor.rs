@@ -183,10 +183,10 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
     let reason_input_ref = NodeRef::<leptos::html::Input>::new();
 
     Effect::new(move |_| {
-        if editing_reason.get() {
-            if let Some(el) = reason_input_ref.get() {
-                let _ = el.focus();
-            }
+        if editing_reason.get()
+            && let Some(el) = reason_input_ref.get()
+        {
+            let _ = el.focus();
         }
     });
 

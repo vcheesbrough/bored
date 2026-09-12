@@ -272,10 +272,10 @@ impl TokenManager {
     /// Returns the raw JWT string ready to drop into an Authorization header.
     pub async fn get_token(&self) -> Result<String, String> {
         let mut state = self.state.lock().await;
-        if let Some(s) = state.as_ref() {
-            if Instant::now() < s.refresh_at {
-                return Ok(s.access_token.clone());
-            }
+        if let Some(s) = state.as_ref()
+            && Instant::now() < s.refresh_at
+        {
+            return Ok(s.access_token.clone());
         }
         // Need to acquire/refresh. Holding the mutex across the network call
         // serialises concurrent refreshes — fine for an MCP server doing

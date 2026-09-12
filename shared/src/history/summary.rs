@@ -190,10 +190,10 @@ fn column_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str)
 
     let new_pos = i64_field(after, "position");
     let old_pos = i64_field(before, "position");
-    if let (Some(np), Some(op)) = (new_pos, old_pos) {
-        if np != op {
-            return Summary::new(format!("Reordered column {}", quoted(new_name)));
-        }
+    if let (Some(np), Some(op)) = (new_pos, old_pos)
+        && np != op
+    {
+        return Summary::new(format!("Reordered column {}", quoted(new_name)));
     }
 
     Summary::new(format!("Updated column {}", quoted(new_name)))
@@ -274,20 +274,20 @@ fn card_update(before: Option<&Value>, after: Option<&Value>, entity_id: &str) -
     // Title rename — first markdown heading line changed. Mirrors the
     // board / column rename UX: headline carries the new title, sub
     // carries the old title plus the card number for context.
-    if let (Some(old), Some(new)) = (title_before.as_ref(), title_after.as_ref()) {
-        if old != new {
-            let headline = format!("Renamed card to {}", quoted(new));
-            let was = format!("was {}", quoted(old));
-            let sub = match card_sub(after, before) {
-                Some(n) => format!("{was} · {n}"),
-                None => was,
-            };
-            let mut summary = Summary::new(headline);
-            if let Some(sub) = join_sub(&[Some(sub), tag_delta]) {
-                summary = summary.with_sub(sub);
-            }
-            return summary;
+    if let (Some(old), Some(new)) = (title_before.as_ref(), title_after.as_ref())
+        && old != new
+    {
+        let headline = format!("Renamed card to {}", quoted(new));
+        let was = format!("was {}", quoted(old));
+        let sub = match card_sub(after, before) {
+            Some(n) => format!("{was} · {n}"),
+            None => was,
+        };
+        let mut summary = Summary::new(headline);
+        if let Some(sub) = join_sub(&[Some(sub), tag_delta]) {
+            summary = summary.with_sub(sub);
         }
+        return summary;
     }
 
     // Body changed below the heading (typo fix, paragraph rewrite, …).
