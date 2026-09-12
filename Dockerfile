@@ -35,26 +35,26 @@ ENV RELEASE_TAG=${RELEASE_TAG}
 # This is the longest step in the build, and cargo says nothing between
 # "Compiling frontend" and the finished artifact — so a slow compile and a hung
 # one look identical, and neither says *why*.
-#
-# `-Ztime-passes` is rustc's own instrumentation: it prints each pass with its
-# wall time and RSS as the pass completes. That distinguishes the cases that
-# actually matter for this crate — `monomorphization_collector_graph_walk` and
-# `type_check_crate` blowing up (Leptos `view!` nesting) versus `LLVM_passes`
-# (codegen/optimisation) — which elapsed-time alone can never do.
-#
-# The flag is nightly-gated; `RUSTC_BOOTSTRAP=1` enables it on the pinned stable
-# toolchain. It only affects diagnostics, never codegen. Setting it in RUSTFLAGS
-# does change the fingerprint, so the first build after this lands recompiles;
-# every build after that hits the cache as usual.
-RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
+# These cache ids are `-wasm`-suffixed and distinct from backend-builder's,
+# even though both stages have no data dependency on each other and BuildKit
+# could otherwise run them in parallel. A `locked` mount is held for the whole
+# `RUN`, so a mount id shared across stages serialises them regardless. Cargo's
+# own registry lock (`.package-cache`) lives in `$CARGO_HOME` root, outside the
+# mounted dir, so `sharing=shared` on a shared registry mount would not
+# mutually exclude the two stages' writes — per-stage ids are the safe fix.
+# Cost: the agent stores a second copy of the registry/git checkout, and —
+# far larger — a second full wasm32 target tree (`bored-cargo-target-wasm`,
+# ~13 GB locally vs. ~1.6 GB for the whole registry). backend-builder still
+# mounts the original `bored-cargo-target` id, so nothing here is retargeted;
+# this is purely additive on the agent's BuildKit cache.
+RUN --mount=type=cache,id=bored-cargo-registry-wasm,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=bored-cargo-git-wasm,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=bored-cargo-target-wasm,target=/app/target,sharing=locked \
     --mount=type=cache,id=bored-trunk-cache,target=/root/.cache/trunk,sharing=locked \
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
     cd frontend && \
-    RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Ztime-passes" CARGO_TERM_VERBOSE=true \
     trunk build --release
 
 FROM rust:1.98.1@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS backend-builder
