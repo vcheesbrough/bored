@@ -66,6 +66,11 @@ pub fn derive_summary(entry: &AuditLogEntry) -> Summary {
         ("delete", "column") => column_delete(before, &entry.entity_id),
         ("delete", "card") => card_delete(before, &entry.entity_id),
 
+        // ── card links ──────────────────────────────────────────────────
+        ("create", "card_link") => link_present(after, "Linked"),
+        ("update", "card_link") => link_update(before, after),
+        ("delete", "card_link") => link_present(before, "Unlinked"),
+
         // ── unknown action / entity_type — defensive fallback ───────────
         (action, ty) => Summary::new(format!("{action} {ty}")),
     }
@@ -420,6 +425,62 @@ fn card_delete(before: Option<&Value>, entity_id: &str) -> Summary {
         .unwrap_or_else(|| fallback_id_label(entity_id));
     let mut s = Summary::new(format!("Deleted card {}", quoted(&title)));
     if let Some(sub) = card_sub(None, before) {
+        s = s.with_sub(sub);
+    }
+    s
+}
+
+// ── card link ────────────────────────────────────────────────────────────
+
+/// `#12 → #15` from a link snapshot, falling back to the raw ids when a
+/// snapshot predates the numbers being recorded. The arrow reads the same way
+/// the link does: the predecessor comes first.
+fn link_label(snap: Option<&Value>) -> String {
+    let end = |number_key: &str, id_key: &str| {
+        u64_field(snap, number_key)
+            .map(|n| format!("#{n}"))
+            .or_else(|| str_field(snap, id_key).map(fallback_id_label))
+            .unwrap_or_else(|| "?".to_string())
+    };
+    format!(
+        "{} \u{2192} {}",
+        end("predecessor_number", "predecessor_id"),
+        end("successor_number", "successor_id")
+    )
+}
+
+/// Reason sub-line, when the snapshot carries one.
+fn link_reason_sub(snap: Option<&Value>) -> Option<String> {
+    str_field(snap, "reason")
+        .filter(|r| !r.is_empty())
+        .map(|r| quoted(&truncate(r, 60)))
+}
+
+/// Create and delete share a shape: the verb, then which two cards, with the
+/// reason as context. A delete reads its snapshot from `before`, so the caller
+/// passes whichever side holds the link.
+fn link_present(snap: Option<&Value>, verb: &str) -> Summary {
+    let mut s = Summary::new(format!("{verb} {}", link_label(snap)));
+    if let Some(sub) = link_reason_sub(snap) {
+        s = s.with_sub(sub);
+    }
+    s
+}
+
+/// Only the reason is editable, so an update is always a reason change. The
+/// sub carries the new reason (or notes that it was cleared) plus the old one.
+fn link_update(before: Option<&Value>, after: Option<&Value>) -> Summary {
+    let label = link_label(after.or(before));
+    let new_reason = str_field(after, "reason").filter(|r| !r.is_empty());
+    let old_reason = str_field(before, "reason").filter(|r| !r.is_empty());
+    let headline = match new_reason {
+        Some(_) => format!("Changed reason on {label}"),
+        None => format!("Cleared reason on {label}"),
+    };
+    let now = new_reason.map(|r| quoted(&truncate(r, 60)));
+    let was = old_reason.map(|r| format!("was {}", quoted(&truncate(r, 60))));
+    let mut s = Summary::new(headline);
+    if let Some(sub) = join_sub(&[now, was]) {
         s = s.with_sub(sub);
     }
     s
@@ -831,6 +892,77 @@ mod tests {
     fn column_delete_uses_before() {
         let s = derive_summary(&entry("delete", "column", Some(col_snap("Gone", 1)), None));
         assert_eq!(s.headline, "Deleted column «Gone»");
+    }
+
+    // ── card link ────────────────────────────────────────────────────
+
+    fn link_snap(reason: Option<&str>) -> Value {
+        json!({
+            "id": "link-1",
+            "predecessor_id": "card-a",
+            "successor_id": "card-b",
+            "predecessor_number": 12,
+            "successor_number": 15,
+            "reason": reason,
+            "last_edited_by": null,
+            "created_at": "x",
+            "updated_at": "x",
+        })
+    }
+
+    #[test]
+    fn link_create_names_both_cards_in_order() {
+        let s = derive_summary(&entry("create", "card_link", None, Some(link_snap(None))));
+        assert_eq!(s.headline, "Linked #12 \u{2192} #15");
+        assert!(s.sub.is_none());
+    }
+
+    #[test]
+    fn link_create_puts_the_reason_in_the_sub() {
+        let s = derive_summary(&entry(
+            "create",
+            "card_link",
+            None,
+            Some(link_snap(Some("needs the API first"))),
+        ));
+        assert_eq!(s.sub.as_deref(), Some("«needs the API first»"));
+    }
+
+    #[test]
+    fn link_delete_reads_the_before_snapshot() {
+        let s = derive_summary(&entry("delete", "card_link", Some(link_snap(None)), None));
+        assert_eq!(s.headline, "Unlinked #12 \u{2192} #15");
+    }
+
+    #[test]
+    fn link_reason_change_shows_new_and_old() {
+        let s = derive_summary(&entry(
+            "update",
+            "card_link",
+            Some(link_snap(Some("old why"))),
+            Some(link_snap(Some("new why"))),
+        ));
+        assert_eq!(s.headline, "Changed reason on #12 \u{2192} #15");
+        assert_eq!(s.sub.as_deref(), Some("«new why» · was «old why»"));
+    }
+
+    #[test]
+    fn link_reason_cleared_says_so() {
+        let s = derive_summary(&entry(
+            "update",
+            "card_link",
+            Some(link_snap(Some("old why"))),
+            Some(link_snap(None)),
+        ));
+        assert_eq!(s.headline, "Cleared reason on #12 \u{2192} #15");
+        assert_eq!(s.sub.as_deref(), Some("was «old why»"));
+    }
+
+    #[test]
+    fn link_without_numbers_falls_back_to_ids() {
+        let snap = json!({ "predecessor_id": "card-aaaaaaaaaaaaaaaa", "successor_id": "card-b" });
+        let s = derive_summary(&entry("create", "card_link", None, Some(snap)));
+        assert_eq!(s.headline, "Linked card-aaaaaa… \u{2192} card-b");
     }
 
     // ── defensive ────────────────────────────────────────────────────

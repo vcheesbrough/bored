@@ -220,6 +220,16 @@ pub async fn delete_column(
 
     for card in cards {
         let entity_id = card.id.id.to_raw();
+        // Links go first so their delete rows sit under the same batch as the
+        // card they belonged to.
+        crate::routes::links::cascade_delete_card_links(
+            &state,
+            &claims,
+            &board_id,
+            &entity_id,
+            Some(&batch),
+        )
+        .await?;
         let snapshot_before = serde_json::to_value(card.clone().into_api())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         audit::record_and_broadcast(

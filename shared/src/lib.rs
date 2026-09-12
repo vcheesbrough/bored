@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub mod history;
+pub mod links;
 pub mod tags;
 
 /// Deployed application version.
@@ -103,6 +104,76 @@ pub struct UpdateCardRequest {
     pub audit_edit_session: Option<String>,
 }
 
+/// One predecessor/successor link between two cards on the same board.
+///
+/// A link is a single bidirectional fact — it is created from either end,
+/// visible and editable from both, and the two `*_id` fields say which card
+/// comes first. The card numbers ride along so the browser can label a link
+/// (`#12 → #15`) without looking both cards up, and so an audit snapshot of the
+/// link stays readable after either card is gone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CardLink {
+    pub id: String,
+    /// The card that comes first.
+    pub predecessor_id: String,
+    /// The card that comes after.
+    pub successor_id: String,
+    /// Human-readable number of `predecessor_id`.
+    pub predecessor_number: u32,
+    /// Human-readable number of `successor_id`.
+    pub successor_number: u32,
+    /// Optional note on *why* one card precedes the other. Never an empty
+    /// string — see [`links::normalize_reason`].
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub last_edited_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl CardLink {
+    /// True when `card_id` is either end of this link.
+    pub fn touches(&self, card_id: &str) -> bool {
+        self.predecessor_id == card_id || self.successor_id == card_id
+    }
+}
+
+/// Which end of a new link the *other* card takes, relative to the card the
+/// request is addressed to (`POST /api/cards/:id/links`).
+///
+/// `Predecessor` means "the other card comes before this one"; `Successor`
+/// means "the other card comes after this one". Both produce the same kind of
+/// row — the direction only decides which id lands in which column.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkDirection {
+    Predecessor,
+    Successor,
+}
+
+/// Body of `POST /api/cards/:id/links`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCardLinkRequest {
+    /// Role of `other_card_id` relative to the card in the URL.
+    pub direction: LinkDirection,
+    /// The card at the other end of the link. Must be on the same board and
+    /// must not be the card in the URL.
+    pub other_card_id: String,
+    /// Optional reason; trimmed, and an empty reason is stored as none.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Body of `PUT /api/links/:id`. Only the reason is editable — changing an
+/// end of a link is a delete plus a create, so the history stays honest about
+/// which two cards were linked when.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateCardLinkRequest {
+    /// Full replacement for the reason. `None` or an empty string clears it.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveCardRequest {
     pub column_id: String,
@@ -145,7 +216,7 @@ pub struct AuditLogEntry {
     pub created_at: String,
     pub actor_sub: String,
     pub actor_display_name: String,
-    /// `"board"` | `"column"` | `"card"`
+    /// `"board"` | `"column"` | `"card"` | `"card_link"`
     pub entity_type: String,
     pub entity_id: String,
     /// Denormalised board ULID every mutation touches — scopes SSE + queries.
@@ -175,7 +246,78 @@ impl AuditLogEntry {
                 || Self::snapshot_column_id(&self.snapshot_after) == Some(column_id))
     }
 
+    /// Rows relevant to one card's history: the card's own rows, plus every
+    /// link row that has the card at either end. A link belongs to two cards,
+    /// so it shows up in both histories.
     pub fn matches_history_card_scope(&self, card_id: &str) -> bool {
-        self.entity_type == "card" && self.entity_id == card_id
+        if self.entity_type == "card" {
+            return self.entity_id == card_id;
+        }
+        self.entity_type == "card_link"
+            && (Self::snapshot_touches_card(&self.snapshot_before, card_id)
+                || Self::snapshot_touches_card(&self.snapshot_after, card_id))
+    }
+
+    /// True when a `card_link` snapshot names `card_id` as either end.
+    fn snapshot_touches_card(snap: &Option<JsonValue>, card_id: &str) -> bool {
+        let Some(snap) = snap.as_ref() else {
+            return false;
+        };
+        ["predecessor_id", "successor_id"]
+            .iter()
+            .any(|key| snap.get(key).and_then(JsonValue::as_str) == Some(card_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry(entity_type: &str, entity_id: &str, after: Option<JsonValue>) -> AuditLogEntry {
+        AuditLogEntry {
+            id: "audit-1".into(),
+            created_at: "x".into(),
+            actor_sub: "alice".into(),
+            actor_display_name: "Alice".into(),
+            entity_type: entity_type.into(),
+            entity_id: entity_id.into(),
+            board_id: "board-1".into(),
+            action: "create".into(),
+            snapshot_before: None,
+            snapshot_after: after,
+            restored_from: None,
+            batch_group: None,
+            audit_edit_session: None,
+        }
+    }
+
+    #[test]
+    fn card_scope_matches_the_cards_own_rows() {
+        assert!(entry("card", "card-1", None).matches_history_card_scope("card-1"));
+        assert!(!entry("card", "card-2", None).matches_history_card_scope("card-1"));
+    }
+
+    #[test]
+    fn card_scope_matches_link_rows_at_either_end() {
+        let link = json!({ "predecessor_id": "card-1", "successor_id": "card-2" });
+        let row = entry("card_link", "link-1", Some(link));
+        assert!(row.matches_history_card_scope("card-1"));
+        assert!(row.matches_history_card_scope("card-2"));
+        assert!(!row.matches_history_card_scope("card-3"));
+    }
+
+    #[test]
+    fn card_scope_reads_a_delete_rows_before_snapshot() {
+        let mut row = entry("card_link", "link-1", None);
+        row.action = "delete".into();
+        row.snapshot_before = Some(json!({ "predecessor_id": "card-1", "successor_id": "card-2" }));
+        assert!(row.matches_history_card_scope("card-2"));
+    }
+
+    #[test]
+    fn column_scope_ignores_link_rows() {
+        let link = json!({ "predecessor_id": "card-1", "successor_id": "card-2" });
+        assert!(!entry("card_link", "link-1", Some(link)).matches_history_column_scope("col-1"));
     }
 }

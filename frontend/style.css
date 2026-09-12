@@ -1581,15 +1581,25 @@ mark.search-hit {
   opacity: 0.8;
 }
 
-/* Collapsed card: one line of chips above the preview. `padding-right` keeps
-   them clear of the absolutely positioned card-number badge. */
+/* Collapsed card: one metadata line above the preview, holding the link
+   count badges and then the tag chips. `padding-right` keeps it clear of the
+   absolutely positioned card-number badge. The row itself carries no margin,
+   so when neither child renders it collapses to nothing. */
+.card-meta-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  padding-right: 36px;
+}
+
 .tag-chip-row {
   display: flex;
   flex-wrap: nowrap;
   gap: 4px;
   overflow: hidden;
   margin-bottom: 4px;
-  padding-right: 36px;
 }
 
 /* Editable chip row in the expanded card and the modal. */
@@ -1727,4 +1737,235 @@ mark.search-hit {
   flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 8px;
+}
+
+/* ── Card links (iteration 42 / card #76) ────────────────────────────────── */
+
+/* Collapsed card: one pill per link — an arrow plus the other card's `#n` —
+   leading the tag chips on the metadata line (`.card-meta-row`). Never
+   shrinks — when the tags overflow, the pills stay. */
+.card-link-badges {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.link-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* Ticket numbers are yellow everywhere on a card (`.card-number`); the
+   badge's arrow stays muted so only the number itself carries that meaning. */
+.link-badge-number {
+  color: var(--yellow);
+}
+
+/* Expanded card and modal: one row per side, chips then the picker. */
+.link-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  cursor: default;
+}
+
+.link-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.link-group-label {
+  min-width: 52px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: none;
+}
+
+/* A linked card: number + title as a button, the reason muted after it, and
+   two small controls. Same silhouette as a tag chip. */
+.link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 1px 2px 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.link-chip-card {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--yellow);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.link-chip-card:hover {
+  text-decoration: underline;
+}
+
+.link-chip-reason {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.link-chip-reason::before {
+  content: "— ";
+}
+
+.link-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.link-chip-edit:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.link-chip-remove {
+  font-size: 12px;
+}
+
+.link-chip-remove:hover {
+  background: var(--danger);
+  color: var(--text);
+}
+
+/* Inline reason editor inside a chip. */
+.link-reason-input {
+  width: 140px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.link-reason-input:focus {
+  outline: none;
+}
+
+/* Picker: same quiet-until-focused treatment as the `+ tag` box. */
+.link-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.link-picker-input {
+  width: 80px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.link-picker-input::placeholder {
+  color: var(--text-muted);
+}
+
+.link-picker-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+  width: 160px;
+}
+
+/* The picker's popup and rows share the tag-suggestion look — see the
+   suggestion popups block above. */
+.link-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.link-suggestion {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.link-suggestion:hover,
+.link-suggestion-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* The server's refusal, shown under the groups until the next action lands. */
+.link-editor-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 11px;
 }

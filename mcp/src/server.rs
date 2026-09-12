@@ -145,6 +145,26 @@ pub struct MoveCardParams {
     pub position: i32,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LinkCardsParams {
+    /// The ID of the card that comes first.
+    pub predecessor_id: String,
+    /// The ID of the card that comes after. Must be on the same board as the
+    /// predecessor, and the link must not close a loop with existing links.
+    pub successor_id: String,
+    /// Optional short note (at most 200 characters) on why the predecessor
+    /// has to come first. Omit or leave empty for no reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LinkIdParams {
+    /// The ID of the link (the `id` field of a link object returned by
+    /// list_board_links or link_cards).
+    pub link_id: String,
+}
+
 // ── Auth token manager ────────────────────────────────────────────────────────
 //
 // When the bored backend is configured with OIDC, every API call must carry an
@@ -840,6 +860,87 @@ impl BoredMcp {
         require_ok(resp).await?;
         Ok(CallToolResult::success(vec![Content::text(
             "Card deleted.",
+        )]))
+    }
+
+    // ── Card links ────────────────────────────────────────────────────────────
+
+    #[tool(
+        description = "List every predecessor/successor link on a board. Returns a JSON array of link objects with id, predecessor_id, successor_id, predecessor_number, successor_number, and an optional reason. A link means the predecessor card comes before the successor card."
+    )]
+    async fn list_board_links(
+        &self,
+        Parameters(BoardSlugParams { board_slug }): Parameters<BoardSlugParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if board_slug.is_empty()
+            || !board_slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(mcp_err(
+                "board_slug must be non-empty and contain only lowercase letters, digits, and hyphens",
+            ));
+        }
+        let resp = self
+            .send(
+                self.client
+                    .get(self.api(&format!("boards/{board_slug}/links"))),
+            )
+            .await?;
+        json_text(require_ok(resp).await?).await
+    }
+
+    #[tool(
+        description = "Link two cards so that `predecessor_id` comes before `successor_id`, with an optional reason. Both cards must be on the same board, a card cannot be linked to itself, an existing pair is rejected (409), and a link that would create a loop through existing links is rejected (422). Returns the created link object including its id."
+    )]
+    async fn link_cards(
+        &self,
+        Parameters(LinkCardsParams {
+            predecessor_id,
+            successor_id,
+            reason,
+        }): Parameters<LinkCardsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        for (name, id) in [
+            ("predecessor_id", &predecessor_id),
+            ("successor_id", &successor_id),
+        ] {
+            if id.len() != 26 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(mcp_err(format!("{name} must be a 26-character ULID")));
+            }
+        }
+        // Addressed to the predecessor with the successor as the "other" card;
+        // the server stores the same row whichever end the request names.
+        let resp = self
+            .send(
+                self.client
+                    .post(self.api(&format!("cards/{predecessor_id}/links")))
+                    .json(&serde_json::json!({
+                        "direction": "successor",
+                        "other_card_id": successor_id,
+                        "reason": reason,
+                    })),
+            )
+            .await?;
+        json_text(require_ok(resp).await?).await
+    }
+
+    #[tool(
+        description = "Remove a predecessor/successor link between two cards by its link id (from list_board_links or link_cards). The cards themselves are untouched."
+    )]
+    async fn unlink_cards(
+        &self,
+        Parameters(LinkIdParams { link_id }): Parameters<LinkIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if link_id.len() != 26 || !link_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(mcp_err("link_id must be a 26-character ULID"));
+        }
+        let resp = self
+            .send(self.client.delete(self.api(&format!("links/{link_id}"))))
+            .await?;
+        require_ok(resp).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            "Link removed.",
         )]))
     }
 }

@@ -7,6 +7,7 @@ use leptos_router::NavigateOptions;
 use crate::components::column::ColumnCards;
 use crate::components::confirm_modal::ConfirmModal;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryScope};
+use crate::components::link_editor::{LinkBadges, LinkEditor};
 use crate::components::markdown::MarkdownPreview;
 use crate::components::tag_editor::{TagChips, TagEditor};
 use crate::events::DragPayload;
@@ -181,6 +182,9 @@ pub fn CardItem(
     // state: unlike the body there is no in-progress edit to protect from
     // overwrites, so an SSE update can land the moment it arrives.
     let tags = Signal::derive(move || card.try_get().map(|c| c.tags).unwrap_or_default());
+    // Links live in the board-level index, keyed by card id; the editor and the
+    // collapsed badge only need to know which card this is.
+    let card_id_signal = Signal::derive(move || card.try_get().map(|c| c.id));
 
     // Persist a complete replacement tag list. Deliberately carries no
     // `audit_edit_session`: a tag change is its own discrete history row, never
@@ -485,7 +489,13 @@ pub fn CardItem(
                     class="card-number"
                     class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
                 >{move || format!("#{}", number.get())}</span>
-                <TagChips tags=tags highlight=highlight />
+                // One metadata line: link counts first, then the tag chips.
+                // Each child renders nothing when it has nothing to say, and an
+                // empty flex row has no height, so a plain card gets no gap.
+                <span class="card-meta-row">
+                    <LinkBadges card_id=card_id_signal />
+                    <TagChips tags=tags highlight=highlight />
+                </span>
                 <MarkdownPreview body=body_signal class="card-preview" highlight=highlight />
             </Show>
 
@@ -545,6 +555,7 @@ pub fn CardItem(
                 </div>
 
                 <TagEditor tags=tags on_change=save_tags />
+                <LinkEditor card_id=card_id_signal />
 
                 // Grid-stack body: rendered and textarea share one cell.
                 <div class="card-body-wrapper">
