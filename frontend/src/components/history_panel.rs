@@ -310,6 +310,12 @@ pub fn HistoryPanel(
 /// pushed the frontend crate's compile time from minutes into the tens of
 /// minutes. A component boundary caps the nesting so this block is type-checked
 /// and monomorphised on its own.
+///
+/// Erasing a component's return type to `AnyView` also erases call-site
+/// attributes: `AddAnyAttr for AnyView` is a no-op unless the crate is built
+/// with `--cfg erase_components` (not set here), so a `class="foo"` or `{..}`
+/// spread on an erased component's call site compiles but is silently dropped
+/// instead of reaching the DOM.
 #[component]
 fn CardVersionActions(
     /// Audit row this version came from; identifies it for preview + restore.
