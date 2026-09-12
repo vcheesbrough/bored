@@ -11,6 +11,7 @@ use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel,
 use crate::components::search_suggestions::SearchSuggestions;
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
+use crate::links::BoardLinkIndex;
 use crate::search::{
     active_hash_prefix, apply_hash_suggestion, hash_suggestions, BoardCardIndex, BoardSearchQuery,
     ColumnCardsEntry, HashSuggestion,
@@ -134,6 +135,12 @@ pub fn BoardView() -> impl IntoView {
     let board_card_index: RwSignal<Vec<ColumnCardsEntry>> = RwSignal::new(Vec::new());
     let card_index = BoardCardIndex(board_card_index);
     provide_context(card_index);
+    // Every link on the board, fetched once with the columns and then kept
+    // current over SSE. Cards read it through the context so the inline card
+    // and the modal show the same links.
+    let board_links: RwSignal<Vec<shared::CardLink>> = RwSignal::new(Vec::new());
+    let link_index = BoardLinkIndex(board_links);
+    provide_context(link_index);
 
     // ── `#` search suggestions ─────────────────────────────────────────────
     // Typing `#` opens a helper listing the tags and card numbers that could
@@ -426,6 +433,7 @@ pub fn BoardView() -> impl IntoView {
         // older request can overwrite the newer route.
         board_name.set(slug.clone());
         columns.set(Vec::new());
+        board_links.set(Vec::new());
         loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(board) = crate::api::fetch_board(&slug).await {
@@ -442,6 +450,14 @@ pub fn BoardView() -> impl IntoView {
                     }
                 }
                 Err(e) => leptos::logging::error!("failed to fetch columns: {e}"),
+            }
+            match crate::api::fetch_board_links(&slug).await {
+                Ok(fetched) => {
+                    if board_slug() == slug {
+                        board_links.set(fetched);
+                    }
+                }
+                Err(e) => leptos::logging::error!("failed to fetch links: {e}"),
             }
             if board_slug() == slug {
                 loading.set(false);
@@ -491,6 +507,13 @@ pub fn BoardView() -> impl IntoView {
                     });
                 }
             }
+            // Link events are already board-scoped by the SSE subscription, and
+            // a link created locally is deduplicated by id. Card deletes need no
+            // handling here: the server removes the links first and broadcasts
+            // each removal on its own.
+            BoardSseEvent::CardLinkCreated { link } => link_index.insert_absent(link),
+            BoardSseEvent::CardLinkUpdated { link } => link_index.replace(link),
+            BoardSseEvent::CardLinkDeleted { link_id } => link_index.remove(&link_id),
             _ => {}
         }
     });

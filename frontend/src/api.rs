@@ -298,3 +298,96 @@ pub async fn move_card(
     .json::<shared::Card>()
     .await
 }
+
+// ── Card links ───────────────────────────────────────────────────────────
+
+pub async fn fetch_board_links(board_slug: &str) -> Result<Vec<shared::CardLink>, gloo_net::Error> {
+    check_auth(
+        Request::get(&format!("/api/boards/{board_slug}/links"))
+            .send()
+            .await?,
+    )?
+    .json::<Vec<shared::CardLink>>()
+    .await
+}
+
+/// A failed link mutation. Unlike the other routes, the link endpoints answer
+/// a refused request with a short plain-text explanation (four different
+/// things are 422 for a link), and the editor shows that text to the user.
+#[derive(Debug, Clone)]
+pub struct LinkApiError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for LinkApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.status)
+    }
+}
+
+impl From<gloo_net::Error> for LinkApiError {
+    fn from(e: gloo_net::Error) -> Self {
+        Self {
+            status: 0,
+            message: format!("request failed: {e}"),
+        }
+    }
+}
+
+/// Turn a non-2xx link response into a [`LinkApiError`] carrying the server's
+/// text, or a generic message when the body is empty (404, 500).
+async fn link_error(resp: Response) -> LinkApiError {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let message = if body.trim().is_empty() {
+        format!("server returned {status}")
+    } else {
+        body
+    };
+    LinkApiError { status, message }
+}
+
+pub async fn create_card_link(
+    card_id: &str,
+    payload: shared::CreateCardLinkRequest,
+) -> Result<shared::CardLink, LinkApiError> {
+    let resp = check_auth(
+        Request::post(&format!("/api/cards/{card_id}/links"))
+            .json(&payload)?
+            .send()
+            .await?,
+    )?;
+    if !resp.ok() {
+        return Err(link_error(resp).await);
+    }
+    Ok(resp.json::<shared::CardLink>().await?)
+}
+
+pub async fn update_card_link(
+    link_id: &str,
+    payload: shared::UpdateCardLinkRequest,
+) -> Result<shared::CardLink, LinkApiError> {
+    let resp = check_auth(
+        Request::put(&format!("/api/links/{link_id}"))
+            .json(&payload)?
+            .send()
+            .await?,
+    )?;
+    if !resp.ok() {
+        return Err(link_error(resp).await);
+    }
+    Ok(resp.json::<shared::CardLink>().await?)
+}
+
+pub async fn delete_card_link(link_id: &str) -> Result<(), LinkApiError> {
+    let resp = check_auth(
+        Request::delete(&format!("/api/links/{link_id}"))
+            .send()
+            .await?,
+    )?;
+    if !resp.ok() {
+        return Err(link_error(resp).await);
+    }
+    Ok(())
+}

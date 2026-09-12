@@ -1728,3 +1728,215 @@ mark.search-hit {
   gap: 4px;
   margin-bottom: 8px;
 }
+
+/* ── Card links (iteration 42 / card #76) ────────────────────────────────── */
+
+/* Collapsed card: `↑n ↓n` counts on their own line above the tag chips. Reuses
+   the chip look so the two rows read as one kind of metadata. The gutter keeps
+   the badges clear of the absolutely positioned card number. */
+.card-link-badges {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  padding-right: 36px;
+}
+
+.link-badge {
+  color: var(--text-muted);
+}
+
+/* Expanded card and modal: one row per side, chips then the picker. */
+.link-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  cursor: default;
+}
+
+.link-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.link-group-label {
+  min-width: 52px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: none;
+}
+
+/* A linked card: number + title as a button, the reason muted after it, and
+   two small controls. Same silhouette as a tag chip. */
+.link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 1px 2px 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.link-chip-card {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--yellow);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.link-chip-card:hover {
+  text-decoration: underline;
+}
+
+.link-chip-reason {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.link-chip-reason::before {
+  content: "— ";
+}
+
+.link-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.link-chip-edit:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.link-chip-remove {
+  font-size: 12px;
+}
+
+.link-chip-remove:hover {
+  background: var(--danger);
+  color: var(--text);
+}
+
+/* Inline reason editor inside a chip. */
+.link-reason-input {
+  width: 140px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.link-reason-input:focus {
+  outline: none;
+}
+
+/* Picker: same quiet-until-focused treatment as the `+ tag` box. */
+.link-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.link-picker-input {
+  width: 80px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.link-picker-input::placeholder {
+  color: var(--text-muted);
+}
+
+.link-picker-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+  width: 160px;
+}
+
+/* The picker's popup and rows share the tag-suggestion look — see the
+   suggestion popups block above. */
+.link-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.link-suggestion {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.link-suggestion:hover,
+.link-suggestion-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* The server's refusal, shown under the groups until the next action lands. */
+.link-editor-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 11px;
+}
