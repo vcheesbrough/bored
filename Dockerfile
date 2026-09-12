@@ -53,7 +53,11 @@ ENV RELEASE_TAG=${RELEASE_TAG}
 # own registry lock (`.package-cache`) lives in `$CARGO_HOME` root, outside the
 # mounted dir, so `sharing=shared` on a shared registry mount would not
 # mutually exclude the two stages' writes — per-stage ids are the safe fix.
-# Cost: the agent stores a second copy of the registry/git checkout.
+# Cost: the agent stores a second copy of the registry/git checkout, and —
+# far larger — a second full wasm32 target tree (`bored-cargo-target-wasm`,
+# ~13 GB locally vs. ~1.6 GB for the whole registry). backend-builder still
+# mounts the original `bored-cargo-target` id, so nothing here is retargeted;
+# this is purely additive on the agent's BuildKit cache.
 RUN --mount=type=cache,id=bored-cargo-registry-wasm,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git-wasm,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target-wasm,target=/app/target,sharing=locked \
