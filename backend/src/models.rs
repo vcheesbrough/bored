@@ -80,6 +80,45 @@ impl DbCard {
     }
 }
 
+/// One row of `card_links`, as read back by [`crate::routes::links`].
+///
+/// The two `*_number` fields are not stored on the row — they are projected
+/// from the linked cards at read time (`predecessor.number AS
+/// predecessor_number`), so every query that loads a link has to use that
+/// projection rather than a bare `SELECT *`. Card numbers never change, so
+/// the projection is stable for the life of the link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbCardLink {
+    pub id: Thing,
+    pub predecessor: Thing,
+    pub successor: Thing,
+    #[serde(default)]
+    pub predecessor_number: Option<i32>,
+    #[serde(default)]
+    pub successor_number: Option<i32>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub last_edited_by: Option<String>,
+    pub created_at: surrealdb::sql::Datetime,
+    pub updated_at: surrealdb::sql::Datetime,
+}
+
+impl DbCardLink {
+    pub fn into_api(self) -> shared::CardLink {
+        shared::CardLink {
+            id: self.id.id.to_raw(),
+            predecessor_id: self.predecessor.id.to_raw(),
+            successor_id: self.successor.id.to_raw(),
+            predecessor_number: self.predecessor_number.unwrap_or(0) as u32,
+            successor_number: self.successor_number.unwrap_or(0) as u32,
+            reason: self.reason,
+            last_edited_by: self.last_edited_by,
+            created_at: self.created_at.to_string(),
+            updated_at: self.updated_at.to_string(),
+        }
+    }
+}
+
 /// Minimal projection used only when incrementing the card counter.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DbCardCounter {

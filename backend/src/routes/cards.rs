@@ -545,6 +545,14 @@ pub async fn delete_card(
         .map(|c| c.board.id.to_raw())
         .unwrap_or_default();
 
+    // A link cannot outlive either of its cards. Remove this card's links —
+    // and record each removal — before the card itself goes, so the link
+    // delete rows precede the card delete row in history. They share no batch
+    // group: restoring the card would not bring its links back (another link
+    // could have closed a loop meanwhile), so there is nothing to replay.
+    crate::routes::links::cascade_delete_card_links(&state, &claims, &board_id, &card_id, None)
+        .await?;
+
     let snapshot_before = serde_json::to_value(existing.clone().into_api())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     audit::record_and_broadcast(

@@ -3,6 +3,7 @@ pub(crate) mod audit_edit_session;
 mod columns;
 mod components;
 mod events;
+mod links;
 mod pages;
 mod search;
 

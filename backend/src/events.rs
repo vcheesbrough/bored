@@ -47,6 +47,16 @@ pub enum BoardEvent {
         from_column_id: String,
     },
 
+    // ── Card link events ─────────────────────────────────────────────────
+    /// A predecessor/successor link was created between two cards. The full
+    /// link is included so both cards' views can show it without a fetch.
+    CardLinkCreated { link: shared::CardLink },
+    /// A link's reason was changed.
+    CardLinkUpdated { link: shared::CardLink },
+    /// A link was removed — explicitly, or because one of its cards (or that
+    /// card's column or board) was deleted.
+    CardLinkDeleted { link_id: String },
+
     // ── Column events ─────────────────────────────────────────────────────
     /// A column was added to a board.
     ColumnCreated { column: shared::Column },

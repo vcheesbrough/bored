@@ -36,6 +36,17 @@ pub enum BoardSseEvent {
         from_column_id: String,
     },
 
+    // ── Card link events ─────────────────────────────────────────────────
+    CardLinkCreated {
+        link: shared::CardLink,
+    },
+    CardLinkUpdated {
+        link: shared::CardLink,
+    },
+    CardLinkDeleted {
+        link_id: String,
+    },
+
     // ── Column events ─────────────────────────────────────────────────────
     ColumnCreated {
         column: shared::Column,
