@@ -1581,15 +1581,25 @@ mark.search-hit {
   opacity: 0.8;
 }
 
-/* Collapsed card: one line of chips above the preview. `padding-right` keeps
-   them clear of the absolutely positioned card-number badge. */
+/* Collapsed card: one metadata line above the preview, holding the link
+   count badges and then the tag chips. `padding-right` keeps it clear of the
+   absolutely positioned card-number badge. The row itself carries no margin,
+   so when neither child renders it collapses to nothing. */
+.card-meta-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  padding-right: 36px;
+}
+
 .tag-chip-row {
   display: flex;
   flex-wrap: nowrap;
   gap: 4px;
   overflow: hidden;
   margin-bottom: 4px;
-  padding-right: 36px;
 }
 
 /* Editable chip row in the expanded card and the modal. */
@@ -1731,14 +1741,14 @@ mark.search-hit {
 
 /* ── Card links (iteration 42 / card #76) ────────────────────────────────── */
 
-/* Collapsed card: `↑n ↓n` counts on their own line above the tag chips. Reuses
-   the chip look so the two rows read as one kind of metadata. The gutter keeps
-   the badges clear of the absolutely positioned card number. */
+/* Collapsed card: `↑n ↓n` counts, leading the tag chips on the metadata line
+   (`.card-meta-row`). Reuses the chip look so the two read as one kind of
+   metadata, and never shrinks — when the tags overflow, the counts stay. */
 .card-link-badges {
   display: flex;
+  flex-shrink: 0;
   gap: 4px;
   margin-bottom: 4px;
-  padding-right: 36px;
 }
 
 .link-badge {

@@ -489,8 +489,13 @@ pub fn CardItem(
                     class="card-number"
                     class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
                 >{move || format!("#{}", number.get())}</span>
-                <LinkBadges card_id=card_id_signal />
-                <TagChips tags=tags highlight=highlight />
+                // One metadata line: link counts first, then the tag chips.
+                // Each child renders nothing when it has nothing to say, and an
+                // empty flex row has no height, so a plain card gets no gap.
+                <span class="card-meta-row">
+                    <LinkBadges card_id=card_id_signal />
+                    <TagChips tags=tags highlight=highlight />
+                </span>
                 <MarkdownPreview body=body_signal class="card-preview" highlight=highlight />
             </Show>
 
