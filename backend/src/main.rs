@@ -1724,7 +1724,10 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_returns_version_and_env() {
-        // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+        // SAFETY: env mutation happens strictly before `test_app()` creates any
+        // db/runtime background tasks that could race a `getenv`. `#[serial]`
+        // additionally serialises this against the other `#[serial]` tests here
+        // (it does not by itself exclude other threads).
         unsafe { std::env::remove_var("APP_VERSION") };
         let server = test_app().await;
         let resp = server.get("/api/info").await;
@@ -1740,7 +1743,10 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn info_route_uses_app_version_env_and_configured_environment() {
-        // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+        // SAFETY: env mutation happens strictly before `db::connect_mem()` spawns
+        // SurrealDB's background tasks that could race a `getenv`. `#[serial]`
+        // additionally serialises this against the other `#[serial]` tests here
+        // (it does not by itself exclude other threads).
         unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
         let db = db::connect_mem().await.expect("failed to connect mem db");
         let state = AppState::new(db);
@@ -1751,7 +1757,11 @@ mod tests {
         let resp = server.get("/api/info").await;
         resp.assert_status_ok();
         let body = resp.text();
-        // SAFETY: #[serial] on this test excludes other threads from mutating env vars.
+        drop(server);
+        // SAFETY: `server` (and the db/state it owns, including SurrealDB's
+        // background tasks) was dropped just above, so no task from this test
+        // can race this mutation. `#[serial]` additionally serialises this
+        // against the other `#[serial]` tests here.
         unsafe { std::env::remove_var("APP_VERSION") };
         let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
         assert_eq!(info.version, "1.2.3");
