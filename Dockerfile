@@ -47,6 +47,23 @@ ENV RELEASE_TAG=${RELEASE_TAG}
 # ~13 GB locally vs. ~1.6 GB for the whole registry). backend-builder still
 # mounts the original `bored-cargo-target` id, so nothing here is retargeted;
 # this is purely additive on the agent's BuildKit cache.
+# The frontend's unit tests, run here because this is the only stage that copies
+# `frontend/src` — backend-builder has a stub `lib.rs` and would silently test
+# nothing. Deliberately untargeted: `frontend` is a `[[bin]]`-only crate of
+# plain logic tests, and they must build for the host, since a
+# wasm32-unknown-unknown test binary has no runner in this image. Host
+# artifacts land in `/app/target/debug`, alongside (not clobbering) the
+# wasm32 tree the trunk build below uses out of the same cache mount.
+#
+# Ahead of the trunk build on purpose: a failing unit test then short-circuits
+# the most expensive step in the whole image instead of running after it.
+RUN --mount=type=cache,id=bored-cargo-registry-wasm,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=bored-cargo-git-wasm,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=bored-cargo-target-wasm,target=/app/target,sharing=locked \
+    --mount=type=secret,id=github_token \
+    set -eu; \
+    . /app/scripts/docker-git-credential.sh; \
+    cargo test -p frontend
 RUN --mount=type=cache,id=bored-cargo-registry-wasm,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git-wasm,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target-wasm,target=/app/target,sharing=locked \
@@ -92,6 +109,11 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
 # running the previous `--lib` invocation locally — it executed only
 # `shared`'s 47 tests, never `backend`'s 91). Without it, cargo runs each
 # package's actual target (backend's `src/main.rs` tests, shared's lib tests).
+#
+# No `-p frontend` either: this stage has only a stub `frontend/src/lib.rs`
+# (see the `touch` above), so testing it here compiles an empty crate and
+# reports a cheerful `0 passed`. The frontend's tests run in frontend-builder,
+# which is the stage that actually copies `frontend/src`.
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
