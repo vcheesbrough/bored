@@ -77,6 +77,47 @@ test.describe('card tags', () => {
     expect((await apiGetCard(request, card.id)).tags).toEqual(['bug']);
   });
 
+  test('the tag suggestion popup stays shut until the user types', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `tags-popup-quiet-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    // A board that already has tags — the case where an empty prefix would
+    // otherwise match every one of them.
+    await apiCreateCard(request, col.id, '# Already tagged', ['backend', 'urgent']);
+    await apiCreateCard(request, col.id, '# Needs a tag');
+
+    await gotoBoardView(page, board.name);
+    await page.locator('.card-item').filter({ hasText: 'Needs a tag' }).click();
+
+    const popup = page.locator('.tag-suggestions');
+    const input = page.locator('.tag-editor .tag-editor-input');
+
+    // Expanding the card must not open the popup.
+    await expect(input).toBeVisible();
+    await expect(popup).toHaveCount(0);
+
+    // Focus alone is not enough either — an empty box matches every tag.
+    await input.click();
+    await expect(input).toBeFocused();
+    await expect(popup).toHaveCount(0);
+
+    // It opens only once there is a prefix to complete.
+    await input.fill('back');
+    await expect(popup).toBeVisible();
+
+    // Clearing the box closes it again.
+    await input.fill('');
+    await expect(popup).toHaveCount(0);
+
+    // And so does losing focus.
+    await input.fill('back');
+    await expect(popup).toBeVisible();
+    await input.blur();
+    await expect(popup).toHaveCount(0);
+  });
+
   test('suggests tags already in use on the board', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `tags-suggest-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Todo');
