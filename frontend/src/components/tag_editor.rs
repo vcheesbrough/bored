@@ -38,12 +38,8 @@ pub fn TagEditor(
         };
         let typed = draft.get();
         let typed = typed.trim();
-        // An empty prefix matches every tag, so completions only make sense
-        // once something has been typed. Without this the popup would be open
-        // on every expanded card that sits on a board with any tags at all.
-        if typed.is_empty() {
-            return Vec::new();
-        }
+        // An empty prefix matches every tag, which is intended: focusing the
+        // input offers the board's tags to browse, and typing narrows them.
         let current = tags.get();
         index
             .all_tags()
@@ -59,8 +55,9 @@ pub fn TagEditor(
             .collect::<Vec<String>>()
     });
 
-    // The popup belongs to the input, so it is only open while the input has
-    // focus — otherwise it would hang over the card whenever one is expanded.
+    // The popup belongs to the input, so focus is what opens and closes it.
+    // Without this it would hang over every expanded card on a board that has
+    // tags, since an empty prefix matches all of them.
     let input_focused = RwSignal::new(false);
     let popup_open = Signal::derive(move || input_focused.get() && !suggestions.get().is_empty());
 
