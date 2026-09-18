@@ -42,11 +42,61 @@ Run the **`ci-watch`** skill (baseline §4). Skill parameters:
   - `docker build --secret id=github_token,env=GITHUB_TOKEN -t bored:ci-local .` (rustfmt / clippy / tests / trunk all
     run inside the Dockerfile). The `github_token` secret fetches the private `sovereign-config-provider` git
     dependency (see [README.md § Runtime configuration](README.md#runtime-configuration)) — export
-    `GITHUB_TOKEN` first (e.g. a `gh auth token`-equivalent PAT with repo read access).
+    `GITHUB_TOKEN` first, per **Getting `GITHUB_TOKEN`** below.
   - `TEST_IMAGE=bored:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
 
 The [`.claude/watch-woodpecker.js`](.claude/watch-woodpecker.js) PostToolUse
 hook automates the polling (set `WOODPECKER_TOKEN` for authenticated logs).
+
+### Getting `GITHUB_TOKEN`
+
+An ordinary `gh` login is enough — **no dedicated PAT is required.** The
+`gh` OAuth token carries the `repo` scope, which authorises the private
+`vcheesbrough/sovereign-config` fetch (verified 2026-09-18: `repo` present in
+`x-oauth-scopes`, `200` on the repo, `git ls-remote` succeeds through the
+`x-access-token` rewrite). Extract it with whichever line matches your `gh`:
+
+```bash
+# gh >= 2.5.0
+export GITHUB_TOKEN="$(gh auth token)"
+
+# gh < 2.5.0 — including the 2.4.0 that Ubuntu ships, where `gh auth token`
+# does not exist and a command substitution would silently capture its error
+# message instead of a token.
+export GITHUB_TOKEN="$(gh auth status --show-token 2>&1 | sed -n 's/.*Token: //p')"
+```
+
+Check it took: `[ -n "$GITHUB_TOKEN" ] && echo "${#GITHUB_TOKEN} chars"` should
+print ~40. If you would rather not use the `gh` token, any classic PAT with the
+`repo` scope works.
+
+Get this wrong and the build now says so:
+[`scripts/docker-git-credential.sh`](scripts/docker-git-credential.sh) rejects a
+secret that is not a plausible credential, naming `github_token` rather than
+failing later with a misleading clone/revision error against `sovereign-config`.
+
+### Without a token
+
+If you genuinely cannot get one, run the same checks the image runs — these
+need only your own git access to the private dependency, not the build secret:
+
+```bash
+cargo fmt -p backend -p shared --check                # Dockerfile backend-builder
+cargo clippy -p backend -p shared -- -D warnings      # Dockerfile backend-builder
+cargo test -p backend -p shared                       # Dockerfile backend-builder
+cargo test -p frontend                                # HOST target, not wasm32 — see below
+sh scripts/test-docker-git-credential.sh              # Dockerfile frontend-builder
+```
+
+`cargo test -p frontend` is deliberately untargeted: `frontend` is a
+`[[bin]]`-only crate of plain logic tests, and a `wasm32-unknown-unknown` test
+binary has no runner in the image. That is the full set — the Dockerfile runs
+no wasm32 clippy and no `fmt`/`clippy` over `frontend` or `mcp`.
+
+These do **not** run without a token: the `docker build` itself, `trunk build`,
+and therefore the **whole** e2e compose run, which needs the
+`TEST_IMAGE=bored:ci-local` image that build produces. Say so explicitly in the
+PR rather than implying the e2e suite passed.
 
 ---
 

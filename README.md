@@ -165,7 +165,9 @@ sovereign-config itself** — `/woodpecker/repos/vcheesbrough/bored/bored_{dev,p
 connect and fails closed on mismatch, so a server upgrade means bumping this tag and rebuilding.
 `sovereign-config-provider` is a private git dependency; the Docker build fetches it via
 `scripts/docker-git-credential.sh`, which needs the `github_token` secret (`--secret
-id=github_token,env=GITHUB_TOKEN` on `docker build`).
+id=github_token,env=GITHUB_TOKEN` on `docker build`). An ordinary `gh` login supplies a token
+with enough scope — see [AGENTS.md § Getting `GITHUB_TOKEN`](AGENTS.md#getting-github_token) for
+the extraction command and for which local checks remain runnable without one.
 
 ## Local development
 
