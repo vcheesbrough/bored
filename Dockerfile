@@ -27,6 +27,15 @@ COPY mcp/Cargo.toml mcp/Cargo.toml
 COPY scripts/docker-git-credential.sh scripts/docker-git-credential.sh
 RUN mkdir -p backend/src && touch backend/src/main.rs \
  && mkdir -p mcp/src && touch mcp/src/main.rs
+# The credential script's own tests. Run here — ahead of every RUN that sources
+# it, and above the RELEASE_TAG layer so a tag change doesn't re-run them — so
+# the documented local repro (`docker build --secret id=github_token,... .`)
+# covers this guard exactly as it covers rustfmt, clippy and the cargo tests.
+# Costs well under a second and needs no mounts: the tests drive the script
+# through GITHUB_TOKEN_FILE against fixtures in a temp dir, never the real
+# secret.
+COPY scripts/test-docker-git-credential.sh scripts/test-docker-git-credential.sh
+RUN sh /app/scripts/test-docker-git-credential.sh
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
