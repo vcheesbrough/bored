@@ -12,6 +12,7 @@ use crate::components::search_suggestions::SearchSuggestions;
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::links::BoardLinkIndex;
+use crate::recent::RecentPicks;
 use crate::search::{
     BoardCardIndex, BoardSearchQuery, ColumnCardsEntry, HashSuggestion, active_hash_prefix,
     apply_hash_suggestion, hash_suggestions,
@@ -150,12 +151,26 @@ pub fn BoardView() -> AnyView {
         loaded: board_links_loaded,
     };
     provide_context(link_index);
+    // What the user has picked from this board's combo boxes before, so the
+    // link picker and the `#` popup can lead with it. Seeded from
+    // `localStorage` whenever the board's ULID changes — including the blank
+    // it passes through on navigation, which clears the previous board's
+    // picks.
+    let recent = RecentPicks::new(board_ulid);
+    Effect::new(move |_| recent.load());
+    provide_context(recent);
 
     // ── `#` search suggestions ─────────────────────────────────────────────
     // Typing `#` opens a helper listing the tags and card numbers that could
     // follow it. Purely client-side: the board's cards are already in memory.
     let suggestions = Signal::derive(move || match active_hash_prefix(&search_query.get()) {
-        Some(prefix) => hash_suggestions(prefix, &card_index.all_tags(), &card_index.all_cards()),
+        Some(prefix) => hash_suggestions(
+            prefix,
+            &card_index.all_tags(),
+            &card_index.all_cards(),
+            &recent.tags.get(),
+            &recent.cards.get(),
+        ),
         None => Vec::new(),
     });
     // Index of the arrow-key-highlighted row; `None` means nothing is picked and
@@ -168,6 +183,23 @@ pub fn BoardView() -> AnyView {
         Signal::derive(move || !suggestions_dismissed.get() && !suggestions.get().is_empty());
 
     let accept_suggestion = move |suggestion: &HashSuggestion| {
+        // Remember the pick before the query changes: the popup's next opening
+        // should offer this row first, whatever the search goes on to match.
+        match suggestion {
+            HashSuggestion::Tag(tag) => recent.record_tag(tag),
+            HashSuggestion::Card { .. } => {
+                // The row carries a number, not an ID, but the history is
+                // keyed by ID so it survives a card being renumbered — look
+                // the card up on the board to record it.
+                if let Some(card) = card_index
+                    .all_cards()
+                    .into_iter()
+                    .find(|card| card.number.to_string() == suggestion.value())
+                {
+                    recent.record_card(&card.id);
+                }
+            }
+        }
         search_query.update(|q| *q = apply_hash_suggestion(q, &suggestion.value()));
         active_suggestion.set(None);
         if let Some(input) = search_input_ref.get_untracked() {
