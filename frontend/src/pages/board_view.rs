@@ -187,14 +187,14 @@ pub fn BoardView() -> AnyView {
         // should offer this row first, whatever the search goes on to match.
         match suggestion {
             HashSuggestion::Tag(tag) => recent.record_tag(tag),
-            HashSuggestion::Card { .. } => {
+            HashSuggestion::Card { number, .. } => {
                 // The row carries a number, not an ID, but the history is
                 // keyed by ID so it survives a card being renumbered — look
                 // the card up on the board to record it.
                 if let Some(card) = card_index
                     .all_cards()
                     .into_iter()
-                    .find(|card| card.number.to_string() == suggestion.value())
+                    .find(|card| card.number == *number)
                 {
                     recent.record_card(&card.id);
                 }
