@@ -1,3 +1,12 @@
+# Pin the Compose project name. Without it Compose derives the project from this
+# file's parent directory — "e2e" — which v-note's repo also uses. Both repos
+# share a Woodpecker agent and docker daemon, so the two test stacks landed in
+# one namespace and each `up --force-recreate` tore down the other's containers
+# (pipeline 191: "No such container", v-note services listed as orphans).
+# Declared here rather than as `-p` at the call sites so CI's up/down, the local
+# repro in AGENTS.md, and any ad-hoc run all agree. Card #346.
+name: bored-e2e
+
 services:
   # Mock OIDC provider — issues JWTs signed with its own JWKS so the bored
   # backend can validate them via the same flow as production. Test setup runs
