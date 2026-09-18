@@ -5,6 +5,7 @@ mod components;
 mod events;
 mod links;
 mod pages;
+mod recent;
 mod search;
 
 use leptos::prelude::*;

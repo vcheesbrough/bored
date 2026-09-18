@@ -15,6 +15,7 @@ use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
 use crate::links::BoardLinkIndex;
+use crate::recent::RecentPicks;
 use crate::search::BoardCardIndex;
 
 /// How many cards the picker offers at once.
@@ -423,6 +424,31 @@ struct Candidate {
     id: String,
     number: u32,
     label: String,
+    /// Sort key for how recently the card itself changed — see
+    /// [`crate::recent::recency_key`], which is what built it.
+    recency: String,
+}
+
+/// Order the picker's candidates most-recently-used first and cut the list to
+/// [`MAX_SUGGESTIONS`].
+///
+/// Cards the user has linked to before come first, in the order they were
+/// picked; the rest follow by how recently each card changed. Numeric order —
+/// what this used to sort by outright — survives only as the tie-break, for
+/// the boards where nothing has been picked and the timestamps agree.
+///
+/// Truncation happens *after* the sort, so a recently used card can push a
+/// lower-numbered one off the end. That is the point: the six rows are spent
+/// on what the user is likely to want rather than on the six oldest cards.
+fn order_candidates(mut found: Vec<Candidate>, recent_card_ids: &[String]) -> Vec<Candidate> {
+    found.sort_by(|a, b| {
+        crate::recent::rank_of(recent_card_ids, &a.id)
+            .cmp(&crate::recent::rank_of(recent_card_ids, &b.id))
+            .then_with(|| b.recency.cmp(&a.recency))
+            .then_with(|| a.number.cmp(&b.number))
+    });
+    found.truncate(MAX_SUGGESTIONS);
+    found
 }
 
 /// True when `typed` narrows to this card: a digit run matches the number as
@@ -454,6 +480,9 @@ fn LinkPicker(
 ) -> AnyView {
     let links = expect_context::<BoardLinkIndex>();
     let cards = use_context::<BoardCardIndex>();
+    // Absent in the card-modal-only tests and anywhere the picker is mounted
+    // outside a board; without it the list simply keeps its recency order.
+    let recent = use_context::<RecentPicks>();
 
     let draft = RwSignal::new(String::new());
     let active: RwSignal<Option<usize>> = RwSignal::new(None);
@@ -486,15 +515,16 @@ fn LinkPicker(
             })
             .filter(|(c, title)| candidate_matches(c.number, title, &typed))
             .map(|(c, title)| Candidate {
-                id: c.id,
                 number: c.number,
                 label: format!("#{} {}", c.number, truncate(&title, MAX_TITLE_CHARS)),
+                recency: crate::recent::recency_key(&c.updated_at),
+                id: c.id,
             })
             .collect();
-        // Cards arrive in column order; numeric order is what a user scanning
-        // for `#12` expects.
-        found.sort_by_key(|c| c.number);
-        found.truncate(MAX_SUGGESTIONS);
+        // Cards arrive in column order; the user's own link history, then
+        // board activity, is what puts the likely one within reach.
+        let picked = recent.map(|r| r.cards.get()).unwrap_or_default();
+        found = order_candidates(found, &picked);
         found
     });
 
@@ -506,6 +536,12 @@ fn LinkPicker(
         };
         draft.set(String::new());
         active.set(None);
+        // Recorded on the pick, not on the server's reply: the user picked
+        // this card whether or not the link survives validation, and that is
+        // what the next list should lead with.
+        if let Some(recent) = recent {
+            recent.record_card(&candidate.id);
+        }
         wasm_bindgen_futures::spawn_local(async move {
             let req = shared::CreateCardLinkRequest {
                 direction: side.direction(),
@@ -784,6 +820,70 @@ mod tests {
             column_name_for(&cards, &columns, "card-b"),
             Some("done".to_string())
         );
+    }
+
+    fn candidate(number: u32, updated_at: &str) -> Candidate {
+        Candidate {
+            id: format!("card-{number}"),
+            number,
+            label: format!("#{number} Title"),
+            recency: crate::recent::recency_key(updated_at),
+        }
+    }
+
+    fn numbers(candidates: &[Candidate]) -> Vec<u32> {
+        candidates.iter().map(|c| c.number).collect()
+    }
+
+    fn ids(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn candidates_lead_with_the_most_recently_linked_card() {
+        let found = vec![
+            candidate(3, "2026-09-14T10:00:00Z"),
+            candidate(11, "2026-09-13T10:00:00Z"),
+            candidate(7, "2026-09-12T10:00:00Z"),
+        ];
+        // #7 was linked most recently, then #11; #3 has never been picked.
+        let picked = ids(&["card-7", "card-11"]);
+        assert_eq!(numbers(&order_candidates(found, &picked)), vec![7, 11, 3]);
+    }
+
+    #[test]
+    fn unpicked_candidates_order_by_card_recency() {
+        let found = vec![
+            candidate(3, "2026-09-10T10:00:00Z"),
+            candidate(11, "2026-09-14T10:00:00Z"),
+            candidate(7, "2026-09-12T10:00:00Z"),
+        ];
+        assert_eq!(numbers(&order_candidates(found, &[])), vec![11, 7, 3]);
+    }
+
+    #[test]
+    fn candidates_with_equal_recency_fall_back_to_card_number() {
+        // Every card untouched since the same instant — the old numeric order
+        // is what is left, so a board that has seen no activity is unchanged.
+        let found = vec![
+            candidate(11, "2026-09-14T10:00:00Z"),
+            candidate(3, "2026-09-14T10:00:00Z"),
+            candidate(7, "2026-09-14T10:00:00Z"),
+        ];
+        assert_eq!(numbers(&order_candidates(found, &[])), vec![3, 7, 11]);
+    }
+
+    #[test]
+    fn candidates_are_cut_to_the_popup_size_after_sorting() {
+        // A recently linked low-priority card keeps its place in the list;
+        // truncation drops the least interesting rows, not the highest numbers.
+        let found: Vec<Candidate> = (1..=MAX_SUGGESTIONS as u32 + 2)
+            .map(|n| candidate(n, "2026-09-14T10:00:00Z"))
+            .collect();
+        let last = format!("card-{}", MAX_SUGGESTIONS + 2);
+        let ordered = order_candidates(found, &ids(&[&last]));
+        assert_eq!(ordered.len(), MAX_SUGGESTIONS);
+        assert_eq!(ordered[0].number, MAX_SUGGESTIONS as u32 + 2);
     }
 
     #[test]
