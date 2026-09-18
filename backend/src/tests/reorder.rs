@@ -1,6 +1,7 @@
 //! `PUT /api/columns/:id/cards/reorder` — bulk card reordering within a column.
 
 use super::*;
+use std::collections::HashSet;
 
 /// Create `bodies` as cards in `column`, top-to-bottom in the order given.
 /// `create_card` inserts at the *top*, so the list is created back to front.

@@ -21,8 +21,6 @@ mod tags;
 // are accessible to all descendants of the module that declares them.
 use super::*;
 use axum::http::StatusCode;
-use serial_test::serial;
-use std::collections::HashSet;
 // `axum_test::TestServer` wraps the router and lets us make HTTP requests
 // in tests without opening a real TCP socket.
 use axum_test::TestServer;
