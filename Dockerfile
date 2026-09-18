@@ -117,7 +117,8 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
 # `--lib` silently runs zero of its tests instead of erroring (confirmed by
 # running the previous `--lib` invocation locally — it executed only
 # `shared`'s 47 tests, never `backend`'s 91). Without it, cargo runs each
-# package's actual target (backend's `src/main.rs` tests, shared's lib tests).
+# package's actual target (backend's bin-target tests under `src/tests/` and
+# beside each module, shared's lib tests).
 #
 # No `-p frontend` either: this stage has only a stub `frontend/src/lib.rs`
 # (see the `touch` above), so testing it here compiles an empty crate and
