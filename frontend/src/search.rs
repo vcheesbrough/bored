@@ -159,19 +159,38 @@ pub fn active_hash_prefix(query: &str) -> Option<&str> {
 /// An all-digit prefix is unambiguously a card number, so tags are dropped from
 /// the list; a prefix with any non-digit can only be a tag. An empty prefix (the
 /// moment `#` is typed) shows both.
+///
+/// Within each group the order is most-recently-used first: entries the user
+/// has picked before, in pick order, then everything else by how recently the
+/// underlying card changed. `recent_tags` and `recent_card_ids` come from
+/// [`crate::recent::RecentPicks`] and are empty until the user picks something,
+/// at which point only the recency fallback applies.
 pub fn hash_suggestions(
     prefix: &str,
     all_tags: &[String],
     cards: &[shared::Card],
+    recent_tags: &[String],
+    recent_card_ids: &[String],
 ) -> Vec<HashSuggestion> {
     let digits_only = !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit());
     let mut out: Vec<HashSuggestion> = Vec::new();
 
     if !digits_only {
+        let mut tags: Vec<&String> = all_tags
+            .iter()
+            .filter(|tag| shared::tags::starts_with_ignore_case(tag, prefix))
+            .collect();
+        tags.sort_by_cached_key(|tag| {
+            (
+                crate::recent::tag_rank_of(recent_tags, tag),
+                // A tag is only as recent as the liveliest card wearing it,
+                // so the newest such card stands in for the tag's own recency.
+                std::cmp::Reverse(newest_card_with_tag(cards, tag)),
+                tag.to_lowercase(),
+            )
+        });
         out.extend(
-            all_tags
-                .iter()
-                .filter(|tag| shared::tags::starts_with_ignore_case(tag, prefix))
+            tags.into_iter()
                 .take(MAX_TAG_SUGGESTIONS)
                 .map(|tag| HashSuggestion::Tag(tag.clone())),
         );
@@ -182,8 +201,15 @@ pub fn hash_suggestions(
             .iter()
             .filter(|card| card.number.to_string().starts_with(prefix))
             .collect();
-        // Highest number first: the newest cards are the ones being referenced.
-        numbered.sort_by_key(|card| std::cmp::Reverse(card.number));
+        numbered.sort_by_cached_key(|card| {
+            (
+                crate::recent::rank_of(recent_card_ids, &card.id),
+                std::cmp::Reverse(crate::recent::recency_key(&card.updated_at)),
+                // Highest number last among equals: with no history to go on,
+                // the newest cards are the ones being referenced.
+                std::cmp::Reverse(card.number),
+            )
+        });
         out.extend(numbered.into_iter().take(MAX_CARD_SUGGESTIONS).map(|card| {
             HashSuggestion::Card {
                 number: card.number,
@@ -193,6 +219,22 @@ pub fn hash_suggestions(
     }
 
     out
+}
+
+/// Sort key for "how recently was a card carrying this tag touched": the
+/// greatest [`crate::recent::recency_key`] among the cards tagged `tag`, or an
+/// empty string when no card carries it (which sorts last under `Reverse`).
+fn newest_card_with_tag(cards: &[shared::Card], tag: &str) -> String {
+    cards
+        .iter()
+        .filter(|card| {
+            card.tags
+                .iter()
+                .any(|card_tag| shared::tags::eq_ignore_case(card_tag, tag))
+        })
+        .map(|card| crate::recent::recency_key(&card.updated_at))
+        .max()
+        .unwrap_or_default()
 }
 
 /// Replace the query's open `#` token with `#value`, leaving a trailing space so
@@ -410,7 +452,8 @@ mod tests {
 
     fn tagged_card(number: u32, body: &str, tags: &[&str]) -> shared::Card {
         shared::Card {
-            id: "card".to_string(),
+            // Distinct per card: the suggestion order keys recent picks by ID.
+            id: format!("card-{number}"),
             column_id: "column".to_string(),
             body: body.to_string(),
             position: 0,
@@ -420,6 +463,23 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    /// A card with an explicit `updated_at`, for the recency fallback.
+    fn card_updated(number: u32, body: &str, tags: &[&str], updated_at: &str) -> shared::Card {
+        shared::Card {
+            updated_at: updated_at.to_string(),
+            ..tagged_card(number, body, tags)
+        }
+    }
+
+    /// `hash_suggestions` with no pick history — the pre-MRU default order.
+    fn suggestions(prefix: &str, tags: &[String], cards: &[shared::Card]) -> Vec<HashSuggestion> {
+        hash_suggestions(prefix, tags, cards, &[], &[])
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
     }
 
     #[test]
@@ -560,7 +620,7 @@ mod tests {
     fn hash_suggestions_offer_tags_and_cards_for_an_empty_prefix() {
         let tags = vec!["bug".to_string()];
         let cards = vec![card(42, "# Deploy preview")];
-        let out = hash_suggestions("", &tags, &cards);
+        let out = suggestions("", &tags, &cards);
         assert_eq!(
             out,
             vec![
@@ -577,7 +637,7 @@ mod tests {
     fn hash_suggestions_drop_tags_for_an_all_digit_prefix() {
         let tags = vec!["4chan".to_string()];
         let cards = vec![card(42, "# Deploy"), card(7, "# Other")];
-        let out = hash_suggestions("4", &tags, &cards);
+        let out = suggestions("4", &tags, &cards);
         assert_eq!(
             out,
             vec![HashSuggestion::Card {
@@ -592,7 +652,7 @@ mod tests {
         let tags = vec!["bug".to_string(), "chore".to_string()];
         let cards = vec![card(42, "# Deploy")];
         assert_eq!(
-            hash_suggestions("bu", &tags, &cards),
+            suggestions("bu", &tags, &cards),
             vec![HashSuggestion::Tag("bug".to_string())]
         );
     }
@@ -600,11 +660,99 @@ mod tests {
     #[test]
     fn hash_suggestions_list_highest_card_numbers_first() {
         let cards = vec![card(3, "# Three"), card(11, "# Eleven"), card(7, "# Seven")];
-        let numbers: Vec<String> = hash_suggestions("", &[], &cards)
+        let numbers: Vec<String> = suggestions("", &[], &cards)
             .iter()
             .map(HashSuggestion::value)
             .collect();
         assert_eq!(numbers, vec!["11", "7", "3"]);
+    }
+
+    #[test]
+    fn hash_suggestions_lead_with_the_most_recently_picked_card() {
+        let cards = vec![card(3, "# Three"), card(11, "# Eleven"), card(7, "# Seven")];
+        // `card-3` was picked most recently, so it jumps the number order.
+        let picked = strings(&["card-3", "card-7"]);
+        let numbers: Vec<String> = hash_suggestions("", &[], &cards, &[], &picked)
+            .iter()
+            .map(HashSuggestion::value)
+            .collect();
+        assert_eq!(numbers, vec!["3", "7", "11"]);
+    }
+
+    #[test]
+    fn hash_suggestions_fall_back_to_card_recency_without_a_pick_history() {
+        let cards = vec![
+            card_updated(3, "# Three", &[], "2026-09-12T10:00:00Z"),
+            card_updated(11, "# Eleven", &[], "2026-09-10T10:00:00Z"),
+            card_updated(7, "# Seven", &[], "2026-09-14T10:00:00Z"),
+        ];
+        let numbers: Vec<String> = suggestions("", &[], &cards)
+            .iter()
+            .map(HashSuggestion::value)
+            .collect();
+        // Most recently touched first — not highest-numbered first.
+        assert_eq!(numbers, vec!["7", "3", "11"]);
+    }
+
+    #[test]
+    fn hash_suggestions_lead_with_the_most_recently_picked_tag() {
+        let tags = strings(&["bug", "chore", "docs"]);
+        let picked = strings(&["docs", "bug"]);
+        let out = hash_suggestions("", &tags, &[], &picked, &[]);
+        assert_eq!(
+            out,
+            vec![
+                HashSuggestion::Tag("docs".to_string()),
+                HashSuggestion::Tag("bug".to_string()),
+                HashSuggestion::Tag("chore".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn hash_suggestions_match_a_picked_tag_ignoring_case() {
+        let tags = strings(&["Bug", "chore"]);
+        let picked = strings(&["bug"]);
+        let out = hash_suggestions("", &tags, &[], &picked, &[]);
+        assert_eq!(out.first(), Some(&HashSuggestion::Tag("Bug".to_string())));
+    }
+
+    #[test]
+    fn unpicked_tags_order_by_their_liveliest_card() {
+        // No pick history: `chore` leads because the card wearing it changed
+        // most recently, even though `bug` sorts first alphabetically.
+        let cards = vec![
+            card_updated(1, "# One", &["bug"], "2026-09-10T10:00:00Z"),
+            card_updated(2, "# Two", &["chore"], "2026-09-14T10:00:00Z"),
+        ];
+        let tags = strings(&["bug", "chore"]);
+        let out = suggestions("", &tags, &cards);
+        assert_eq!(
+            out.first(),
+            Some(&HashSuggestion::Tag("chore".to_string())),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn tags_on_no_card_sort_last_and_stay_alphabetical() {
+        // A tag whose cards have all gone has no recency at all; two of them
+        // must still order predictably rather than by `Vec` happenstance.
+        let cards = vec![card_updated(1, "# One", &["live"], "2026-09-14T10:00:00Z")];
+        let tags = strings(&["zeta", "alpha", "live"]);
+        // An empty prefix also offers cards; only the tag half is under test.
+        let offered: Vec<HashSuggestion> = suggestions("", &tags, &cards)
+            .into_iter()
+            .filter(|s| matches!(s, HashSuggestion::Tag(_)))
+            .collect();
+        assert_eq!(
+            offered,
+            vec![
+                HashSuggestion::Tag("live".to_string()),
+                HashSuggestion::Tag("alpha".to_string()),
+                HashSuggestion::Tag("zeta".to_string()),
+            ]
+        );
     }
 
     #[test]
