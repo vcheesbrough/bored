@@ -1,7 +1,7 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
 # Push/manual: compute-version → build(local, no push) → e2e → (publish-image ∥ apply-authentik-blueprint-auto-dev) → auto-deploy-dev → tag-release-auto-dev
 #   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
-# Deploy: (validate-deployment ∥ compute-version) → apply-authentik-blueprint → verify-image → deploy-* → tag-release-*
+# Deploy: (validate-deployment ∥ compute-version) → (apply-authentik-blueprint ∥ verify-image) → deploy-* → tag-release-*
 #   Deployments do NOT allocate a version — compute-version REUSES the semver tag already on the commit; verify-image
 #   pulls that exact artifact and does NOT rebuild (card #254).
 #
@@ -180,11 +180,18 @@ steps:
     # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
     # #254). compute-version's reuse path pins .release-tag to the commit's
     # already-built version, so the tag we pull here is byte-identical to what
-    # e2e validated and what dev is running. Because publish-image only pushes AFTER e2e passes,
-    # the tag existing in the registry *is* the e2e-passed signal — a red e2e run
-    # never publishes it. Pull it and re-assert its OCI labels; fail loudly
+    # e2e validated and what dev is running. Because publish-image only pushes
+    # AFTER e2e passes, the tag existing in the registry *is* the e2e-passed
+    # signal — a red e2e run never publishes it. Pull it and re-assert its OCI labels; fail loudly
     # (fail-closed) if it is absent, which means this commit never completed
     # build/e2e.
+    # One corner to know about: publish-image pushes the image BEFORE
+    # tag-release-auto-dev creates the git tag, so a pipeline that dies between
+    # the two leaves :X.Y.Z in the registry with no tag on the commit. Deploying
+    # a different, still-untagged commit then has compute allocate that same
+    # X.Y.Z and the pull SUCCEEDS — it is check-image-metadata.sh's revision
+    # label check that fails it, on the sha rather than on the missing tag. Still
+    # fail-closed, just a different message than the one below (card #336).
     when:
       - event: deployment
     depends_on:
