@@ -20,6 +20,12 @@ pub(super) const POSITION_GAP: i32 = 1024;
 /// Given the sorted card list for a column (with the moving card excluded),
 /// compute the sparse position value for inserting at `idx`.
 /// Uses sentinels: 0 at the top edge, last_pos + 2*GAP at the bottom edge.
+///
+/// # Panics
+///
+/// If `idx > col_cards.len()`: the left neighbour is read as
+/// `col_cards[idx - 1]`. `idx == col_cards.len()` means "at the bottom" and is
+/// the largest valid index — callers clamp with `.min(col_cards.len())` first.
 fn midpoint_position(col_cards: &[DbCard], idx: usize) -> i32 {
     let left = if idx == 0 {
         0
@@ -37,6 +43,11 @@ fn midpoint_position(col_cards: &[DbCard], idx: usize) -> i32 {
 /// Returns true when the candidate position is not strictly between its
 /// left and right neighbours — meaning the gap is exhausted and we must
 /// rebalance before inserting.
+///
+/// # Panics
+///
+/// If `idx > col_cards.len()`, for the same reason as [`midpoint_position`] —
+/// pass the same clamped `idx` to both.
 fn needs_rebalance(col_cards: &[DbCard], idx: usize, new_pos: i32) -> bool {
     let left = if idx == 0 {
         0

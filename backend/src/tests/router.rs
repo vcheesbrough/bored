@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app::health;
+use serial_test::serial;
 
 #[tokio::test]
 async fn health_handler_returns_ok() {

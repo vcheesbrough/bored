@@ -1,3 +1,8 @@
+// Sparse-position arithmetic and the column rebalance live in their own file
+// (`cards/position.rs`); the handlers below only ask it "where does this card
+// go?".
+mod position;
+
 use axum::{
     Extension, Json,
     extract::{Path, State},
@@ -11,9 +16,6 @@ use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::{AppState, editor_sub};
 
-// Sparse-position arithmetic and the column rebalance live in their own file;
-// the handlers below only ask it "where does this card go?".
-mod position;
 use position::{POSITION_GAP, compute_sparse_position, compute_top_position};
 
 /// Apply [`shared::tags::normalize`] to a client-supplied tag list, mapping a
