@@ -1,3 +1,8 @@
+// Sparse-position arithmetic and the column rebalance live in their own file
+// (`cards/position.rs`); the handlers below only ask it "where does this card
+// go?".
+mod position;
+
 use axum::{
     Extension, Json,
     extract::{Path, State},
@@ -5,18 +10,13 @@ use axum::{
 };
 use std::collections::HashSet;
 
-use surrealdb::{Surreal, engine::local::Db};
-
 use crate::audit;
 use crate::auth::Claims;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::{AppState, editor_sub};
 
-/// Gap between adjacent card positions in the sparse ordering scheme.
-/// Large enough to allow ~10 bisections between any two cards before a rebalance
-/// is needed, while fitting comfortably within i32.
-const POSITION_GAP: i32 = 1024;
+use position::{POSITION_GAP, compute_sparse_position, compute_top_position};
 
 /// Apply [`shared::tags::normalize`] to a client-supplied tag list, mapping a
 /// rejected list onto the HTTP status the handlers return.
@@ -26,155 +26,6 @@ const POSITION_GAP: i32 = 1024;
 /// than being silently trimmed into something the user did not ask for.
 fn normalize_tags(raw: &[String]) -> Result<Vec<String>, StatusCode> {
     shared::tags::normalize(raw).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)
-}
-
-/// Given the sorted card list for a column (with the moving card excluded),
-/// compute the sparse position value for inserting at `idx`.
-/// Uses sentinels: 0 at the top edge, last_pos + 2*GAP at the bottom edge.
-fn midpoint_position(col_cards: &[DbCard], idx: usize) -> i32 {
-    let left = if idx == 0 {
-        0
-    } else {
-        col_cards[idx - 1].position
-    };
-    let right = if idx >= col_cards.len() {
-        col_cards.last().map(|c| c.position).unwrap_or(0) + 2 * POSITION_GAP
-    } else {
-        col_cards[idx].position
-    };
-    (left + right) / 2
-}
-
-/// Returns true when the candidate position is not strictly between its
-/// left and right neighbours — meaning the gap is exhausted and we must
-/// rebalance before inserting.
-fn needs_rebalance(col_cards: &[DbCard], idx: usize, new_pos: i32) -> bool {
-    let left = if idx == 0 {
-        0
-    } else {
-        col_cards[idx - 1].position
-    };
-    // Bottom edge: any positive value above `left` is always valid.
-    let right = if idx >= col_cards.len() {
-        i32::MAX
-    } else {
-        col_cards[idx].position
-    };
-    new_pos <= left || new_pos >= right
-}
-
-/// Reassign every card in `col_id` to evenly-spaced positions (GAP, 2*GAP, …).
-/// Called only when the gap between two neighbouring cards drops to zero,
-/// which happens after ~10 consecutive insertions at the same slot.
-async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<(), surrealdb::Error> {
-    let cards: Vec<DbCard> = db
-        .query(
-            "SELECT * FROM cards \
-             WHERE column = type::thing('columns', $col_id) \
-             ORDER BY position ASC",
-        )
-        .bind(("col_id", col_id.to_string()))
-        .await?
-        .take(0)?;
-
-    for (i, card) in cards.iter().enumerate() {
-        // Start at GAP (not 0) so there is always room above the first card
-        // for a top insert without immediately triggering another rebalance.
-        db.query("UPDATE type::thing('cards', $id) SET position = $pos")
-            .bind(("id", card.id.id.to_raw()))
-            .bind(("pos", (i as i32 + 1) * POSITION_GAP))
-            .await?;
-    }
-    Ok(())
-}
-
-/// Compute a sparse position for inserting a brand-new card at the TOP of
-/// `col_id` (index 0 in the sorted sibling list).  Unlike
-/// `compute_sparse_position` there is no card to exclude, so we query all
-/// existing cards in the column.
-async fn compute_top_position(db: &Surreal<Db>, col_id: &str) -> Result<i32, surrealdb::Error> {
-    let col_cards: Vec<DbCard> = db
-        .query(
-            "SELECT * FROM cards \
-             WHERE column = type::thing('columns', $col_id) \
-             ORDER BY position ASC",
-        )
-        .bind(("col_id", col_id.to_string()))
-        .await?
-        .take(0)?;
-
-    let new_pos = midpoint_position(&col_cards, 0);
-
-    // If the gap between the sentinel (0) and the current first card has been
-    // exhausted, rebalance the whole column before computing the new position.
-    if !col_cards.is_empty() && needs_rebalance(&col_cards, 0, new_pos) {
-        rebalance_column(db, col_id).await?;
-
-        let col_cards: Vec<DbCard> = db
-            .query(
-                "SELECT * FROM cards \
-                 WHERE column = type::thing('columns', $col_id) \
-                 ORDER BY position ASC",
-            )
-            .bind(("col_id", col_id.to_string()))
-            .await?
-            .take(0)?;
-
-        return Ok(midpoint_position(&col_cards, 0));
-    }
-
-    Ok(new_pos)
-}
-
-/// Compute a single sparse position value for moving `card_id` to index
-/// `target_index` within `col_id`.  Only the moved card is ever written;
-/// no other cards are modified in the happy path.
-async fn compute_sparse_position(
-    db: &Surreal<Db>,
-    card_id: &str,
-    col_id: &str,
-    target_index: i32,
-) -> Result<i32, surrealdb::Error> {
-    // Fetch sibling cards (the moving card excluded) so we see the column
-    // as it will look after the move.
-    let col_cards: Vec<DbCard> = db
-        .query(
-            "SELECT * FROM cards \
-             WHERE column = type::thing('columns', $col_id) \
-               AND id != type::thing('cards', $card_id) \
-             ORDER BY position ASC",
-        )
-        .bind(("col_id", col_id.to_string()))
-        .bind(("card_id", card_id.to_string()))
-        .await?
-        .take(0)?;
-
-    let idx = (target_index as usize).min(col_cards.len());
-    let new_pos = midpoint_position(&col_cards, idx);
-
-    if needs_rebalance(&col_cards, idx, new_pos) {
-        // Gap exhausted — renumber the column then recompute.  After a
-        // rebalance every gap is exactly POSITION_GAP, so the second
-        // midpoint_position call is guaranteed to succeed.
-        rebalance_column(db, col_id).await?;
-
-        let col_cards: Vec<DbCard> = db
-            .query(
-                "SELECT * FROM cards \
-                 WHERE column = type::thing('columns', $col_id) \
-                   AND id != type::thing('cards', $card_id) \
-                 ORDER BY position ASC",
-            )
-            .bind(("col_id", col_id.to_string()))
-            .bind(("card_id", card_id.to_string()))
-            .await?
-            .take(0)?;
-
-        let idx = (target_index as usize).min(col_cards.len());
-        return Ok(midpoint_position(&col_cards, idx));
-    }
-
-    Ok(new_pos)
 }
 
 pub async fn list_cards(
