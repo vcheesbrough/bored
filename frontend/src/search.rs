@@ -180,7 +180,7 @@ pub fn hash_suggestions(
             .iter()
             .filter(|tag| shared::tags::starts_with_ignore_case(tag, prefix))
             .collect();
-        tags.sort_by_key(|tag| {
+        tags.sort_by_cached_key(|tag| {
             (
                 crate::recent::tag_rank_of(recent_tags, tag),
                 // A tag is only as recent as the liveliest card wearing it,
@@ -201,7 +201,7 @@ pub fn hash_suggestions(
             .iter()
             .filter(|card| card.number.to_string().starts_with(prefix))
             .collect();
-        numbered.sort_by_key(|card| {
+        numbered.sort_by_cached_key(|card| {
             (
                 crate::recent::rank_of(recent_card_ids, &card.id),
                 std::cmp::Reverse(crate::recent::recency_key(&card.updated_at)),

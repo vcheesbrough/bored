@@ -90,6 +90,11 @@ impl RecentPicks {
     /// Record that the user picked the card with this ID.
     pub fn record_card(&self, card_id: &str) {
         let board_id = self.board_id.get_untracked();
+        if board_id.is_empty() {
+            // No board resolved yet: recording would write to a shared,
+            // board-less key that every board in that state would read.
+            return;
+        }
         self.cards.update(|list| {
             push_front(list, card_id, MAX_REMEMBERED, str::eq);
             persist_list(&cards_key(&board_id), list);
@@ -103,6 +108,11 @@ impl RecentPicks {
     /// different case moves the stored entry rather than adding a second.
     pub fn record_tag(&self, tag: &str) {
         let board_id = self.board_id.get_untracked();
+        if board_id.is_empty() {
+            // No board resolved yet: recording would write to a shared,
+            // board-less key that every board in that state would read.
+            return;
+        }
         self.tags.update(|list| {
             push_front(list, tag, MAX_REMEMBERED, shared::tags::eq_ignore_case);
             persist_list(&tags_key(&board_id), list);
@@ -149,6 +159,12 @@ pub fn tag_rank_of(recent: &[String], tag: &str) -> usize {
 /// *after* `…45.679Z` because `'Z'` outranks `'7'` in ASCII. Unwrapping the
 /// quotes and padding the fraction to nine digits removes both hazards, and
 /// leaves anything unrecognised to compare as itself rather than vanishing.
+///
+/// Instants carrying a numeric UTC offset are split correctly but still not
+/// *converted*: `12:00:00+01:00` and `12:00:00Z` compare by their wall-clock
+/// text, not by the moment they name. Ordering only stays chronological among
+/// timestamps sharing one offset — which every timestamp from this API does,
+/// since SurrealDB renders UTC.
 pub fn recency_key(timestamp: &str) -> String {
     let trimmed = timestamp
         .trim()
@@ -157,8 +173,12 @@ pub fn recency_key(timestamp: &str) -> String {
         .unwrap_or(timestamp.trim());
 
     // Split off the zone suffix so the fraction can be padded in isolation.
-    let (instant, zone) = match trimmed.find(['Z', 'z', '+']) {
-        Some(at) => trimmed.split_at(at),
+    // The search starts after the `T`, because a negative offset's `-` is the
+    // same character the date is full of: scanning the whole string would
+    // "find" the zone at `2026-09-12`.
+    let time_at = trimmed.find(['T', 't']).map_or(0, |at| at + 1);
+    let (instant, zone) = match trimmed[time_at..].find(['Z', 'z', '+', '-']) {
+        Some(at) => trimmed.split_at(time_at + at),
         None => (trimmed, ""),
     };
     let Some((seconds, fraction)) = instant.split_once('.') else {
@@ -296,6 +316,28 @@ mod tests {
             sorted,
             vec![keys[1].clone(), keys[0].clone(), keys[2].clone()]
         );
+    }
+
+    #[test]
+    fn recency_key_splits_a_numeric_offset_off_the_fraction() {
+        // The date is full of `-`, so the zone search has to start after the
+        // `T` or the offset's `-` is indistinguishable from the date's.
+        assert_eq!(
+            recency_key("2026-09-12T12:17:45.6-05:00"),
+            "2026-09-12T12:17:45.600000000-05:00"
+        );
+        assert_eq!(
+            recency_key("2026-09-12T12:17:45+01:00"),
+            "2026-09-12T12:17:45.000000000+01:00"
+        );
+    }
+
+    #[test]
+    fn recency_key_orders_offset_instants_among_themselves() {
+        // Offsets are split, not converted: ordering holds within one offset.
+        let earlier = recency_key("2026-09-12T12:17:45.6-05:00");
+        let later = recency_key("2026-09-12T12:17:45.679-05:00");
+        assert!(earlier < later, "{earlier} should sort before {later}");
     }
 
     #[test]
