@@ -1,72 +1,57 @@
 use axum::{
     Extension, Json,
     extract::{Path, State},
-    http::StatusCode,
 };
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::error::ApiError;
 use crate::models::DbColumn;
 use crate::routes::boards::{AppState, find_board_by_slug};
 
 pub async fn board_history(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<Json<Vec<shared::AuditLogEntry>>, StatusCode> {
+) -> Result<Json<Vec<shared::AuditLogEntry>>, ApiError> {
     let board = match find_board_by_slug(&state.db, &slug).await? {
         Some(b) => b,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let id = board.id.id.to_raw();
-    let rows = audit::list_board_history(&state.db, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = audit::list_board_history(&state.db, &id).await?;
     Ok(Json(rows))
 }
 
 pub async fn column_history(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
-) -> Result<Json<Vec<shared::AuditLogEntry>>, StatusCode> {
-    let col: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<Vec<shared::AuditLogEntry>>, ApiError> {
+    let col: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
     let Some(col) = col else {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::NotFound);
     };
     let board_ulid = col.board.id.to_raw();
-    let rows = audit::list_column_history(&state.db, &col_id, &board_ulid)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = audit::list_column_history(&state.db, &col_id, &board_ulid).await?;
     Ok(Json(rows))
 }
 
 pub async fn card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> Result<Json<Vec<shared::AuditLogEntry>>, StatusCode> {
-    let card: Option<crate::models::DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<Vec<shared::AuditLogEntry>>, ApiError> {
+    let card: Option<crate::models::DbCard> = state.db.select(("cards", &card_id)).await?;
     let Some(card) = card else {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::NotFound);
     };
     let col: Option<DbColumn> = state
         .db
         .select(("columns", card.column.id.to_raw()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?;
     // The column is normally still there; if it is not (mid-cascade), the
     // card's own history rows still come back and only the link half narrows
     // to nothing rather than scanning every board's link history.
     let board_ulid = col.map(|c| c.board.id.to_raw()).unwrap_or_default();
-    let rows = audit::list_card_history(&state.db, &card_id, &board_ulid)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let rows = audit::list_card_history(&state.db, &card_id, &board_ulid).await?;
     Ok(Json(rows))
 }
 
@@ -74,7 +59,7 @@ pub async fn restore_audit(
     State(state): State<AppState>,
     Path(audit_id): Path<String>,
     claims: Extension<Claims>,
-) -> Result<Json<Vec<shared::AuditLogEntry>>, StatusCode> {
+) -> Result<Json<Vec<shared::AuditLogEntry>>, ApiError> {
     let rows = audit::restore_from_audit(&state.db, &claims, &state.events, &audit_id).await?;
     Ok(Json(rows))
 }

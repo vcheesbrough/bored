@@ -15,9 +15,9 @@
 //! Nothing here touches [`crate::models`] beyond reading the stored tag list,
 //! and nothing here is `async`.
 
-use axum::http::StatusCode;
 use surrealdb::{engine::local::Db, method::Query};
 
+use crate::error::ApiError;
 use crate::models::DbCard;
 
 use super::normalize_tags;
@@ -82,7 +82,7 @@ impl CardUpdate {
     pub(super) fn plan(
         payload: shared::UpdateCardRequest,
         existing: &DbCard,
-    ) -> Result<Option<Self>, StatusCode> {
+    ) -> Result<Option<Self>, ApiError> {
         // Tags arrive as a full replacement list; normalize before deciding
         // whether this request changes anything, so a request that only
         // re-sends the tags a card already has is treated as a no-op rather
@@ -392,7 +392,8 @@ mod tests {
             ..Default::default()
         };
         let err = CardUpdate::plan(payload, &card_tagged(&[])).expect_err("tag exceeds the cap");
-        assert_eq!(err, StatusCode::UNPROCESSABLE_ENTITY);
+        // A bodiless 422, exactly as the tag routes have always answered.
+        assert!(matches!(err, ApiError::Unprocessable(None)));
     }
 
     #[test]
@@ -405,7 +406,7 @@ mod tests {
             ..Default::default()
         };
         let err = CardUpdate::plan(payload, &card_tagged(&[])).expect_err("too many tags");
-        assert_eq!(err, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(matches!(err, ApiError::Unprocessable(None)));
     }
 
     #[test]

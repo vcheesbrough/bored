@@ -4,13 +4,13 @@
 //! `audit_edit_session` (one editing stretch). Everything else — tag changes
 //! included — is append-only.
 
-use axum::http::StatusCode;
 use serde_json::{Value, json};
 use surrealdb::{Surreal, engine::local::Db};
 use tokio::sync::broadcast::Sender;
 use ulid::Ulid;
 
 use crate::auth::Claims;
+use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbAuditLog, DbBoard, DbCard, DbColumn};
 
@@ -415,24 +415,18 @@ async fn restore_one_delete(
     claims: &Claims,
     events: &Sender<BroadcastEvent>,
     row: &DbAuditLog,
-) -> Result<Vec<shared::AuditLogEntry>, StatusCode> {
-    let snapshot = row
-        .snapshot_before
-        .clone()
-        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+) -> Result<Vec<shared::AuditLogEntry>, ApiError> {
+    let snapshot = row.snapshot_before.clone().ok_or(ApiError::UNPROCESSABLE)?;
     let original_audit_id = row.id.id.to_raw();
     let editor = claims.sub.clone();
 
     match row.entity_type.as_str() {
         "board" => {
             let b: shared::Board =
-                serde_json::from_value(snapshot).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-            let exists: Option<DbBoard> = db
-                .select(("boards", &b.id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                serde_json::from_value(snapshot).map_err(|_| ApiError::UNPROCESSABLE)?;
+            let exists: Option<DbBoard> = db.select(("boards", &b.id)).await?;
             if exists.is_some() {
-                return Err(StatusCode::CONFLICT);
+                return Err(ApiError::CONFLICT);
             }
             let _: Option<DbBoard> = db
                 .create(("boards", &b.id))
@@ -440,10 +434,8 @@ async fn restore_one_delete(
                     "name": b.name,
                     "last_edited_by": editor.clone(),
                 }))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let after =
-                serde_json::to_value(b.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .await?;
+            let after = serde_json::to_value(b.clone())?;
             let _ = events.send(BroadcastEvent {
                 board_id: b.id.clone(),
                 event: BoardEvent::BoardCreated { board: b },
@@ -464,19 +456,15 @@ async fn restore_one_delete(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
             Ok(vec![entry])
         }
         "column" => {
             let c: shared::Column =
-                serde_json::from_value(snapshot).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-            let exists: Option<DbColumn> = db
-                .select(("columns", &c.id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                serde_json::from_value(snapshot).map_err(|_| ApiError::UNPROCESSABLE)?;
+            let exists: Option<DbColumn> = db.select(("columns", &c.id)).await?;
             if exists.is_some() {
-                return Err(StatusCode::CONFLICT);
+                return Err(ApiError::CONFLICT);
             }
             let _: Option<DbColumn> = db
                 .query(
@@ -489,12 +477,9 @@ async fn restore_one_delete(
                 .bind(("name", c.name.clone()))
                 .bind(("position", c.position))
                 .bind(("editor", editor.clone()))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .take(0)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let after =
-                serde_json::to_value(c.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .await?
+                .take(0)?;
+            let after = serde_json::to_value(c.clone())?;
             let entry = record_and_broadcast(
                 db,
                 events,
@@ -511,8 +496,7 @@ async fn restore_one_delete(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
             let _ = events.send(BroadcastEvent {
                 board_id: row.board_id.clone(),
                 event: BoardEvent::ColumnCreated { column: c },
@@ -521,13 +505,10 @@ async fn restore_one_delete(
         }
         "card" => {
             let card: shared::Card =
-                serde_json::from_value(snapshot).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-            let exists: Option<DbCard> = db
-                .select(("cards", &card.id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                serde_json::from_value(snapshot).map_err(|_| ApiError::UNPROCESSABLE)?;
+            let exists: Option<DbCard> = db.select(("cards", &card.id)).await?;
             if exists.is_some() {
-                return Err(StatusCode::CONFLICT);
+                return Err(ApiError::CONFLICT);
             }
             let _: Option<DbCard> = db
                 .query(
@@ -543,12 +524,9 @@ async fn restore_one_delete(
                 .bind(("number", card.number as i64))
                 .bind(("tags", card.tags.clone()))
                 .bind(("editor", editor.clone()))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .take(0)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let after = serde_json::to_value(card.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .await?
+                .take(0)?;
+            let after = serde_json::to_value(card.clone())?;
             let mut out = Vec::new();
             let entry = record_and_broadcast(
                 db,
@@ -566,8 +544,7 @@ async fn restore_one_delete(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
             out.push(entry);
             let _ = events.send(BroadcastEvent {
                 board_id: row.board_id.clone(),
@@ -575,7 +552,7 @@ async fn restore_one_delete(
             });
             Ok(out)
         }
-        _ => Err(StatusCode::UNPROCESSABLE_ENTITY),
+        _ => Err(ApiError::UNPROCESSABLE),
     }
 }
 
@@ -584,10 +561,8 @@ async fn restore_batch(
     claims: &Claims,
     events: &Sender<BroadcastEvent>,
     batch_group: &str,
-) -> Result<Vec<shared::AuditLogEntry>, StatusCode> {
-    let rows = batch_delete_entries(db, batch_group)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Vec<shared::AuditLogEntry>, ApiError> {
+    let rows = batch_delete_entries(db, batch_group).await?;
     let mut restored = Vec::new();
     for r in rows {
         let mut v = restore_one_delete(db, claims, events, &r).await?;
@@ -606,27 +581,24 @@ async fn restore_batch(
 /// list would let restoring an old body silently delete tags the card has
 /// carried ever since. `None` therefore means "this row says nothing about
 /// tags", and the caller leaves them alone.
-fn card_content_version(row: &DbAuditLog) -> Result<(String, Option<Vec<String>>), StatusCode> {
+fn card_content_version(row: &DbAuditLog) -> Result<(String, Option<Vec<String>>), ApiError> {
     if row.entity_type != "card"
         || !matches!(
             row.action.as_str(),
             "create" | "baseline" | "update" | "restore"
         )
     {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(ApiError::UNPROCESSABLE);
     }
 
-    let snapshot = row
-        .snapshot_after
-        .as_ref()
-        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let snapshot = row.snapshot_after.as_ref().ok_or(ApiError::UNPROCESSABLE)?;
     if snapshot.get("id").and_then(Value::as_str) != Some(row.entity_id.as_str()) {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(ApiError::UNPROCESSABLE);
     }
     let body = snapshot
         .get("body")
         .and_then(Value::as_str)
-        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?
+        .ok_or(ApiError::UNPROCESSABLE)?
         .to_string();
     // No `unwrap_or_default()` here: a missing key has to stay `None` all the
     // way to the caller so it can tell "no tags" from "tags not recorded".
@@ -657,13 +629,10 @@ async fn restore_card_content(
     claims: &Claims,
     events: &Sender<BroadcastEvent>,
     row: &DbAuditLog,
-) -> Result<Vec<shared::AuditLogEntry>, StatusCode> {
+) -> Result<Vec<shared::AuditLogEntry>, ApiError> {
     let (target_body, target_tags) = card_content_version(row)?;
-    let existing: Option<DbCard> = db
-        .select(("cards", &row.entity_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let existing = existing.ok_or(StatusCode::NOT_FOUND)?;
+    let existing: Option<DbCard> = db.select(("cards", &row.entity_id)).await?;
+    let existing = existing.ok_or(ApiError::NotFound)?;
     // Nothing to restore only when every half this row actually carries already
     // matches. A legacy row (`None`) carries no tags, so the body alone decides
     // — otherwise today's tags, which the restore will not touch, could make an
@@ -672,11 +641,10 @@ async fn restore_card_content(
         .as_ref()
         .is_none_or(|target| existing.tags == *target);
     if existing.body == target_body && tags_already_current {
-        return Err(StatusCode::CONFLICT);
+        return Err(ApiError::CONFLICT);
     }
 
-    let snapshot_before =
-        serde_json::to_value(existing.into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(existing.into_api())?;
     // Two statements rather than one with a conditional bind: `tags` is left out
     // of the SET list entirely for a legacy row, so the column keeps whatever
     // the card carries today.
@@ -698,14 +666,9 @@ async fn restore_card_content(
     if let Some(tags) = target_tags {
         request = request.bind(("tags", tags));
     }
-    let updated: Option<DbCard> = request
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let updated = updated.ok_or(StatusCode::NOT_FOUND)?.into_api();
-    let snapshot_after =
-        serde_json::to_value(updated.clone()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated: Option<DbCard> = request.await?.take(0)?;
+    let updated = updated.ok_or(ApiError::NotFound)?.into_api();
+    let snapshot_after = serde_json::to_value(updated.clone())?;
     let original_audit_id = row.id.id.to_raw();
 
     let entry = record_and_broadcast(
@@ -724,8 +687,7 @@ async fn restore_card_content(
             audit_edit_session: None,
         },
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
 
     let _ = events.send(BroadcastEvent {
         board_id: row.board_id.clone(),
@@ -749,11 +711,8 @@ pub async fn restore_from_audit(
     claims: &Claims,
     events: &Sender<BroadcastEvent>,
     audit_id: &str,
-) -> Result<Vec<shared::AuditLogEntry>, StatusCode> {
-    let row = load_audit(db, audit_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Vec<shared::AuditLogEntry>, ApiError> {
+    let row = load_audit(db, audit_id).await?.ok_or(ApiError::NotFound)?;
 
     if row.action == "delete" {
         if let Some(ref bg) = row.batch_group {
@@ -853,9 +812,10 @@ mod tests {
     fn mismatched_snapshot_id_is_rejected() {
         let row = card_row(json!({ "id": "card-2", "body": "b", "tags": [] }));
 
-        assert_eq!(
+        // A bodiless 422, as the restore route has always answered.
+        assert!(matches!(
             card_content_version(&row).unwrap_err(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
+            ApiError::Unprocessable(None)
+        ));
     }
 }
