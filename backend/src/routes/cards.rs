@@ -2,6 +2,9 @@
 // (`cards/position.rs`); the handlers below only ask it "where does this card
 // go?".
 mod position;
+// Likewise, "what does this PUT actually change?" is a pure decision with no
+// database in it, so it lives in `cards/update.rs` where it can be unit tested.
+mod update;
 
 use axum::{
     Extension, Json,
@@ -9,6 +12,7 @@ use axum::{
     http::StatusCode,
 };
 use std::collections::HashSet;
+use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
@@ -17,6 +21,7 @@ use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::{AppState, editor_sub};
 
 use position::{POSITION_GAP, compute_sparse_position, compute_top_position};
+use update::CardUpdate;
 
 /// Apply [`shared::tags::normalize`] to a client-supplied tag list, mapping a
 /// rejected list onto the HTTP status the handlers return.
@@ -26,6 +31,153 @@ use position::{POSITION_GAP, compute_sparse_position, compute_top_position};
 /// than being silently trimmed into something the user did not ask for.
 fn normalize_tags(raw: &[String]) -> Result<Vec<String>, StatusCode> {
     shared::tags::normalize(raw).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)
+}
+
+/// Load a card, mapping "no such card" onto 404 and a database fault onto 500.
+async fn load_card(db: &Surreal<Db>, card_id: &str) -> Result<DbCard, StatusCode> {
+    let card: Option<DbCard> = db
+        .select(("cards", card_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    card.ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Load a column the request named, mapping "no such column" onto 404.
+///
+/// Use this for a column the caller asked for; use [`find_column`] for one the
+/// server looks up on its own behalf.
+async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, StatusCode> {
+    let column: Option<DbColumn> = db
+        .select(("columns", col_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    column.ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Look up a column that may legitimately be gone.
+///
+/// A card's own column is read to find its board, but a cascade delete can
+/// remove the column while the card row is still around. That is not the
+/// caller's fault, so it is `Ok(None)` rather than a 404 — the callers fall
+/// back to an empty board id, which no connected client is scoped to.
+async fn find_column(db: &Surreal<Db>, col_id: &str) -> Result<Option<DbColumn>, StatusCode> {
+    db.select(("columns", col_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// The JSON snapshot an audit row stores for a card: the card exactly as the
+/// API renders it, so restoring a row replays a real API shape.
+fn snapshot(card: &shared::Card) -> Result<serde_json::Value, StatusCode> {
+    serde_json::to_value(card).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Run a planned edit ([`CardUpdate::plan`]) and return the stored row.
+///
+/// The card was loaded moments ago, so a zero-row result means it was deleted
+/// in between — 404, the same answer the caller would have given had the delete
+/// landed first.
+async fn persist_update(
+    db: &Surreal<Db>,
+    card_id: String,
+    editor: String,
+    write: update::CardWrite,
+) -> Result<DbCard, StatusCode> {
+    let statement = write.statement();
+    let card: Option<DbCard> = write
+        .bind(
+            db.query(statement)
+                .bind(("card_id", card_id))
+                .bind(("editor", editor)),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    card.ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Write a card's new column and position, and return the stored row.
+///
+/// Unlike [`persist_update`] the fields are fixed, so the statement is a
+/// constant rather than something assembled per request.
+async fn persist_move(
+    db: &Surreal<Db>,
+    card_id: &str,
+    col_id: &str,
+    position: i32,
+    editor: String,
+) -> Result<DbCard, StatusCode> {
+    let card: Option<DbCard> = db
+        .query(
+            "UPDATE type::thing('cards', $card_id) \
+             SET column = type::thing('columns', $col_id), position = $position, last_edited_by = $editor",
+        )
+        .bind(("card_id", card_id.to_string()))
+        .bind(("col_id", col_id.to_string()))
+        .bind(("position", position))
+        .bind(("editor", editor))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .take(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    card.ok_or(StatusCode::NOT_FOUND)
+}
+
+/// One completed card mutation, ready to be recorded and announced.
+///
+/// Grouped into a struct rather than passed as eight arguments to
+/// [`audit_and_emit`] — the same shape `audit::AuditRecord` uses, minus the
+/// fields these two handlers never vary.
+struct CardMutation<'a> {
+    claims: &'a Claims,
+    board_id: String,
+    /// The card's id, as the audit log's `entity_id`.
+    card_id: &'a str,
+    /// `"move"` or `"update"`.
+    action: &'a str,
+    snapshot_before: serde_json::Value,
+    snapshot_after: serde_json::Value,
+    audit_edit_session: Option<&'a str>,
+    /// The board event to broadcast once the audit row is committed.
+    event: BoardEvent,
+}
+
+/// Record a card mutation in the audit log, then announce it to subscribers.
+///
+/// The order is deliberate and matches every other handler in this file: the
+/// audit row is committed first (and emits its own `AuditAppended`), and only
+/// then does the event that actually moves the card in connected browsers go
+/// out. A failed audit write is a 500 and no event is sent, so no browser ever
+/// shows a change that history does not record.
+///
+/// Broadcast failure is ignored on purpose — `send` only errors when nobody is
+/// listening, which is the normal state of a server with no open tabs.
+async fn audit_and_emit(state: &AppState, mutation: CardMutation<'_>) -> Result<(), StatusCode> {
+    audit::record_and_broadcast(
+        &state.db,
+        &state.events,
+        audit::AuditRecord {
+            claims: mutation.claims,
+            board_id: mutation.board_id.clone(),
+            entity_type: "card",
+            entity_id: mutation.card_id,
+            action: mutation.action,
+            snapshot_before: Some(mutation.snapshot_before),
+            snapshot_after: Some(mutation.snapshot_after),
+            restored_from: None,
+            batch_group: None,
+            audit_edit_session: mutation.audit_edit_session,
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let _ = state.events.send(BroadcastEvent {
+        board_id: mutation.board_id,
+        event: mutation.event,
+    });
+    Ok(())
 }
 
 pub async fn list_cards(
@@ -201,50 +353,37 @@ pub async fn create_card(
     }
 }
 
+/// `PUT /api/cards/:id` — apply a partial edit to a card.
+///
+/// Reads as the sequence it is: load the card, resolve its board, validate a
+/// target column if one was named, work out what actually changes
+/// ([`CardUpdate::plan`]), write it, then record and announce it.
+///
+/// Two orderings here are load-bearing and deliberately preserved:
+///
+/// * the column checks run **before** tag normalization, so a request that is
+///   wrong about both its column and its tags gets the 404, not the 422;
+/// * the no-op check runs **after** the column checks, so naming a nonexistent
+///   column is still a 404 even when nothing would have been written.
 pub async fn update_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateCardRequest>,
 ) -> Result<Json<shared::Card>, StatusCode> {
-    let existing: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let existing = match existing {
-        Some(e) => e,
-        None => return Err(StatusCode::NOT_FOUND),
-    };
-
-    let snapshot_before = serde_json::to_value(existing.clone().into_api())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let existing = load_card(&state.db, &card_id).await?;
+    let snapshot_before = snapshot(&existing.clone().into_api())?;
 
     // Always look up the current column so we have the board ID for the SSE event.
-    let current_col: Option<DbColumn> = state
-        .db
-        .select(("columns", existing.column.id.to_raw()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let current_col = find_column(&state.db, &existing.column.id.to_raw()).await?;
     let board_id = current_col
         .as_ref()
         .map(|c| c.board.id.to_raw())
         .unwrap_or_default();
 
     // Validate target column if provided, and guard against cross-board moves.
-    if let Some(col_id) = payload.column_id.as_ref() {
-        let target_col: Option<DbColumn> = state
-            .db
-            .select(("columns", col_id.as_str()))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let target_col = match target_col {
-            Some(c) => c,
-            None => return Err(StatusCode::NOT_FOUND),
-        };
-
+    if let Some(col_id) = payload.column_id.as_deref() {
+        let target_col = load_column(&state.db, col_id).await?;
         if let Some(ref current_col) = current_col
             && current_col.board.id.to_raw() != target_col.board.id.to_raw()
         {
@@ -252,125 +391,38 @@ pub async fn update_card(
         }
     }
 
-    // Tags arrive as a full replacement list; normalize before deciding whether
-    // this request changes anything, so a request that only re-sends the tags a
-    // card already has is treated as a no-op rather than an edit.
-    let tags = payload.tags.as_deref().map(normalize_tags).transpose()?;
-    let tags_changed = tags
-        .as_ref()
-        .is_some_and(|new_tags| *new_tags != existing.tags);
-
-    // Build a single atomic UPDATE covering all changed fields.
-    let mut set_parts: Vec<String> = Vec::new();
-
-    if payload.body.is_some() {
-        set_parts.push("body = $body".to_string());
-    }
-    if payload.column_id.is_some() {
-        set_parts.push("column = type::thing('columns', $col_id)".to_string());
-    }
-    if payload.position.is_some() {
-        set_parts.push("position = $position".to_string());
-    }
-    if tags_changed {
-        set_parts.push("tags = $tags".to_string());
-    }
-
-    // Nothing changed — return the existing card unchanged.
-    if set_parts.is_empty() {
+    // Nothing changed — return the existing card unchanged, with no write, no
+    // audit row and no event.
+    let Some(planned) = CardUpdate::plan(payload, &existing)? else {
         return Ok(Json(existing.into_api()));
-    }
+    };
+    // Destructured so the write half can be consumed by `persist_update` while
+    // the audit half stays available after the query has run.
+    let CardUpdate { write, audit } = planned;
 
-    // Always stamp the editor — every successful mutation records who did it.
-    set_parts.push("last_edited_by = $editor".to_string());
+    let api_card = persist_update(&state.db, card_id, editor_sub(&claims), write)
+        .await?
+        .into_api();
+    let snapshot_after = snapshot(&api_card)?;
 
-    let query_str = format!(
-        "UPDATE type::thing('cards', $card_id) SET {}",
-        set_parts.join(", ")
-    );
+    audit_and_emit(
+        &state,
+        CardMutation {
+            claims: &claims,
+            board_id,
+            card_id: &api_card.id,
+            action: audit.action,
+            snapshot_before,
+            snapshot_after,
+            audit_edit_session: audit.edit_session.as_deref(),
+            event: BoardEvent::CardUpdated {
+                card: api_card.clone(),
+            },
+        },
+    )
+    .await?;
 
-    // Layout-only changes are "move" (history toggles / filters). Body edits — alone or
-    // combined with position/column in one PUT — stay "update" so audit_edit_session merge works.
-    // A tag change is content, not layout, so it keeps the row out of "move" too: tagging a
-    // card must never be something the history drawer's "show moves" toggle hides.
-    let has_layout_change = payload.column_id.is_some() || payload.position.is_some();
-    let has_body_change = payload.body.is_some();
-    let is_move_audit = has_layout_change && !has_body_change && !tags_changed;
-
-    let mut q = state
-        .db
-        .query(query_str)
-        .bind(("card_id", card_id))
-        .bind(("editor", editor_sub(&claims)));
-    if let Some(body) = payload.body {
-        q = q.bind(("body", body));
-    }
-    if let Some(col_id) = payload.column_id {
-        q = q.bind(("col_id", col_id));
-    }
-    if let Some(position) = payload.position {
-        q = q.bind(("position", position));
-    }
-    if tags_changed {
-        // `tags_changed` is only true when `tags` is `Some`; the fallback keeps
-        // the bind total without an unwrap that could panic.
-        q = q.bind(("tags", tags.unwrap_or_default()));
-    }
-
-    let card: Option<DbCard> = q
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match card {
-        Some(c) => {
-            let api_card = c.into_api();
-            let snapshot_after = serde_json::to_value(api_card.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let action = if is_move_audit { "move" } else { "update" };
-            // Every tag change gets its own discrete audit row. Merging one into
-            // an in-flight body-edit session would hide it behind a "+12 chars"
-            // summary and make the tag delta unrecoverable from history, so the
-            // session token is deliberately dropped whenever tags moved.
-            let audit_edit_session = if action == "update" && !tags_changed {
-                payload
-                    .audit_edit_session
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            };
-
-            audit::record_and_broadcast(
-                &state.db,
-                &state.events,
-                audit::AuditRecord {
-                    claims: &claims,
-                    board_id: board_id.clone(),
-                    entity_type: "card",
-                    entity_id: &api_card.id,
-                    action,
-                    snapshot_before: Some(snapshot_before),
-                    snapshot_after: Some(snapshot_after),
-                    restored_from: None,
-                    batch_group: None,
-                    audit_edit_session,
-                },
-            )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            let _ = state.events.send(BroadcastEvent {
-                board_id,
-                event: BoardEvent::CardUpdated {
-                    card: api_card.clone(),
-                },
-            });
-            Ok(Json(api_card))
-        }
-        None => Err(StatusCode::NOT_FOUND),
-    }
+    Ok(Json(api_card))
 }
 
 pub async fn delete_card(
@@ -458,43 +510,25 @@ pub async fn delete_card(
     }
 }
 
+/// `PUT /api/cards/:id/move` — move a card to a position in a column.
+///
+/// Unlike [`update_card`] there is nothing to decide: every field of the
+/// request is written. The handler is the I/O sequence — load, validate,
+/// compute the position, write, record, announce.
+///
+/// The two failure modes are ordered: an unknown target column is a 404 and is
+/// checked before the cross-board 422, which is the order the API has always
+/// answered them in.
 pub async fn move_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::MoveCardRequest>,
 ) -> Result<Json<shared::Card>, StatusCode> {
-    let existing: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let existing = load_card(&state.db, &card_id).await?;
+    let snapshot_before = snapshot(&existing.clone().into_api())?;
 
-    let existing = match existing {
-        Some(e) => e,
-        None => return Err(StatusCode::NOT_FOUND),
-    };
-
-    let snapshot_before = serde_json::to_value(existing.clone().into_api())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let target_col: Option<DbColumn> = state
-        .db
-        .select(("columns", &payload.column_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let target_col = match target_col {
-        Some(c) => c,
-        None => return Err(StatusCode::NOT_FOUND),
-    };
-
-    // Guard: target column must belong to the same board as the card's current column.
-    let current_col: Option<DbColumn> = state
-        .db
-        .select(("columns", existing.column.id.to_raw()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let target_col = load_column(&state.db, &payload.column_id).await?;
 
     // Capture the source column ID before the update so the event tells
     // subscribers which column to remove the card from.
@@ -503,7 +537,10 @@ pub async fn move_card(
     // Board ID for the SSE event — always available from the target column.
     let board_id = target_col.board.id.to_raw();
 
-    if let Some(current_col) = current_col
+    // Guard: target column must belong to the same board as the card's current
+    // column. A card whose own column has vanished has nothing to compare
+    // against, so it is let through rather than wedged.
+    if let Some(current_col) = find_column(&state.db, &from_column_id).await?
         && current_col.board.id.to_raw() != board_id
     {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
@@ -517,56 +554,36 @@ pub async fn move_card(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let card: Option<DbCard> = state
-        .db
-        .query(
-            "UPDATE type::thing('cards', $card_id) \
-             SET column = type::thing('columns', $col_id), position = $position, last_edited_by = $editor",
-        )
-        .bind(("card_id", card_id.clone()))
-        .bind(("col_id", payload.column_id.clone()))
-        .bind(("position", new_pos))
-        .bind(("editor", editor_sub(&claims)))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let api_card = persist_move(
+        &state.db,
+        &card_id,
+        &payload.column_id,
+        new_pos,
+        editor_sub(&claims),
+    )
+    .await?
+    .into_api();
+    let snapshot_after = snapshot(&api_card)?;
 
-    match card {
-        Some(c) => {
-            let api_card = c.into_api();
-            let snapshot_after = serde_json::to_value(api_card.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            audit::record_and_broadcast(
-                &state.db,
-                &state.events,
-                audit::AuditRecord {
-                    claims: &claims,
-                    board_id: board_id.clone(),
-                    entity_type: "card",
-                    entity_id: &api_card.id,
-                    action: "move",
-                    snapshot_before: Some(snapshot_before),
-                    snapshot_after: Some(snapshot_after),
-                    restored_from: None,
-                    batch_group: None,
-                    audit_edit_session: None,
-                },
-            )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    audit_and_emit(
+        &state,
+        CardMutation {
+            claims: &claims,
+            board_id,
+            card_id: &api_card.id,
+            action: "move",
+            snapshot_before,
+            snapshot_after,
+            audit_edit_session: None,
+            event: BoardEvent::CardMoved {
+                card: api_card.clone(),
+                from_column_id,
+            },
+        },
+    )
+    .await?;
 
-            let _ = state.events.send(BroadcastEvent {
-                board_id,
-                event: BoardEvent::CardMoved {
-                    card: api_card.clone(),
-                    from_column_id,
-                },
-            });
-            Ok(Json(api_card))
-        }
-        None => Err(StatusCode::NOT_FOUND),
-    }
+    Ok(Json(api_card))
 }
 
 /// `PUT /api/columns/:id/cards/reorder`
