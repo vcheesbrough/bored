@@ -29,6 +29,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # One TLS stack across the workspace: rustls, no system OpenSSL. `backend`
 # already required this; `mcp` inherits it rather than pulling reqwest's
 # default native-tls backend for the same HTTPS calls to the same host.
+# `default-features = false` also leaves reqwest's `http2` off, so these clients
+# speak HTTP/1.1 — card #363 decides whether that should change.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
@@ -41,8 +43,13 @@ base64 = "0.22"
 # `clippy::pedantic`, `unsafe_code = "forbid"`) is a separate decision; the
 # candidates are recorded on card #350.
 #
-# `priority = -1` keeps `all` below any specific lint added later: without it,
-# Cargo refuses to order a group against an individual lint and the first
-# specific override would have to rewrite this table.
+# The negative priorities keep the groups below any specific lint added later:
+# without them, Cargo refuses to order a group against an individual lint and
+# the first specific override would have to rewrite this table.
 [workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
+all = { level = "warn", priority = -2 }
+# `clippy::correctness` is deny-by-default and sits *inside* `all`, so the entry
+# above would quietly downgrade it to a warning. Re-stating it at a higher
+# priority restores the default; the two lines together are exactly clippy's own
+# levels, which is what makes this table a no-op today.
+correctness = { level = "deny", priority = -1 }
