@@ -103,7 +103,11 @@ pub fn TagEditor(
             on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
         >
             <For
-                each=move || tags.get()
+                // `try_get`: `tags` is derived from the owning `CardItem`'s card
+                // signal and is disposed with it, so removing a tag that unmounts
+                // the card re-runs this closure against a dead signal. An empty
+                // list renders nothing, which is right for a card on its way out.
+                each=move || tags.try_get().unwrap_or_default()
                 key=|tag: &String| tag.clone()
                 children=move |tag: String| {
                     let label = tag.clone();

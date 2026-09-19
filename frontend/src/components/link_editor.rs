@@ -147,9 +147,11 @@ pub fn LinkEditor(
         >
             <LinkGroup side=Side::Before card_id=card_id links=predecessors error=error />
             <LinkGroup side=Side::After card_id=card_id links=successors error=error />
-            <Show when=move || error.get().is_some() fallback=|| ()>
+            // `try_get`: the editor is disposed with the card it belongs to,
+            // including when that card is deleted from under it.
+            <Show when=move || error.try_get().flatten().is_some() fallback=|| ()>
                 <p class="link-editor-error" role="alert">
-                    {move || error.get().unwrap_or_default()}
+                    {move || error.try_get().flatten().unwrap_or_default()}
                 </p>
             </Show>
         </div>
@@ -177,7 +179,12 @@ fn LinkGroup(
                 {label}
             </span>
             <For
-                each=move || links.get()
+                // `try_get`: `links` is a `Signal::derive` owned by the
+                // `LinkEditor` above, so it is disposed when the expanded card
+                // unmounts — the derive closure being `try_get`-safe does not
+                // protect this read of the derived signal itself. No links is
+                // the right thing to draw for a card that is going away.
+                each=move || links.try_get().unwrap_or_default()
                 // Keyed on the reason as well as the id: a chip is built from a
                 // plain value, so a reason change has to remount it to show.
                 key=|link: &shared::CardLink| (link.id.clone(), link.reason.clone())
@@ -336,9 +343,15 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
             // `.link-chip-card` still read just `#N Title`. Mapped from a
             // single read instead of a `Show` wrapping a second one: `None`
             // renders nothing either way, and one read means one board walk.
+            // `try_get` from here down, as everywhere a component reads its own
+            // signals: deleting the card this chip belongs to disposes them
+            // while these closures are still queued to run (the delete prunes
+            // the board's link index, which is what notifies them). A disposed
+            // chip renders nothing useful either way — it is on its way out.
             {move || {
                 column
-                    .get()
+                    .try_get()
+                    .flatten()
                     .map(|name| view! { <span class="link-chip-column">{name}</span> })
             }}
             <button
@@ -346,13 +359,13 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                 class="link-chip-card"
                 title=format!("Open card #{other_number}")
                 on:click=open_card
-            >{move || label.get()}</button>
-            <Show when=move || !editing_reason.get() fallback=|| ()>
+            >{move || label.try_get().unwrap_or_default()}</button>
+            <Show when=move || !editing_reason.try_get().unwrap_or(false) fallback=|| ()>
                 {reason_for_display.clone().map(|r| view! {
                     <span class="link-chip-reason">{r}</span>
                 })}
             </Show>
-            <Show when=move || editing_reason.get() fallback=|| ()>
+            <Show when=move || editing_reason.try_get().unwrap_or(false) fallback=|| ()>
                 <input
                     node_ref=reason_input_ref
                     class="link-reason-input"
@@ -360,7 +373,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                     placeholder="reason"
                     aria-label=format!("Reason for link to #{other_number}")
                     maxlength=shared::links::MAX_REASON_CHARS.to_string()
-                    prop:value=move || draft.get()
+                    prop:value=move || draft.try_get().unwrap_or_default()
                     on:input=move |ev| draft.set(event_target_value(&ev))
                     on:blur=move |_| save_reason()
                     on:keydown=move |ev: web_sys::KeyboardEvent| {
@@ -406,7 +419,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                 class="link-chip-btn link-chip-remove"
                 aria-label=format!("Remove link to #{other_number}")
                 title="Remove link"
-                prop:disabled=move || removing.get()
+                prop:disabled=move || removing.try_get().unwrap_or(false)
                 on:mousedown=move |e: leptos::ev::MouseEvent| {
                     e.prevent_default();
                     e.stop_propagation();
@@ -698,8 +711,15 @@ pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
     let Some(links) = use_context::<BoardLinkIndex>() else {
         return ().into_any();
     };
-    // `try_get`: the collapsed card can be asked to render once more after the
-    // search filter disposed its signals (see `CardItem`).
+    // `try_get` throughout, in the derives *and* at every read of them: the
+    // collapsed card can be asked to render once more after its signals were
+    // disposed (see the long note in `CardItem`), and a `Signal::derive` is
+    // disposed with the component just as a plain signal is.
+    //
+    // Deleting a card makes this certain rather than merely possible: the delete
+    // prunes the board's link index, and that write notifies the badges of the
+    // very card being unmounted. Before these reads were hardened the resulting
+    // panic wedged the tab, so the *next* click — on any card — did nothing.
     let predecessors = Signal::derive(move || {
         card_id
             .try_get()
@@ -714,14 +734,16 @@ pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
             .map(|id| links.successors_of(&id))
             .unwrap_or_default()
     });
-    let has_any =
-        Signal::derive(move || !predecessors.get().is_empty() || !successors.get().is_empty());
+    let has_any = Signal::derive(move || {
+        !predecessors.try_get().unwrap_or_default().is_empty()
+            || !successors.try_get().unwrap_or_default().is_empty()
+    });
 
     view! {
-        <Show when=move || has_any.get() fallback=|| ()>
+        <Show when=move || has_any.try_get().unwrap_or(false) fallback=|| ()>
             <span class="card-link-badges">
                 <For
-                    each=move || predecessors.get()
+                    each=move || predecessors.try_get().unwrap_or_default()
                     key=|link: &shared::CardLink| link.id.clone()
                     children=move |link: shared::CardLink| {
                         let number = link.predecessor_number;
@@ -735,7 +757,7 @@ pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
                     }
                 />
                 <For
-                    each=move || successors.get()
+                    each=move || successors.try_get().unwrap_or_default()
                     key=|link: &shared::CardLink| link.id.clone()
                     children=move |link: shared::CardLink| {
                         let number = link.successor_number;

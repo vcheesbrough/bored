@@ -159,6 +159,30 @@ pub fn CardItem(
     // search has just filtered out can be asked to re-render once more after
     // its own signals were disposed.  Reading a disposed signal traps the WASM
     // module, and the rendered output is thrown away anyway.
+    //
+    // The same care is needed **where these signals are read**, not only inside
+    // the closures that compute them. `Signal::derive` (and `Memo`) store the
+    // derived value in the reactive arena too, so it is disposed along with
+    // everything else this component owns; a `number.get()` in a view closure
+    // then traps even though the closure above it is `try_get`-safe. That is
+    // the mistake cards #304 and #313 were: this comment, and the matching ones
+    // in `TagEditor` and `LinkBadges`, each already claimed `try_get` safety
+    // while applying it only inside the derives.
+    //
+    // **The rule these conversions actually follow** is narrower than "every
+    // read in this file", so do not read it as a guarantee: it is *the reads
+    // reachable from the disposal paths reproduced for #304 and #313* — an
+    // expanded card unmounted by the search filter, and a card deleted from the
+    // board. Those were found empirically, by re-running the reproductions
+    // against a debug build (release strips `defined_at`) until they came back
+    // clean, because each panic masks the next one behind it.
+    //
+    // Deliberately **not** converted, because no reproduction reached them:
+    // `card_state` in `is_collapsed`/`is_expanded` and the `class:` closures,
+    // `context_menu_position`, `show_move_submenu`, `move_submenu_opens_left`,
+    // and `card` in the move-submenu — plus `LinkPicker`'s signals in
+    // `link_editor.rs`. If a new trap appears, that is where to look first, and
+    // the way to find it is the debug-build loop above, not inspection.
     let number = Signal::derive(move || card.try_get().map_or(0, |c| c.number));
     let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
 
@@ -231,8 +255,16 @@ pub fn CardItem(
     let do_save = move |card_id: String, current_body: String| {
         save_status.set(SaveStatus::Saving);
         wasm_bindgen_futures::spawn_local(async move {
-            let audit_edit_session = (card_state.get_untracked() == CardState::Editing)
-                .then(|| edit_audit_session.get_untracked())
+            // `try_get_untracked`, because this future outlives the component in
+            // exactly the case that matters: the write that triggered the save
+            // can also be the write that unmounts the card. Trapping here was
+            // the "it doesn't work" half of card #304 — the panic fired inside
+            // the `wasm-bindgen-futures` task queue, so the PUT below never ran
+            // *and* the executor was wedged for the rest of the tab's life.
+            // Falling back to `None` only forfeits the audit-session grouping,
+            // which costs a separate history row rather than a lost edit.
+            let audit_edit_session = (card_state.try_get_untracked() == Some(CardState::Editing))
+                .then(|| edit_audit_session.try_get_untracked().flatten())
                 .flatten();
             let req = shared::UpdateCardRequest {
                 body: Some(current_body.clone()),
@@ -262,34 +294,55 @@ pub fn CardItem(
         let card_id = card.get_untracked().id.clone();
         wasm_bindgen_futures::spawn_local(async move {
             TimeoutFuture::new(500).await;
-            if card_state.get_untracked() == CardState::Editing && body.get_untracked() == snapshot
+            // `try_get_untracked`, for the same reason `do_save` below uses it:
+            // this future sleeps 500ms and the card can be disposed in the
+            // meantime. The expanded-card pin makes that ordinary rather than
+            // exotic — a pinned card is unmounted when *another* card claims
+            // the board's expanded lock, which is one click away while typing.
+            // `None` means the card is gone, so there is nothing to save.
+            if card_state.try_get_untracked() == Some(CardState::Editing)
+                && body.try_get_untracked().as_deref() == Some(snapshot.as_str())
             {
-                do_save(card_id, body.get_untracked());
+                do_save(card_id, snapshot);
             }
         });
     };
 
     // ── Collapse helpers ──────────────────────────────────────────────────
 
+    // Both flush helpers read through `try_get_untracked` and write through
+    // `try_set`. `collapse_silent` is called from an Effect on
+    // `expanded_card_id`, and since the expanded card is pinned into the
+    // filtered list that same lock write is what unmounts it — so the effect
+    // and the disposal are in one batch, and this can run either side of it.
+    // `None` everywhere means the card is already gone: there is no body left
+    // to flush and no state left to set.
+
     // Flush any unsaved edit and go to Expanded (keeps the card open).
     let exit_editing = move || {
-        let current = body.get_untracked();
-        let last_saved = saved_body.get_untracked();
-        if current != last_saved {
-            do_save(card.get_untracked().id.clone(), current);
+        if let (Some(current), Some(last_saved), Some(this_card)) = (
+            body.try_get_untracked(),
+            saved_body.try_get_untracked(),
+            card.try_get_untracked(),
+        ) && current != last_saved
+        {
+            do_save(this_card.id.clone(), current);
         }
-        card_state.set(CardState::Expanded);
+        let _ = card_state.try_set(CardState::Expanded);
     };
 
     // Collapse without touching `expanded_card_id` — used when the reactive
     // Effect below kicks in because another card claimed the expanded slot.
     let collapse_silent = move || {
-        let current = body.get_untracked();
-        let last_saved = saved_body.get_untracked();
-        if current != last_saved {
-            do_save(card.get_untracked().id.clone(), current);
+        if let (Some(current), Some(last_saved), Some(this_card)) = (
+            body.try_get_untracked(),
+            saved_body.try_get_untracked(),
+            card.try_get_untracked(),
+        ) && current != last_saved
+        {
+            do_save(this_card.id.clone(), current);
         }
-        card_state.set(CardState::Collapsed);
+        let _ = card_state.try_set(CardState::Collapsed);
     };
 
     // Full collapse: also clears the board-level expanded-card lock.
@@ -299,10 +352,18 @@ pub fn CardItem(
     };
 
     // When the board-level signal points to a different card, collapse this one.
+    //
+    // This effect is the one the note above `exit_editing` is about: it is
+    // subscribed to the very signal whose change unmounts a pinned card, so its
+    // own reads have to tolerate having been disposed first.
     Effect::new(move |_| {
         let active = expanded_card_id.get();
-        let my_id = card.get_untracked().id.clone();
-        if active.as_deref() != Some(&my_id) && card_state.get_untracked() != CardState::Collapsed {
+        let (Some(this_card), Some(state)) =
+            (card.try_get_untracked(), card_state.try_get_untracked())
+        else {
+            return;
+        };
+        if active.as_deref() != Some(this_card.id.as_str()) && state != CardState::Collapsed {
             collapse_silent();
         }
     });
@@ -487,7 +548,7 @@ pub fn CardItem(
                 <span
                     class="card-number"
                     class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
-                >{move || format!("#{}", number.get())}</span>
+                >{move || format!("#{}", number.try_get().unwrap_or_default())}</span>
                 // One metadata line: link counts first, then the tag chips.
                 // Each child renders nothing when it has nothing to say, and an
                 // empty flex row has no height, so a plain card gets no gap.
@@ -508,17 +569,19 @@ pub fn CardItem(
                 >
                     // Save-state icon sits left of the card number — subtle, not a distraction.
                     <span class="card-save-icon">
-                        {move || match save_status.get() {
-                            SaveStatus::Idle    => "",
-                            SaveStatus::Saving  => "·",
-                            SaveStatus::Saved   => "💾",
-                            SaveStatus::Failed  => "!",
+                        // A disposed card has no status worth drawing, so the
+                        // `None` arm renders the same blank as `Idle`.
+                        {move || match save_status.try_get() {
+                            Some(SaveStatus::Saving)  => "·",
+                            Some(SaveStatus::Saved)   => "💾",
+                            Some(SaveStatus::Failed)  => "!",
+                            Some(SaveStatus::Idle) | None => "",
                         }}
                     </span>
                     <span
                         class="card-number"
                         class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
-                    >{move || format!("#{}", number.get())}</span>
+                    >{move || format!("#{}", number.try_get().unwrap_or_default())}</span>
                     <Show when=move || history_drawer.is_some() fallback=|| ()>
                         <button
                             class="card-toolbar-btn"
@@ -569,7 +632,12 @@ pub fn CardItem(
                         }
                     >
                         <Show
-                            when=move || !body.get().is_empty()
+                            // `try_get`: `body` is this component's own signal,
+                            // and an edit that unmounts the card re-runs this
+                            // closure after disposal. `unwrap_or_default` shows
+                            // the placeholder branch, which is never seen — the
+                            // card is being removed from the DOM regardless.
+                            when=move || !body.try_get().unwrap_or_default().is_empty()
                             fallback=|| view! {
                                 <p class="card-body-placeholder">"Click to edit…"</p>
                             }
@@ -582,7 +650,7 @@ pub fn CardItem(
                         node_ref=textarea_ref
                         class="card-body-textarea"
                         class:card-body-hidden=is_expanded
-                        prop:value=move || body.get()
+                        prop:value=move || body.try_get().unwrap_or_default()
                         on:input=on_body_input
                         on:blur=move |_| exit_editing()
                         on:keydown=move |ev: web_sys::KeyboardEvent| {
