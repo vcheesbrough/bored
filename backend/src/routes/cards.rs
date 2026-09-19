@@ -111,10 +111,8 @@ async fn persist_move(
         .bind(("col_id", col_id))
         .bind(("position", position))
         .bind(("editor", editor))
-        .await
-        ?
-        .take(0)
-        ?;
+        .await?
+        .take(0)?;
     card.ok_or(ApiError::NotFound)
 }
 
@@ -677,8 +675,7 @@ pub async fn reorder_cards(
                 continue;
             }
             let card_id = card.id.id.to_raw();
-            let snapshot_before = serde_json::to_value((*card).clone().into_api())
-                ?;
+            let snapshot_before = serde_json::to_value((*card).clone().into_api())?;
 
             // RETURN AFTER in the same statement: never write a position without a
             // confirmed row to audit, and never audit a write that did not land.
@@ -694,10 +691,8 @@ pub async fn reorder_cards(
                 .bind(("pos", position))
                 .bind(("col_id", col_id.clone()))
                 .bind(("editor", editor.clone()))
-                .await
-                ?
-                .take(0)
-                ?;
+                .await?
+                .take(0)?;
             let mut it = updated.into_iter();
             let Some(card_after) = it.next() else {
                 // Zero rows means the card left this column between the SELECT
@@ -714,8 +709,7 @@ pub async fn reorder_cards(
             }
 
             let api_card = card_after.into_api();
-            let snapshot_after = serde_json::to_value(api_card.clone())
-                ?;
+            let snapshot_after = serde_json::to_value(api_card.clone())?;
 
             audit::record_and_broadcast(
                 &state.db,
@@ -733,8 +727,7 @@ pub async fn reorder_cards(
                     audit_edit_session: None,
                 },
             )
-            .await
-            ?;
+            .await?;
 
             moved.push(api_card);
         }

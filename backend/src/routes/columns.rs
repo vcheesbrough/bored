@@ -56,10 +56,8 @@ pub async fn create_column(
         .bind(("name", payload.name))
         .bind(("position", payload.position))
         .bind(("editor", editor))
-        .await
-        ?
-        .take(0)
-        ?;
+        .await?
+        .take(0)?;
 
     match column {
         Some(c) => {

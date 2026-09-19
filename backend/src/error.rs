@@ -30,10 +30,11 @@ use axum::{
 /// handler and be owned by the response future.
 type Source = Box<dyn Error + Send + Sync + 'static>;
 
-/// The text SurrealDB includes when the boards' unique name index rejects a
-/// write. The driver offers nothing structured to match on — no error code, no
-/// index field — so this is a substring test on the message. Keeping it here
-/// means there is exactly one such test in the crate instead of one per site.
+/// The name of the boards' unique index, as SurrealDB writes it into the
+/// rejection message. The driver offers nothing structured to match on — no
+/// error code, no index field — so this is a substring test on the message.
+/// Keeping it here means there is exactly one such test in the crate instead
+/// of one per site.
 const BOARD_NAME_UNIQUE: &str = "board_name_unique";
 
 /// As above, for the unique `(predecessor, successor)` index on `card_links`.
@@ -94,17 +95,30 @@ impl ApiError {
 /// means a unique-index violation reported from anywhere gets the same answer
 /// the dedicated call site gave. Only the boards and card_links tables have
 /// unique indexes, so in practice the reachable behaviour is unchanged.
+///
+/// The match is on the index name *in its own position* in the driver's
+/// message — ``Database index `x` already contains 'y'`` — never on the bare
+/// name. The same message quotes the offending value, and that value is user
+/// text: a card body or link reason containing `card_links_pair` would
+/// otherwise be able to turn a genuine server fault into a 409, which is a
+/// status this module deliberately does not log.
 fn classify(error: surrealdb::Error) -> ApiError {
     // `to_string()` borrows the error, so it can still be moved afterwards.
     let text = error.to_string();
 
-    if text.contains(BOARD_NAME_UNIQUE) {
+    if text.contains(&index_violation(BOARD_NAME_UNIQUE)) {
         ApiError::CONFLICT
-    } else if text.contains(CARD_LINKS_PAIR) {
+    } else if text.contains(&index_violation(CARD_LINKS_PAIR)) {
         ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE))
     } else {
         ApiError::internal(error)
     }
+}
+
+/// The opening of SurrealDB's unique-index rejection for one index. Everything
+/// after this prefix in the driver's message is the value that was rejected.
+fn index_violation(index: &str) -> String {
+    format!("Database index `{index}`")
 }
 
 /// Lets `?` turn a database error into an `ApiError` with no closure at the

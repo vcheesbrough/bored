@@ -107,6 +107,32 @@ fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
     (value, logs)
 }
 
+/// As `capture_logs`, for work that has to be awaited — a whole request, say.
+///
+/// `set_default` returns a guard rather than taking a closure, so the
+/// subscriber stays installed across `.await`. `#[tokio::test]` runs on a
+/// current-thread runtime, so the request future stays on this thread and
+/// inside this thread's subscriber.
+///
+/// The default `fmt()` filter is INFO, which is deliberate: it is the level
+/// deployments run at, so anything this test sees is something production
+/// would see too.
+async fn capture_logs_async<T>(f: impl std::future::Future<Output = T>) -> (T, String) {
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufferWriter(Arc::clone(&buffer)))
+        .with_ansi(false)
+        .finish();
+
+    let guard = tracing::subscriber::set_default(subscriber);
+    let value = f.await;
+    drop(guard);
+
+    let logs = String::from_utf8(buffer.lock().expect("log buffer poisoned").clone())
+        .expect("log output is UTF-8");
+    (value, logs)
+}
+
 #[tokio::test]
 async fn a_duplicate_board_name_is_a_bodiless_conflict() {
     let db = db::connect_mem().await.expect("mem db");
@@ -245,4 +271,98 @@ async fn restoring_a_board_whose_name_was_taken_is_a_conflict() {
         .post(&format!("/api/audit/{}/restore", delete_row.id.id.to_raw()))
         .await
         .assert_status(StatusCode::CONFLICT);
+}
+
+/// The log line an operator actually reads must say *which* request failed.
+///
+/// This drives a genuine 500 through the real router, with a subscriber
+/// filtered at INFO — the level deployments run at — so it fails if the
+/// tower-http span is ever made below that level again. A span opened below
+/// the filter is never created, and the error event inside it would then carry
+/// no method or path at all.
+#[tokio::test]
+async fn a_failing_request_logs_its_method_and_path() {
+    let db = db::connect_mem().await.expect("mem db");
+    let state = AppState::new(db.clone());
+    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
+    let (_board, column) = setup_board_and_column(&server).await;
+    server
+        .post(&format!("/api/columns/{}/cards", column.id))
+        .json(&shared::CreateCardRequest {
+            body: "a card".to_string(),
+            ..Default::default()
+        })
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    // Make the stored row impossible to read back: drop the field definition
+    // that guarantees `body`, then clear the value. Listing the column's cards
+    // now fails inside the driver, which is as close to a production database
+    // fault as a test can get.
+    db.query("REMOVE FIELD body ON TABLE cards")
+        .await
+        .expect("field removed")
+        .check()
+        .expect("no statement error");
+    db.query("UPDATE cards SET body = NONE")
+        .await
+        .expect("body cleared")
+        .check()
+        .expect("no statement error");
+
+    let path = format!("/api/columns/{}/cards", column.id);
+    // `TestRequest` is `IntoFuture`, not `Future`, so it is awaited inside an
+    // async block rather than handed over directly.
+    let (response, logs) = capture_logs_async(async { server.get(&path).await }).await;
+
+    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        logs.contains("request failed"),
+        "the failure must be logged, got: {logs}"
+    );
+    assert!(
+        logs.contains(&path),
+        "the log line must name the request path {path}, got: {logs}"
+    );
+    assert!(
+        logs.contains("GET"),
+        "the log line must name the method, got: {logs}"
+    );
+}
+
+/// User text must not be able to impersonate an index violation.
+///
+/// SurrealDB quotes the offending value back in several of its messages, and
+/// those values are things a card body, tag or link reason can hold. A bare
+/// `contains("card_links_pair")` would read the value below as a duplicate
+/// link and answer 409 — a status this crate deliberately does not log, so the
+/// server fault would vanish. Matching the index name in its own position
+/// keeps that unreachable.
+#[tokio::test]
+async fn user_text_cannot_impersonate_an_index_violation() {
+    let db = db::connect_mem().await.expect("mem db");
+
+    let error = db
+        .query(
+            "CREATE type::thing('cards', 'c1') SET \
+             column = type::thing('columns', 'col-1'), \
+             body = 'b', \
+             position = 'card_links_pair'",
+        )
+        .await
+        .expect("query dispatched")
+        .check()
+        .expect_err("position is an int, not a string");
+
+    // The premise of the test: the index name really is in the message, as a
+    // value. Without this the assertion below would pass for the wrong reason.
+    assert!(
+        error.to_string().contains("card_links_pair"),
+        "expected the driver to quote the value back, got: {error}"
+    );
+
+    assert!(
+        matches!(ApiError::from(error), ApiError::Internal(_)),
+        "a value that merely spells an index name is still a server fault"
+    );
 }
