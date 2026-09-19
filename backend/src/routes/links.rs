@@ -19,39 +19,25 @@ use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardLink, DbColumn};
 use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
 
-/// Status plus a human-readable reason. Axum renders the tuple as a plain-text
-/// response with that status; an empty string is a bodiless response.
-type ApiError = (StatusCode, &'static str);
-
-/// Any database or serialisation failure: the client did nothing wrong, so no
-/// message is offered. The concrete error is discarded the same way the other
-/// route modules discard theirs.
-fn internal<E>(_: E) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, "")
-}
-
-const NOT_FOUND: ApiError = (StatusCode::NOT_FOUND, "");
-const SELF_LINK: ApiError = (
-    StatusCode::UNPROCESSABLE_ENTITY,
-    "a card cannot be linked to itself",
-);
-const CROSS_BOARD: ApiError = (
-    StatusCode::UNPROCESSABLE_ENTITY,
-    "linked cards must be on the same board",
-);
-const REASON_TOO_LONG: ApiError = (
-    StatusCode::UNPROCESSABLE_ENTITY,
-    "reason is longer than 200 characters",
-);
-const CYCLE: ApiError = (
-    StatusCode::UNPROCESSABLE_ENTITY,
-    "linking these cards would create a loop",
-);
-const ALREADY_LINKED: ApiError = (StatusCode::CONFLICT, "these cards are already linked");
+// The four distinct 422s and the 409 this module can return. Each carries its
+// message because, unlike the other route modules, the link editor has to tell
+// the user *which* rule they broke. `ApiError::Unprocessable(Some(..))` renders
+// the same plain-text response the `(StatusCode, &str)` tuples used to.
+const SELF_LINK: ApiError = ApiError::Unprocessable(Some("a card cannot be linked to itself"));
+const CROSS_BOARD: ApiError =
+    ApiError::Unprocessable(Some("linked cards must be on the same board"));
+const REASON_TOO_LONG: ApiError =
+    ApiError::Unprocessable(Some("reason is longer than 200 characters"));
+const CYCLE: ApiError = ApiError::Unprocessable(Some("linking these cards would create a loop"));
+/// The message is shared with `error::classify`, which produces this same
+/// response when the unique index — rather than the check below — catches the
+/// duplicate.
+const ALREADY_LINKED: ApiError = ApiError::Conflict(Some(crate::error::ALREADY_LINKED_MESSAGE));
 
 /// Field list every link read uses. The card numbers are not stored on the
 /// link row; they are pulled through the record links at read time so the API
@@ -146,14 +132,12 @@ fn normalize_reason(raw: Option<&str>) -> Result<Option<String>, ApiError> {
 pub async fn list_board_links(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<Json<Vec<shared::CardLink>>, StatusCode> {
+) -> Result<Json<Vec<shared::CardLink>>, ApiError> {
     let board = match find_board_by_slug(&state.db, &slug).await? {
         Some(b) => b,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
-    let links = board_links(&state.db, &board.id.id.to_raw())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let links = board_links(&state.db, &board.id.id.to_raw()).await?;
     Ok(Json(links.into_iter().map(DbCardLink::into_api).collect()))
 }
 
@@ -170,12 +154,8 @@ pub async fn create_card_link(
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardLinkRequest>,
 ) -> Result<(StatusCode, Json<shared::CardLink>), ApiError> {
-    let card: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .await
-        .map_err(internal)?;
-    let card = card.ok_or(NOT_FOUND)?;
+    let card: Option<DbCard> = state.db.select(("cards", &card_id)).await?;
+    let card = card.ok_or(ApiError::NotFound)?;
 
     // Checked before the other card is even loaded: a self-link is not a
     // missing card, and 404 would send the client looking for one.
@@ -183,21 +163,15 @@ pub async fn create_card_link(
         return Err(SELF_LINK);
     }
 
-    let other: Option<DbCard> = state
-        .db
-        .select(("cards", &payload.other_card_id))
-        .await
-        .map_err(internal)?;
-    let other = other.ok_or(NOT_FOUND)?;
+    let other: Option<DbCard> = state.db.select(("cards", &payload.other_card_id)).await?;
+    let other = other.ok_or(ApiError::NotFound)?;
 
     let board_id = board_of_card(&state.db, &card)
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+        .await?
+        .ok_or(ApiError::NotFound)?;
     let other_board_id = board_of_card(&state.db, &other)
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+        .await?
+        .ok_or(ApiError::NotFound)?;
     if board_id != other_board_id {
         return Err(CROSS_BOARD);
     }
@@ -216,7 +190,7 @@ pub async fn create_card_link(
     let created_id = {
         let _guard = state.link_lock.lock().await;
 
-        let existing = board_links(&state.db, &board_id).await.map_err(internal)?;
+        let existing = board_links(&state.db, &board_id).await?;
         let pairs: Vec<(String, String)> = existing
             .iter()
             .map(|l| (l.predecessor.id.to_raw(), l.successor.id.to_raw()))
@@ -240,18 +214,12 @@ pub async fn create_card_link(
         // cascade deletes do not hold `link_lock`. Re-check right before the
         // write so the CREATE below never targets a card that is already
         // gone (an orphan link, invisible or showing as `#0` on the board).
-        let predecessor_still_exists: Option<DbCard> = state
-            .db
-            .select(("cards", predecessor_id.as_str()))
-            .await
-            .map_err(internal)?;
-        let successor_still_exists: Option<DbCard> = state
-            .db
-            .select(("cards", successor_id.as_str()))
-            .await
-            .map_err(internal)?;
+        let predecessor_still_exists: Option<DbCard> =
+            state.db.select(("cards", predecessor_id.as_str())).await?;
+        let successor_still_exists: Option<DbCard> =
+            state.db.select(("cards", successor_id.as_str())).await?;
         if predecessor_still_exists.is_none() || successor_still_exists.is_none() {
-            return Err(NOT_FOUND);
+            return Err(ApiError::NotFound);
         }
 
         let id = ulid::Ulid::new().to_string().to_lowercase();
@@ -269,31 +237,24 @@ pub async fn create_card_link(
             .bind(("succ", successor_id))
             .bind(("reason", reason))
             .bind(("editor", editor_sub(&claims)))
-            .await
-            .map_err(internal)?
+            .await?
             // Under the lock the duplicate check above should make the unique
             // index unreachable; if it fires anyway, the right answer is still
-            // "already linked", not a server fault.
-            .check()
-            .map_err(|e| {
-                if e.to_string().contains("card_links_pair") {
-                    ALREADY_LINKED
-                } else {
-                    internal(e)
-                }
-            })?;
+            // "already linked", not a server fault — which is what
+            // `error::classify` returns for a `card_links_pair` violation, so
+            // `?` alone is enough here.
+            .check()?;
         id
     };
 
     // Re-read rather than use the CREATE's return: the projected card numbers
     // only come from a SELECT.
     let link = load_link(&state.db, &created_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| internal("link vanished after create"))?
+        .await?
+        .ok_or_else(|| ApiError::internal("link vanished after create"))?
         .into_api();
 
-    let snapshot_after = serde_json::to_value(&link).map_err(internal)?;
+    let snapshot_after = serde_json::to_value(&link)?;
     audit::record_and_broadcast(
         &state.db,
         &state.events,
@@ -310,8 +271,7 @@ pub async fn create_card_link(
             audit_edit_session: None,
         },
     )
-    .await
-    .map_err(internal)?;
+    .await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id,
@@ -331,9 +291,8 @@ pub async fn update_card_link(
     Json(payload): Json<shared::UpdateCardLinkRequest>,
 ) -> Result<Json<shared::CardLink>, ApiError> {
     let existing = load_link(&state.db, &link_id)
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     let reason = normalize_reason(payload.reason.as_deref())?;
     if reason == existing.reason {
@@ -341,10 +300,9 @@ pub async fn update_card_link(
     }
 
     let board_id = board_of_link(&state.db, &existing)
-        .await
-        .map_err(internal)?
+        .await?
         .unwrap_or_default();
-    let snapshot_before = serde_json::to_value(existing.into_api()).map_err(internal)?;
+    let snapshot_before = serde_json::to_value(existing.into_api())?;
 
     state
         .db
@@ -355,18 +313,15 @@ pub async fn update_card_link(
         .bind(("id", link_id.clone()))
         .bind(("reason", reason))
         .bind(("editor", editor_sub(&claims)))
-        .await
-        .map_err(internal)?
-        .check()
-        .map_err(internal)?;
+        .await?
+        .check()?;
 
     let link = load_link(&state.db, &link_id)
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?
+        .await?
+        .ok_or(ApiError::NotFound)?
         .into_api();
 
-    let snapshot_after = serde_json::to_value(&link).map_err(internal)?;
+    let snapshot_after = serde_json::to_value(&link)?;
     audit::record_and_broadcast(
         &state.db,
         &state.events,
@@ -383,8 +338,7 @@ pub async fn update_card_link(
             audit_edit_session: None,
         },
     )
-    .await
-    .map_err(internal)?;
+    .await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id,
@@ -400,17 +354,13 @@ pub async fn delete_card_link(
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
     let existing = load_link(&state.db, &link_id)
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+        .await?
+        .ok_or(ApiError::NotFound)?;
     let board_id = board_of_link(&state.db, &existing)
-        .await
-        .map_err(internal)?
+        .await?
         .unwrap_or_default();
 
-    delete_one_link(&state, &claims, &board_id, existing, None)
-        .await
-        .map_err(|status| (status, ""))?;
+    delete_one_link(&state, &claims, &board_id, existing, None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -423,10 +373,9 @@ async fn delete_one_link(
     board_id: &str,
     link: DbCardLink,
     batch_group: Option<&str>,
-) -> Result<(), StatusCode> {
+) -> Result<(), ApiError> {
     let link_id = link.id.id.to_raw();
-    let snapshot_before =
-        serde_json::to_value(link.into_api()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(link.into_api())?;
     audit::record_and_broadcast(
         &state.db,
         &state.events,
@@ -443,14 +392,9 @@ async fn delete_one_link(
             audit_edit_session: None,
         },
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
 
-    let _: Option<DbCardLink> = state
-        .db
-        .delete(("card_links", &link_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _: Option<DbCardLink> = state.db.delete(("card_links", &link_id)).await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id: board_id.to_string(),
@@ -472,10 +416,8 @@ pub(crate) async fn cascade_delete_card_links(
     board_id: &str,
     card_id: &str,
     batch_group: Option<&str>,
-) -> Result<(), StatusCode> {
-    let links = links_touching_card(&state.db, card_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<(), ApiError> {
+    let links = links_touching_card(&state.db, card_id).await?;
     for link in links {
         delete_one_link(state, claims, board_id, link, batch_group).await?;
     }

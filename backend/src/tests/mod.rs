@@ -9,6 +9,7 @@ mod audit_log;
 mod boards;
 mod cards;
 mod columns;
+mod errors;
 mod links;
 mod reorder;
 mod router;

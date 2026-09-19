@@ -16,6 +16,7 @@ use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::{AppState, editor_sub};
@@ -29,29 +30,23 @@ use update::{CardUpdate, CardWrite};
 /// Limit violations are a client mistake (a tag longer than the cap, or an
 /// absurd number of them), not a server fault, so they surface as 422 rather
 /// than being silently trimmed into something the user did not ask for.
-fn normalize_tags(raw: &[String]) -> Result<Vec<String>, StatusCode> {
-    shared::tags::normalize(raw).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)
+fn normalize_tags(raw: &[String]) -> Result<Vec<String>, ApiError> {
+    shared::tags::normalize(raw).map_err(|_| ApiError::UNPROCESSABLE)
 }
 
 /// Load a card, mapping "no such card" onto 404 and a database fault onto 500.
-async fn load_card(db: &Surreal<Db>, card_id: &str) -> Result<DbCard, StatusCode> {
-    let card: Option<DbCard> = db
-        .select(("cards", card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    card.ok_or(StatusCode::NOT_FOUND)
+async fn load_card(db: &Surreal<Db>, card_id: &str) -> Result<DbCard, ApiError> {
+    let card: Option<DbCard> = db.select(("cards", card_id)).await?;
+    card.ok_or(ApiError::NotFound)
 }
 
 /// Load a column the request named, mapping "no such column" onto 404.
 ///
 /// Use this for a column the caller asked for; use [`find_column`] for one the
 /// server looks up on its own behalf.
-async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, StatusCode> {
-    let column: Option<DbColumn> = db
-        .select(("columns", col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    column.ok_or(StatusCode::NOT_FOUND)
+async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, ApiError> {
+    let column: Option<DbColumn> = db.select(("columns", col_id)).await?;
+    column.ok_or(ApiError::NotFound)
 }
 
 /// Look up a column that may legitimately be gone.
@@ -60,16 +55,14 @@ async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, StatusC
 /// remove the column while the card row is still around. That is not the
 /// caller's fault, so it is `Ok(None)` rather than a 404 — the callers fall
 /// back to an empty board id, which no connected client is scoped to.
-async fn find_column(db: &Surreal<Db>, col_id: &str) -> Result<Option<DbColumn>, StatusCode> {
-    db.select(("columns", col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn find_column(db: &Surreal<Db>, col_id: &str) -> Result<Option<DbColumn>, ApiError> {
+    db.select(("columns", col_id)).await.map_err(ApiError::from)
 }
 
 /// The JSON snapshot an audit row stores for a card: the card exactly as the
 /// API renders it, so restoring a row replays a real API shape.
-fn snapshot(card: &shared::Card) -> Result<serde_json::Value, StatusCode> {
-    serde_json::to_value(card).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+fn snapshot(card: &shared::Card) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(card).map_err(ApiError::from)
 }
 
 /// Run a planned edit ([`CardUpdate::plan`]) and return the stored row.
@@ -82,7 +75,7 @@ async fn persist_update(
     card_id: String,
     editor: String,
     write: CardWrite,
-) -> Result<DbCard, StatusCode> {
+) -> Result<DbCard, ApiError> {
     let statement = write.statement();
     let card: Option<DbCard> = write
         .bind(
@@ -90,11 +83,9 @@ async fn persist_update(
                 .bind(("card_id", card_id))
                 .bind(("editor", editor)),
         )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    card.ok_or(StatusCode::NOT_FOUND)
+        .await?
+        .take(0)?;
+    card.ok_or(ApiError::NotFound)
 }
 
 /// Write a card's new column and position, and return the stored row.
@@ -110,7 +101,7 @@ async fn persist_move(
     col_id: String,
     position: i32,
     editor: String,
-) -> Result<DbCard, StatusCode> {
+) -> Result<DbCard, ApiError> {
     let card: Option<DbCard> = db
         .query(
             "UPDATE type::thing('cards', $card_id) \
@@ -120,11 +111,9 @@ async fn persist_move(
         .bind(("col_id", col_id))
         .bind(("position", position))
         .bind(("editor", editor))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    card.ok_or(StatusCode::NOT_FOUND)
+        .await?
+        .take(0)?;
+    card.ok_or(ApiError::NotFound)
 }
 
 /// One completed card mutation, ready to be recorded and announced.
@@ -157,7 +146,7 @@ struct CardMutation<'a> {
 ///
 /// Broadcast failure is ignored on purpose — `send` only errors when nobody is
 /// listening, which is the normal state of a server with no open tabs.
-async fn audit_and_emit(state: &AppState, mutation: CardMutation<'_>) -> Result<(), StatusCode> {
+async fn audit_and_emit(state: &AppState, mutation: CardMutation<'_>) -> Result<(), ApiError> {
     audit::record_and_broadcast(
         &state.db,
         &state.events,
@@ -174,8 +163,7 @@ async fn audit_and_emit(state: &AppState, mutation: CardMutation<'_>) -> Result<
             audit_edit_session: mutation.audit_edit_session,
         },
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id: mutation.board_id,
@@ -187,16 +175,12 @@ async fn audit_and_emit(state: &AppState, mutation: CardMutation<'_>) -> Result<
 pub async fn list_cards(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
-) -> Result<Json<Vec<shared::Card>>, StatusCode> {
+) -> Result<Json<Vec<shared::Card>>, ApiError> {
     // Verify the column exists before returning its cards.
-    let column: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let column: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
 
     if column.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::NotFound);
     }
 
     let cards: Vec<DbCard> = state
@@ -205,10 +189,8 @@ pub async fn list_cards(
             "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
         )
         .bind(("id", col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     Ok(Json(cards.into_iter().map(DbCard::into_api).collect()))
 }
@@ -216,16 +198,12 @@ pub async fn list_cards(
 pub async fn get_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
-) -> Result<Json<shared::Card>, StatusCode> {
-    let card: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<shared::Card>, ApiError> {
+    let card: Option<DbCard> = state.db.select(("cards", &card_id)).await?;
 
     match card {
         Some(c) => Ok(Json(c.into_api())),
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(ApiError::NotFound),
     }
 }
 
@@ -236,19 +214,17 @@ pub async fn get_card(
 pub async fn get_card_by_number(
     State(state): State<AppState>,
     Path(number): Path<u32>,
-) -> Result<Json<shared::Card>, StatusCode> {
+) -> Result<Json<shared::Card>, ApiError> {
     let card: Option<DbCard> = state
         .db
         .query("SELECT * FROM cards WHERE number = $number LIMIT 1")
         .bind(("number", number as i64))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     match card {
         Some(c) => Ok(Json(c.into_api())),
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(ApiError::NotFound),
     }
 }
 
@@ -257,17 +233,13 @@ pub async fn create_card(
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardRequest>,
-) -> Result<(StatusCode, Json<shared::Card>), StatusCode> {
-    let column: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<(StatusCode, Json<shared::Card>), ApiError> {
+    let column: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let column = match column {
         Some(c) => c,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let board_id = column.board.id.to_raw();
 
@@ -284,19 +256,15 @@ pub async fn create_card(
     let counter: Option<DbCardCounter> = state
         .db
         .query("UPDATE card_counter:global SET count += 1 RETURN AFTER")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
     let card_number = counter.map(|c| c.count).unwrap_or(1);
 
     // Compute the sparse position for inserting at the TOP of the column.
     // This is done before the CREATE so the position is known up front;
     // the two-step approach is safe because card IDs are ULIDs and the
     // counter increment above already serialises concurrent creates.
-    let top_pos = compute_top_position(&state.db, &col_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let top_pos = compute_top_position(&state.db, &col_id).await?;
 
     let card: Option<DbCard> = state
         .db
@@ -316,16 +284,13 @@ pub async fn create_card(
         .bind(("position", top_pos))
         .bind(("tags", tags))
         .bind(("editor", editor))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     match card {
         Some(c) => {
             let api_card = c.into_api();
-            let snapshot_after = serde_json::to_value(api_card.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let snapshot_after = serde_json::to_value(api_card.clone())?;
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
@@ -342,8 +307,7 @@ pub async fn create_card(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
 
             let _ = state.events.send(BroadcastEvent {
                 board_id,
@@ -353,7 +317,8 @@ pub async fn create_card(
             });
             Ok((StatusCode::CREATED, Json(api_card)))
         }
-        None => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        // A create that reports success always returns its row.
+        None => Err(ApiError::internal("create returned no card row")),
     }
 }
 
@@ -374,7 +339,7 @@ pub async fn update_card(
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateCardRequest>,
-) -> Result<Json<shared::Card>, StatusCode> {
+) -> Result<Json<shared::Card>, ApiError> {
     let existing = load_card(&state.db, &card_id).await?;
     let snapshot_before = snapshot(&existing.clone().into_api())?;
 
@@ -391,7 +356,7 @@ pub async fn update_card(
         if let Some(ref current_col) = current_col
             && current_col.board.id.to_raw() != target_col.board.id.to_raw()
         {
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            return Err(ApiError::UNPROCESSABLE);
         }
     }
 
@@ -433,16 +398,12 @@ pub async fn delete_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
-) -> Result<StatusCode, StatusCode> {
-    let existing: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<StatusCode, ApiError> {
+    let existing: Option<DbCard> = state.db.select(("cards", &card_id)).await?;
 
     let existing = match existing {
         Some(e) => e,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
 
     let board_id = state
@@ -462,8 +423,7 @@ pub async fn delete_card(
     crate::routes::links::cascade_delete_card_links(&state, &claims, &board_id, &card_id, None)
         .await?;
 
-    let snapshot_before = serde_json::to_value(existing.clone().into_api())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())?;
     audit::record_and_broadcast(
         &state.db,
         &state.events,
@@ -480,14 +440,12 @@ pub async fn delete_card(
             audit_edit_session: None,
         },
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
 
     match state
         .db
         .delete::<Option<DbCard>>(("cards", &card_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .await?
     {
         Some(deleted) => {
             // Look up the column to find the board ID for the SSE event.
@@ -510,7 +468,7 @@ pub async fn delete_card(
             });
             Ok(StatusCode::NO_CONTENT)
         }
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(ApiError::NotFound),
     }
 }
 
@@ -528,7 +486,7 @@ pub async fn move_card(
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::MoveCardRequest>,
-) -> Result<Json<shared::Card>, StatusCode> {
+) -> Result<Json<shared::Card>, ApiError> {
     let existing = load_card(&state.db, &card_id).await?;
     let snapshot_before = snapshot(&existing.clone().into_api())?;
 
@@ -547,16 +505,14 @@ pub async fn move_card(
     if let Some(current_col) = find_column(&state.db, &from_column_id).await?
         && current_col.board.id.to_raw() != board_id
     {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(ApiError::UNPROCESSABLE);
     }
 
     // Compute a sparse position so only this one card needs to be written.
     // Other cards in the column are unchanged in the happy path; a rebalance
     // is triggered automatically when the gap between neighbours is exhausted.
     let new_pos =
-        compute_sparse_position(&state.db, &card_id, &payload.column_id, payload.position)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        compute_sparse_position(&state.db, &card_id, &payload.column_id, payload.position).await?;
 
     let api_card = persist_move(
         &state.db,
@@ -631,15 +587,11 @@ pub async fn reorder_cards(
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CardsReorderRequest>,
-) -> Result<Json<Vec<shared::Card>>, StatusCode> {
-    let column: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<Vec<shared::Card>>, ApiError> {
+    let column: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
 
     let Some(column) = column else {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::NotFound);
     };
     let board_id = column.board.id.to_raw();
 
@@ -651,10 +603,8 @@ pub async fn reorder_cards(
             "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
         )
         .bind(("id", col_id.clone()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     // Requested ids that really are in this column, in the order asked for and
     // without repeats, followed by everything the caller left out in its
@@ -719,14 +669,13 @@ pub async fn reorder_cards(
     //
     // Holding the outcome instead lets the broadcast run on both paths: what
     // was stored is what gets announced, even when the batch aborts part way.
-    let outcome: Result<(), StatusCode> = async {
+    let outcome: Result<(), ApiError> = async {
         for (card, &position) in target.iter().zip(slots.iter()) {
             if card.position == position {
                 continue;
             }
             let card_id = card.id.id.to_raw();
-            let snapshot_before = serde_json::to_value((*card).clone().into_api())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let snapshot_before = serde_json::to_value((*card).clone().into_api())?;
 
             // RETURN AFTER in the same statement: never write a position without a
             // confirmed row to audit, and never audit a write that did not land.
@@ -742,10 +691,8 @@ pub async fn reorder_cards(
                 .bind(("pos", position))
                 .bind(("col_id", col_id.clone()))
                 .bind(("editor", editor.clone()))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .take(0)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .await?
+                .take(0)?;
             let mut it = updated.into_iter();
             let Some(card_after) = it.next() else {
                 // Zero rows means the card left this column between the SELECT
@@ -756,12 +703,13 @@ pub async fn reorder_cards(
                 continue;
             };
             if it.next().is_some() {
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                return Err(ApiError::internal(
+                    "reorder update matched more than one card",
+                ));
             }
 
             let api_card = card_after.into_api();
-            let snapshot_after = serde_json::to_value(api_card.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let snapshot_after = serde_json::to_value(api_card.clone())?;
 
             audit::record_and_broadcast(
                 &state.db,
@@ -779,8 +727,7 @@ pub async fn reorder_cards(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
 
             moved.push(api_card);
         }
@@ -827,10 +774,8 @@ pub async fn reorder_cards(
             "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
         )
         .bind(("id", col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     Ok(Json(ordered.into_iter().map(DbCard::into_api).collect()))
 }

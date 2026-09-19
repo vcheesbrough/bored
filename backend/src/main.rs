@@ -21,6 +21,7 @@ mod audit;
 mod auth;
 mod config;
 mod db;
+mod error;
 mod events;
 mod models;
 mod observability;

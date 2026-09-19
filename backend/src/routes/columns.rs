@@ -6,6 +6,7 @@ use axum::{
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbColumn};
 use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
@@ -13,10 +14,10 @@ use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
 pub async fn list_columns(
     State(state): State<AppState>,
     Path(board_slug): Path<String>,
-) -> Result<Json<Vec<shared::Column>>, StatusCode> {
+) -> Result<Json<Vec<shared::Column>>, ApiError> {
     let board = match find_board_by_slug(&state.db, &board_slug).await? {
         Some(b) => b,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let board_ulid = board.id.id.to_raw();
 
@@ -26,10 +27,8 @@ pub async fn list_columns(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
         .bind(("id", board_ulid))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     Ok(Json(columns.into_iter().map(DbColumn::into_api).collect()))
 }
@@ -39,10 +38,10 @@ pub async fn create_column(
     Path(board_slug): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateColumnRequest>,
-) -> Result<(StatusCode, Json<shared::Column>), StatusCode> {
+) -> Result<(StatusCode, Json<shared::Column>), ApiError> {
     let board = match find_board_by_slug(&state.db, &board_slug).await? {
         Some(b) => b,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let board_ulid = board.id.id.to_raw();
 
@@ -57,16 +56,13 @@ pub async fn create_column(
         .bind(("name", payload.name))
         .bind(("position", payload.position))
         .bind(("editor", editor))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     match column {
         Some(c) => {
             let api_col = c.into_api();
-            let snapshot_after = serde_json::to_value(api_col.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let snapshot_after = serde_json::to_value(api_col.clone())?;
             audit::record_and_broadcast(
                 &state.db,
                 &state.events,
@@ -83,8 +79,7 @@ pub async fn create_column(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
 
             let _ = state.events.send(BroadcastEvent {
                 board_id: board_ulid,
@@ -94,7 +89,8 @@ pub async fn create_column(
             });
             Ok((StatusCode::CREATED, Json(api_col)))
         }
-        None => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        // A create that reports success always returns its row.
+        None => Err(ApiError::internal("create returned no column row")),
     }
 }
 
@@ -103,17 +99,13 @@ pub async fn update_column(
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateColumnRequest>,
-) -> Result<Json<shared::Column>, StatusCode> {
-    let existing: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<Json<shared::Column>, ApiError> {
+    let existing: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
         Some(c) => c,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let board_id = existing.board.id.to_raw();
 
@@ -131,8 +123,7 @@ pub async fn update_column(
     if patch.is_empty() {
         return Ok(Json(existing.into_api()));
     }
-    let snapshot_before = serde_json::to_value(existing.clone().into_api())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshot_before = serde_json::to_value(existing.clone().into_api())?;
 
     patch.insert(
         "last_edited_by".to_string(),
@@ -143,14 +134,12 @@ pub async fn update_column(
         .db
         .update(("columns", &col_id))
         .merge(serde_json::Value::Object(patch))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?;
 
     match column {
         Some(c) => {
             let api_col = c.into_api();
-            let snapshot_after = serde_json::to_value(api_col.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let snapshot_after = serde_json::to_value(api_col.clone())?;
             let action = if payload.position.is_some() {
                 "move"
             } else {
@@ -173,8 +162,7 @@ pub async fn update_column(
                     audit_edit_session: None,
                 },
             )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?;
 
             let _ = state.events.send(BroadcastEvent {
                 board_id,
@@ -184,7 +172,7 @@ pub async fn update_column(
             });
             Ok(Json(api_col))
         }
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err(ApiError::NotFound),
     }
 }
 
@@ -192,17 +180,13 @@ pub async fn delete_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
-) -> Result<StatusCode, StatusCode> {
-    let existing: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+) -> Result<StatusCode, ApiError> {
+    let existing: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
         Some(c) => c,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let board_id = existing.board.id.to_raw();
     let batch = audit::new_batch_group();
@@ -213,10 +197,8 @@ pub async fn delete_column(
             "SELECT * FROM cards WHERE column = type::thing('columns', $cid) ORDER BY position ASC",
         )
         .bind(("cid", col_id.clone()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     for card in cards {
         let entity_id = card.id.id.to_raw();
@@ -230,8 +212,7 @@ pub async fn delete_column(
             Some(&batch),
         )
         .await?;
-        let snapshot_before = serde_json::to_value(card.clone().into_api())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let snapshot_before = serde_json::to_value(card.clone().into_api())?;
         audit::record_and_broadcast(
             &state.db,
             &state.events,
@@ -248,18 +229,12 @@ pub async fn delete_column(
                 audit_edit_session: None,
             },
         )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?;
 
-        let _: Option<DbCard> = state
-            .db
-            .delete(("cards", &entity_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let _: Option<DbCard> = state.db.delete(("cards", &entity_id)).await?;
     }
 
-    let col_snap = serde_json::to_value(existing.clone().into_api())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let col_snap = serde_json::to_value(existing.clone().into_api())?;
     audit::record_and_broadcast(
         &state.db,
         &state.events,
@@ -276,14 +251,12 @@ pub async fn delete_column(
             audit_edit_session: None,
         },
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
 
     state
         .db
         .delete::<Option<DbColumn>>(("columns", &col_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id,
@@ -307,10 +280,10 @@ pub async fn reorder_columns(
     Path(board_slug): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::ColumnsReorderRequest>,
-) -> Result<Json<Vec<shared::Column>>, StatusCode> {
+) -> Result<Json<Vec<shared::Column>>, ApiError> {
     let board = match find_board_by_slug(&state.db, &board_slug).await? {
         Some(b) => b,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(ApiError::NotFound),
     };
     let board_ulid = board.id.id.to_raw();
 
@@ -322,11 +295,7 @@ pub async fn reorder_columns(
     // silently no-ops (matches zero rows) rather than mutating another board's
     // state — preventing cross-board IDOR writes.
     for (index, col_id) in payload.order.iter().enumerate() {
-        let before: Option<DbColumn> = state
-            .db
-            .select(("columns", col_id.as_str()))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let before: Option<DbColumn> = state.db.select(("columns", col_id.as_str())).await?;
         let Some(col_before) = before else {
             continue;
         };
@@ -337,8 +306,7 @@ pub async fn reorder_columns(
             continue;
         }
 
-        let snapshot_before = serde_json::to_value(col_before.into_api())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let snapshot_before = serde_json::to_value(col_before.into_api())?;
 
         // Single RETURN AFTER so we never apply an UPDATE without a confirmed row for audit,
         // and never skip auditing after a successful position write (second SELECT could yield None).
@@ -352,19 +320,18 @@ pub async fn reorder_columns(
             .bind(("pos", index as i32))
             .bind(("board_id", board_ulid.clone()))
             .bind(("editor", editor.clone()))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .take(0)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .await?
+            .take(0)?;
         let mut it = updated.into_iter();
         let Some(col_after) = it.next() else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(ApiError::internal("reorder update matched no column"));
         };
         if it.next().is_some() {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(ApiError::internal(
+                "reorder update matched more than one column",
+            ));
         }
-        let snapshot_after = serde_json::to_value(col_after.into_api())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let snapshot_after = serde_json::to_value(col_after.into_api())?;
 
         audit::record_and_broadcast(
             &state.db,
@@ -382,8 +349,7 @@ pub async fn reorder_columns(
                 audit_edit_session: None,
             },
         )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?;
     }
 
     // Re-fetch the full ordered list so we can return it and broadcast it.
@@ -393,10 +359,8 @@ pub async fn reorder_columns(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
         .bind(("id", board_ulid.clone()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .take(0)?;
 
     let api_cols: Vec<shared::Column> = columns.into_iter().map(DbColumn::into_api).collect();
 
