@@ -3,6 +3,7 @@ import {
   apiCreateBoard,
   apiCreateColumn,
   apiCreateCard,
+  apiGetCard,
   apiUpdateCard,
   gotoBoardView,
 } from './helpers';
@@ -247,5 +248,54 @@ test.describe('simple search', () => {
     await expect(page.locator('.card-item')).toContainText('Updated match from another context');
 
     await context.close();
+  });
+
+  // Card #304: the text-search route into the same disposal race that
+  // `card-tags.spec.ts` covers for tags. Editing an expanded card's body past
+  // the query used to unmount it mid-edit and wedge the tab; the expanded card
+  // is now exempt from the filter until it is collapsed.
+  test('editing an expanded card past a text search keeps it open and saves', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `search-expanded-edit-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const card = await apiCreateCard(request, col.id, '# Deploy checklist');
+    await apiCreateCard(request, col.id, '# Deploy notes');
+
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    await gotoBoardView(page, board.name);
+    const search = page.locator('.navbar-search-input');
+    await search.fill('checklist');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+
+    // Expand, then type the body out of the query's reach.
+    await page.locator('.card-item').click();
+    const expanded = page.locator('.card-item.card-expanded');
+    await expanded.locator('.card-markdown, .card-body-placeholder').first().click();
+    const textarea = expanded.locator('textarea');
+    await textarea.fill('# Something else entirely');
+    await textarea.blur();
+
+    // Saved, and still on screen despite no longer matching `checklist`.
+    await expect
+      .poll(async () => (await apiGetCard(request, card.id)).body)
+      .toBe('# Something else entirely');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    expect(panics).toEqual([]);
+
+    // Collapsing releases the pin and the card leaves the filtered view.
+    await page.locator('.card-toolbar-btn[title="Collapse"]').click();
+    await expect(page.locator('.card-item')).toHaveCount(0);
+
+    // The board still reacts — a wedged executor would repaint nothing.
+    await search.fill('');
+    await expect(page.locator('.card-item')).toHaveCount(2);
+    expect(panics).toEqual([]);
   });
 });

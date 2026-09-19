@@ -327,4 +327,172 @@ test.describe('card links', () => {
     // A removed link is not restorable, so no control is offered.
     await expect(rows.getByRole('button', { name: 'Restore' })).toHaveCount(0);
   });
+
+  // ── Deleting a linked card with the SSE stream down — card #313 ──────────
+  //
+  // The board prunes its link index locally now instead of waiting for the
+  // server's `CardLinkDeleted` events. These tests hold the browser to that by
+  // taking the stream away entirely: `/api/events` is aborted before the board
+  // loads, so nothing the server broadcasts can reach the page and every
+  // assertion below is about what the tab did for itself. That also stands in
+  // for the subtler real-world case — a receiver lagging out of the backend's
+  // 128-slot broadcast channel — which drops events the same way but is not
+  // reproducible on demand.
+  test.describe('deleting a linked card with SSE down', () => {
+    /** Abort `/api/events` so the page never receives a single broadcast. */
+    async function killSse(page: import('@playwright/test').Page) {
+      await page.route('**/api/events*', route => route.abort());
+    }
+
+    /**
+     * Watch for reactive-disposal panics. Pruning the link index on delete
+     * notifies the badges of the card being unmounted, so this path is one trap
+     * away from a wedged tab — and a wedged tab fails silently, by making every
+     * later interaction inert rather than by raising anything at the assertion.
+     */
+    function watchForPanics(page: import('@playwright/test').Page) {
+      const panics: string[] = [];
+      page.on('console', msg => {
+        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+      });
+      page.on('pageerror', err => panics.push(String(err)));
+      return panics;
+    }
+
+    test('an inline delete clears the partner card of the deleted card', async ({
+      page,
+      request,
+    }) => {
+      const board = await apiCreateBoard(request, `links-del-inline-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const doomed = await apiCreateCard(request, col.id, '# Doomed card');
+      const partner = await apiCreateCard(request, col.id, '# Partner card');
+      // One link on each side of the partner, so the fix has to prune by *both*
+      // ends rather than only the side it happens to look at first.
+      await apiCreateLink(request, doomed.id, 'successor', partner.id);
+      const other = await apiCreateCard(request, col.id, '# Third card');
+      await apiCreateLink(request, partner.id, 'successor', other.id);
+
+      const panics = watchForPanics(page);
+      await killSse(page);
+      await gotoBoardView(page, board.name);
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveText(
+        `↑#${doomed.number}`
+      );
+
+      await cardWith(page, 'Doomed card').click();
+      await page.locator('.card-toolbar-close').first().click();
+      await page.locator('.btn-danger').click();
+
+      // The card goes, and so does its link — with no reload and no SSE.
+      await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(0);
+      // The partner's *other* link is untouched: pruning is by card, not a
+      // blanket clear.
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-after')).toHaveText(
+        `↓#${other.number}`
+      );
+      // No chip degraded to a bare `#N` — the symptom the card reported.
+      // Assert the card actually expanded first: a bare `toHaveCount(0)` on the
+      // chips passes just as well when the editor is absent, which would hide a
+      // wedged tab (a disposal panic leaves every later click inert).
+      await cardWith(page, 'Partner card').click();
+      const expandedPartner = page.locator('.card-item.card-expanded');
+      await expect(expandedPartner).toHaveCount(1);
+      await expect(expandedPartner.locator('.link-group')).toHaveCount(2);
+      await expect(
+        expandedPartner.locator('.link-group[data-side="before"] .link-chip')
+      ).toHaveCount(0);
+      await expect(
+        expandedPartner.locator('.link-group[data-side="after"] .link-chip-card')
+      ).toHaveText(`#${other.number} Third card`);
+      // The server agrees: the cascade really did remove only that link.
+      await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
+        expect.objectContaining({ predecessor_id: partner.id, successor_id: other.id }),
+      ]);
+      expect(panics).toEqual([]);
+    });
+
+    test('a delete from the maximised modal removes the card and its links', async ({
+      page,
+      request,
+    }) => {
+      const board = await apiCreateBoard(request, `links-del-modal-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const doomed = await apiCreateCard(request, col.id, '# Doomed card');
+      const partner = await apiCreateCard(request, col.id, '# Partner card');
+      await apiCreateLink(request, doomed.id, 'successor', partner.id);
+
+      const panics = watchForPanics(page);
+      await killSse(page);
+      await gotoBoardView(page, board.name);
+      await cardWith(page, 'Doomed card').click();
+      await page.locator('.card-toolbar-btn[title="Maximise"]').click();
+      await expect(page.locator('.modal')).toBeVisible();
+
+      await page.locator('.modal .card-toolbar-close').first().click();
+      await page.locator('.btn-danger').click();
+
+      // `on_modal_delete` used to be a no-op, so with no SSE both the card and
+      // its link survived here.
+      await expect(page.locator('.modal')).toHaveCount(0);
+      await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
+      await expect(cardWith(page, 'Partner card').locator('.link-badge')).toHaveCount(0);
+      await expect.poll(async () => apiListLinks(request, board.name)).toEqual([]);
+      expect(panics).toEqual([]);
+    });
+  });
+
+  test('a healthy stream clears a deleted card\'s links exactly once', async ({
+    page,
+    request,
+  }) => {
+    // The regression guard for the above: with SSE working, the local prune and
+    // the broadcast `CardLinkDeleted` both run over the same link. Removing an
+    // absent link must be a no-op, not an error — and the partner's surviving
+    // link must not be swept up by the second pass either.
+    const board = await apiCreateBoard(request, `links-del-sse-ok-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const doomed = await apiCreateCard(request, col.id, '# Doomed card');
+    const partner = await apiCreateCard(request, col.id, '# Partner card');
+    const other = await apiCreateCard(request, col.id, '# Third card');
+    await apiCreateLink(request, doomed.id, 'successor', partner.id);
+    await apiCreateLink(request, partner.id, 'successor', other.id);
+
+    // Only reactive-runtime failures, not incidental console noise: a double
+    // removal would surface as a disposal panic, which is what this guards.
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    const eventsReady = page.waitForResponse(
+      response =>
+        response.request().method() === 'GET' &&
+        response.url().includes(`/api/events?board_id=${board.id}`) &&
+        response.ok()
+    );
+    await gotoBoardView(page, board.name);
+    await eventsReady;
+
+    await cardWith(page, 'Doomed card').click();
+    await page.locator('.card-toolbar-close').first().click();
+    await page.locator('.btn-danger').click();
+
+    await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
+    await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(0);
+    await expect(cardWith(page, 'Partner card').locator('.link-badge-after')).toHaveText(
+      `↓#${other.number}`
+    );
+    // Give the broadcast time to land on top of the local prune, then confirm
+    // the double pass changed nothing and raised nothing.
+    await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
+      expect.objectContaining({ predecessor_id: partner.id, successor_id: other.id }),
+    ]);
+    await expect(cardWith(page, 'Partner card').locator('.link-badge-after')).toHaveText(
+      `↓#${other.number}`
+    );
+    expect(panics).toEqual([]);
+  });
 });

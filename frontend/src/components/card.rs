@@ -159,6 +159,21 @@ pub fn CardItem(
     // search has just filtered out can be asked to re-render once more after
     // its own signals were disposed.  Reading a disposed signal traps the WASM
     // module, and the rendered output is thrown away anyway.
+    //
+    // The same care is needed **where these signals are read**, not only inside
+    // the closures that compute them. `Signal::derive` stores the derived signal
+    // in the reactive arena too, so it is disposed along with everything else
+    // this component owns; a `number.get()` in a view closure then traps even
+    // though the closure above it is `try_get`-safe. Every read of a signal
+    // owned by this component is therefore `try_get`/`try_get_untracked` with a
+    // fallback.
+    //
+    // Card #304 found eight such reads, and they masked one another — each fix
+    // only revealed the next panic behind it, so they were flushed out by
+    // repeating the reproduction against a debug build until it came back
+    // clean: the number badge (both states), the save-status icon, the body in
+    // the `Show` and the textarea, `card_state` and `edit_audit_session` inside
+    // the save future, `TagEditor`'s tag list, and `LinkGroup`'s link list.
     let number = Signal::derive(move || card.try_get().map_or(0, |c| c.number));
     let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
 
@@ -231,8 +246,16 @@ pub fn CardItem(
     let do_save = move |card_id: String, current_body: String| {
         save_status.set(SaveStatus::Saving);
         wasm_bindgen_futures::spawn_local(async move {
-            let audit_edit_session = (card_state.get_untracked() == CardState::Editing)
-                .then(|| edit_audit_session.get_untracked())
+            // `try_get_untracked`, because this future outlives the component in
+            // exactly the case that matters: the write that triggered the save
+            // can also be the write that unmounts the card. Trapping here was
+            // the "it doesn't work" half of card #304 — the panic fired inside
+            // the `wasm-bindgen-futures` task queue, so the PUT below never ran
+            // *and* the executor was wedged for the rest of the tab's life.
+            // Falling back to `None` only forfeits the audit-session grouping,
+            // which costs a separate history row rather than a lost edit.
+            let audit_edit_session = (card_state.try_get_untracked() == Some(CardState::Editing))
+                .then(|| edit_audit_session.try_get_untracked().flatten())
                 .flatten();
             let req = shared::UpdateCardRequest {
                 body: Some(current_body.clone()),
@@ -487,7 +510,7 @@ pub fn CardItem(
                 <span
                     class="card-number"
                     class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
-                >{move || format!("#{}", number.get())}</span>
+                >{move || format!("#{}", number.try_get().unwrap_or_default())}</span>
                 // One metadata line: link counts first, then the tag chips.
                 // Each child renders nothing when it has nothing to say, and an
                 // empty flex row has no height, so a plain card gets no gap.
@@ -508,17 +531,19 @@ pub fn CardItem(
                 >
                     // Save-state icon sits left of the card number — subtle, not a distraction.
                     <span class="card-save-icon">
-                        {move || match save_status.get() {
-                            SaveStatus::Idle    => "",
-                            SaveStatus::Saving  => "·",
-                            SaveStatus::Saved   => "💾",
-                            SaveStatus::Failed  => "!",
+                        // A disposed card has no status worth drawing, so the
+                        // `None` arm renders the same blank as `Idle`.
+                        {move || match save_status.try_get() {
+                            Some(SaveStatus::Saving)  => "·",
+                            Some(SaveStatus::Saved)   => "💾",
+                            Some(SaveStatus::Failed)  => "!",
+                            Some(SaveStatus::Idle) | None => "",
                         }}
                     </span>
                     <span
                         class="card-number"
                         class:card-number-hit=move || number_is_hit.try_get().unwrap_or(false)
-                    >{move || format!("#{}", number.get())}</span>
+                    >{move || format!("#{}", number.try_get().unwrap_or_default())}</span>
                     <Show when=move || history_drawer.is_some() fallback=|| ()>
                         <button
                             class="card-toolbar-btn"
@@ -569,7 +594,12 @@ pub fn CardItem(
                         }
                     >
                         <Show
-                            when=move || !body.get().is_empty()
+                            // `try_get`: `body` is this component's own signal,
+                            // and an edit that unmounts the card re-runs this
+                            // closure after disposal. `unwrap_or_default` shows
+                            // the placeholder branch, which is never seen — the
+                            // card is being removed from the DOM regardless.
+                            when=move || !body.try_get().unwrap_or_default().is_empty()
                             fallback=|| view! {
                                 <p class="card-body-placeholder">"Click to edit…"</p>
                             }
@@ -582,7 +612,7 @@ pub fn CardItem(
                         node_ref=textarea_ref
                         class="card-body-textarea"
                         class:card-body-hidden=is_expanded
-                        prop:value=move || body.get()
+                        prop:value=move || body.try_get().unwrap_or_default()
                         on:input=on_body_input
                         on:blur=move |_| exit_editing()
                         on:keydown=move |ev: web_sys::KeyboardEvent| {

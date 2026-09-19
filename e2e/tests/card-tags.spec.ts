@@ -333,4 +333,128 @@ test.describe('card tags', () => {
       .poll(async () => (await apiGetCard(request, card.id)).tags)
       .toEqual(['bug', 'urgent']);
   });
+
+  // ── Editing an expanded card out of the active filter — card #304 ────────
+  //
+  // Removing the tag you are filtering on used to unmount the expanded card
+  // mid-edit, which disposed its signals while its own render closures were
+  // still queued to read them. The resulting panic fired inside the
+  // `wasm-bindgen-futures` task queue and wedged the executor: the in-flight PUT
+  // never ran and no effect ever ran again, so the tab was dead until a reload.
+  //
+  // Two changes hold it shut, and these tests pin both: the expanded card is
+  // exempt from the filter while it is open, and the reads that trapped are
+  // `try_get`. Every test therefore asserts three things — no WASM panic, the
+  // change actually reached the server, and the board still repaints afterwards.
+  test.describe('editing an expanded card out of the filter', () => {
+    /**
+     * Collect WASM panics. A trap surfaces as a `wasm panic:` console error and
+     * an `unreachable` page error; either one is a failure.
+     */
+    function watchForPanics(page: import('@playwright/test').Page) {
+      const panics: string[] = [];
+      page.on('console', msg => {
+        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+      });
+      page.on('pageerror', err => panics.push(String(err)));
+      return panics;
+    }
+
+    /**
+     * The board is only truly alive if it still reacts. Clearing the search has
+     * to repaint every card — under a wedged executor nothing repaints at all.
+     */
+    async function expectBoardStillLive(
+      page: import('@playwright/test').Page,
+      totalCards: number
+    ) {
+      await page.locator('.navbar-search-input').fill('');
+      await expect(page.locator('.card-item')).toHaveCount(totalCards);
+    }
+
+    test('removing the filtered tag saves, keeps the card, and leaves the tab alive', async ({
+      page,
+      request,
+    }) => {
+      const board = await apiCreateBoard(request, `tags-filter-remove-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const card = await apiCreateCard(request, col.id, '# Filtered card', ['bug']);
+      await apiCreateCard(request, col.id, '# Other card', ['bug']);
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await page.locator('.navbar-search-input').fill('#bug');
+      await expect(page.locator('.card-item')).toHaveCount(2);
+
+      await page.locator('.card-item').filter({ hasText: 'Filtered card' }).click();
+      const expanded = page.locator('.card-item.card-expanded');
+      await expect(expanded).toBeVisible();
+      await expanded.locator('.tag-chip-remove').first().click();
+
+      // The PUT lands — this is the "it doesn't work" half of the report.
+      await expect.poll(async () => (await apiGetCard(request, card.id)).tags).toEqual([]);
+      // The card you are editing stays put even though it no longer matches.
+      await expect(expanded.filter({ hasText: 'Filtered card' })).toHaveCount(1);
+      expect(panics).toEqual([]);
+      await expectBoardStillLive(page, 2);
+    });
+
+    test('collapsing a pinned card drops it from the filtered view without trapping', async ({
+      page,
+      request,
+    }) => {
+      // The pin moves the unmount to collapse time, where it coincides with the
+      // `card_state` / `expanded_card_id` write — the same shape as the original
+      // bug, so it is proven rather than assumed.
+      const board = await apiCreateBoard(request, `tags-filter-collapse-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      await apiCreateCard(request, col.id, '# Filtered card', ['bug']);
+      await apiCreateCard(request, col.id, '# Other card', ['bug']);
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await page.locator('.navbar-search-input').fill('#bug');
+      await page.locator('.card-item').filter({ hasText: 'Filtered card' }).click();
+      await page.locator('.card-item.card-expanded .tag-chip-remove').first().click();
+      await expect(page.locator('.card-item.card-expanded .tag-chip')).toHaveCount(0);
+
+      await page.locator('.card-toolbar-btn[title="Collapse"]').click();
+
+      // Collapsed, it no longer matches `#bug`, so now it goes.
+      await expect(page.locator('.card-item').filter({ hasText: 'Filtered card' })).toHaveCount(0);
+      await expect(page.locator('.card-item')).toHaveCount(1);
+      expect(panics).toEqual([]);
+      await expectBoardStillLive(page, 2);
+    });
+
+    test('a remote edit that unmatches the expanded card does not trap', async ({
+      page,
+      request,
+    }) => {
+      // Another client or an MCP agent editing the card you have open reaches
+      // the same disposal race through the SSE handler instead of a click.
+      const board = await apiCreateBoard(request, `tags-filter-remote-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const card = await apiCreateCard(request, col.id, '# Filtered card', ['bug']);
+      await apiCreateCard(request, col.id, '# Other card', ['bug']);
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await page.locator('.navbar-search-input').fill('#bug');
+      await page.locator('.card-item').filter({ hasText: 'Filtered card' }).click();
+      await expect(page.locator('.card-item.card-expanded')).toBeVisible();
+
+      await apiUpdateCard(request, card.id, { tags: [] });
+
+      // Pinned, so it survives the remote edit; the tag chip goes, the card stays.
+      await expect(page.locator('.card-item.card-expanded .tag-chip')).toHaveCount(0, {
+        timeout: 5000,
+      });
+      await expect(
+        page.locator('.card-item.card-expanded').filter({ hasText: 'Filtered card' })
+      ).toHaveCount(1);
+      expect(panics).toEqual([]);
+      await expectBoardStillLive(page, 2);
+    });
+  });
 });

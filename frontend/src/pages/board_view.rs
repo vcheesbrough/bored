@@ -357,7 +357,33 @@ pub fn BoardView() -> AnyView {
     });
 
     let on_modal_updated = Callback::new(move |_: shared::Card| {});
-    let on_modal_delete = Callback::new(move |_: String| {});
+
+    // Deleting from the maximised modal has no column component above it to
+    // apply the removal — the modal is rendered by `BoardView`, outside every
+    // `ColumnView` — so this callback has to do locally what
+    // `ColumnView::on_card_delete` does for an inline delete. It used to be a
+    // no-op, which left the card *and* its links on the board for any tab whose
+    // SSE stream was down, reconnecting, or lagged out of the broadcast channel.
+    let on_modal_delete = Callback::new(move |card_id: String| {
+        // The card lives in exactly one column's list, but which one is not
+        // known here: the modal is reachable by deep link, so the board may
+        // never have been told. `BoardCardIndex` holds every column's own card
+        // signal, so retaining across all of them removes it from whichever
+        // holds it and leaves the others untouched.
+        //
+        // Snapshot the entries with `get_untracked` *before* writing to any of
+        // them. Iterating inside `with_untracked` would hold a borrow of
+        // `board_card_index` across each `cards.update`, and an update runs the
+        // subscribed effects synchronously — those read the index again and hit
+        // the still-live borrow, aborting the tab with "RefCell already
+        // borrowed". The entries are `Copy` handles, so the snapshot is cheap
+        // and the writes below still land on the real column signals.
+        let columns = board_card_index.get_untracked();
+        for (_, cards) in columns {
+            cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
+        }
+        link_index.remove_touching(&card_id);
+    });
 
     // ── Watermark fetch ────────────────────────────────────────────────────
     Effect::new(move |_| {
@@ -553,12 +579,22 @@ pub fn BoardView() -> AnyView {
                 }
             }
             // Link events are already board-scoped by the SSE subscription, and
-            // a link created locally is deduplicated by id. Card deletes need no
-            // handling here: the server removes the links first and broadcasts
-            // each removal on its own.
+            // a link created locally is deduplicated by id.
             BoardSseEvent::CardLinkCreated { link } => link_index.insert_absent(link),
             BoardSseEvent::CardLinkUpdated { link } => link_index.replace(link),
             BoardSseEvent::CardLinkDeleted { link_id } => link_index.remove(&link_id),
+            // The server does remove a card's links first and broadcast each
+            // removal on its own, so in a healthy stream those `CardLinkDeleted`
+            // events have already pruned the index by the time this arrives and
+            // there is nothing left to retain out. This arm is for the tab that
+            // *missed* them — a receiver that lags out of the backend's 128-slot
+            // broadcast channel has events dropped silently, and the one
+            // announcing the card can outlive the ones announcing its links.
+            // Pruning by card id is always sound (a link cannot outlive either
+            // of its cards) and idempotent, so it costs nothing in the healthy
+            // case and heals the lagged one. The card itself is removed by the
+            // owning `ColumnView`'s own handler.
+            BoardSseEvent::CardDeleted { card_id } => link_index.remove_touching(&card_id),
             _ => {}
         }
     });

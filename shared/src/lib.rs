@@ -309,6 +309,51 @@ mod tests {
         }
     }
 
+    /// A link between two cards. Only the two `*_id` ends matter to
+    /// [`CardLink::touches`]; everything else is filler.
+    fn link(predecessor_id: &str, successor_id: &str) -> CardLink {
+        CardLink {
+            id: "link-1".into(),
+            predecessor_id: predecessor_id.into(),
+            successor_id: successor_id.into(),
+            predecessor_number: 1,
+            successor_number: 2,
+            reason: None,
+            last_edited_by: None,
+            created_at: "x".into(),
+            updated_at: "x".into(),
+        }
+    }
+
+    #[test]
+    fn touches_matches_the_predecessor_end() {
+        assert!(link("a", "b").touches("a"));
+    }
+
+    #[test]
+    fn touches_matches_the_successor_end() {
+        assert!(link("a", "b").touches("b"));
+    }
+
+    #[test]
+    fn touches_ignores_an_unrelated_card() {
+        assert!(!link("a", "b").touches("c"));
+    }
+
+    #[test]
+    fn touches_is_not_fooled_by_a_prefix() {
+        // Ids are compared whole: `card-1` must not match `card-10`, or deleting
+        // one card would prune another card's links.
+        assert!(!link("card-10", "card-20").touches("card-1"));
+    }
+
+    #[test]
+    fn touches_a_self_link() {
+        // The backend rejects a self-link, but the predicate must not lean on
+        // that: `a → a` is touched by `a`.
+        assert!(link("a", "a").touches("a"));
+    }
+
     #[test]
     fn card_scope_matches_the_cards_own_rows() {
         assert!(entry("card", "card-1", None).matches_history_card_scope("card-1"));

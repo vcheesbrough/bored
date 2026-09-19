@@ -297,6 +297,38 @@ pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
     })
 }
 
+/// Whether a column should render `card` at all: it matches the query, **or**
+/// it is the one card currently expanded.
+///
+/// The expanded card is pinned deliberately, and for two reasons.
+///
+/// The behavioural one: the card you are editing must not vanish from under the
+/// cursor the instant your edit stops matching the filter. Removing the very tag
+/// you are filtering on, or typing the body past a text search, otherwise
+/// unmounts the editor mid-keystroke. Pinned, the card stays put while expanded
+/// and leaves the filtered view when you collapse it — the point at which you
+/// are done with it.
+///
+/// The structural one: that unmount was a reactive-disposal trap. The column's
+/// `<For>` re-filters on the same `card` write that the expanded card's own
+/// render closures are subscribed to, so the card was unmounted — disposing its
+/// signals — while those closures were queued to read them. The resulting
+/// `Get::get` panic ("Tried to access a reactive value that has already been
+/// disposed") fires inside the `wasm-bindgen-futures` task queue and wedges the
+/// executor: the in-flight `PUT` never runs and no effect ever runs again, so
+/// the whole tab is dead until a reload. Keeping the card mounted removes the
+/// trigger at its source, for every edit that could cause it — local, remote, or
+/// from another agent.
+///
+/// `expanded_id` is the board-level `ExpandedCardId` lock, so at most one card
+/// on the board is ever pinned.
+pub fn card_is_visible(card: &shared::Card, query: &str, expanded_id: Option<&str>) -> bool {
+    if expanded_id == Some(card.id.as_str()) {
+        return true;
+    }
+    card_matches_query(card, query)
+}
+
 /// Returns `true` when `query` contains a card-number search (`#42` or a bare
 /// `42`) that matches `number`.
 ///
@@ -485,6 +517,54 @@ mod tests {
     #[test]
     fn matches_empty_query() {
         assert!(card_matches_query(&card(42, "Deploy preview"), "  "));
+    }
+
+    // ── card_is_visible: the expanded-card pin ─────────────────────────────
+
+    #[test]
+    fn visibility_follows_the_query_when_nothing_is_expanded() {
+        let c = tagged_card(1, "Deploy preview", &["bug"]);
+        assert!(card_is_visible(&c, "#bug", None));
+        assert!(!card_is_visible(&c, "#chore", None));
+    }
+
+    #[test]
+    fn the_expanded_card_survives_a_query_it_no_longer_matches() {
+        // The bug this pin exists for: the user filters `#bug`, expands the
+        // card, and removes that very tag. Without the pin the card unmounts
+        // mid-edit and the disposal trap kills the tab.
+        let c = tagged_card(1, "Deploy preview", &[]);
+        assert!(!card_matches_query(&c, "#bug"));
+        assert!(card_is_visible(&c, "#bug", Some("card-1")));
+    }
+
+    #[test]
+    fn a_collapsed_card_is_not_pinned() {
+        // The other half of the behaviour: collapsing is what lets a card that
+        // stopped matching finally leave the filtered view.
+        let c = tagged_card(1, "Deploy preview", &[]);
+        assert!(!card_is_visible(&c, "#bug", None));
+    }
+
+    #[test]
+    fn a_different_expanded_card_does_not_pin_this_one() {
+        let c = tagged_card(1, "Deploy preview", &[]);
+        assert!(!card_is_visible(&c, "#bug", Some("card-2")));
+    }
+
+    #[test]
+    fn an_empty_query_shows_every_card_expanded_or_not() {
+        let c = tagged_card(1, "Deploy preview", &[]);
+        assert!(card_is_visible(&c, "", None));
+        assert!(card_is_visible(&c, "", Some("card-1")));
+    }
+
+    #[test]
+    fn the_pin_also_covers_a_body_edit_past_a_text_search() {
+        // Same shape as the tag case, reached by editing the body instead.
+        let c = card(1, "unrelated now");
+        assert!(!card_matches_query(&c, "deploy"));
+        assert!(card_is_visible(&c, "deploy", Some("card-1")));
     }
 
     #[test]

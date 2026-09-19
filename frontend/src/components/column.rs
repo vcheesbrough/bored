@@ -2,10 +2,10 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 
-use crate::components::card::CardItem;
+use crate::components::card::{CardItem, ExpandedCardId};
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::links::BoardLinkIndex;
-use crate::search::{BoardCardIndex, BoardSearchQuery, card_matches_query};
+use crate::search::{BoardCardIndex, BoardSearchQuery, card_is_visible};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -93,6 +93,13 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
         use_context::<RwSignal<DragPayload>>().expect("drag_payload context missing");
     let search_query = use_context::<BoardSearchQuery>()
         .expect("BoardSearchQuery context missing")
+        .0;
+    // The board-level lock naming the one expanded card, read by the card list's
+    // filter so that card stays mounted whatever the query says — see
+    // `card_is_visible`. `CardItem` reads the same context to drive its own
+    // expand/collapse.
+    let expanded_card_id = use_context::<ExpandedCardId>()
+        .expect("ExpandedCardId context missing")
         .0;
     // Tracks which column a dragged column is hovering over (drives ghost).
     // DragOverColId wrapper avoids colliding with the bare RwSignal<Option<String>>
@@ -220,10 +227,20 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
 
     // ── Card callbacks ─────────────────────────────────────────────────────
 
+    // Always present: `ColumnView` only ever renders inside `BoardView`, which
+    // provides the board's links before rendering any column. Needed by both
+    // the delete callback below and `on_sort_by_links` further down.
+    let links_index = expect_context::<BoardLinkIndex>();
+
     // Called by CardItem when the user confirms a delete; removes from list
     // immediately before the SSE `CardDeleted` event arrives.
     let on_card_delete = Callback::new(move |card_id: String| {
         cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
+        // Prune the card's links in the same breath. The card is dropped from
+        // the column locally, so waiting for the SSE `CardLinkDeleted` events to
+        // prune the index leaves a tab whose stream is down or lagged showing
+        // the partner card's link badge and a bare `#N` chip until a reload.
+        links_index.remove_touching(&card_id);
     });
 
     // Called by the + button handler on successful create; inserts at the correct
@@ -333,9 +350,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     // second would be computed from a card order the server has already
     // replaced.
     let sorting = RwSignal::new(false);
-    // Always present: `ColumnView` only ever renders inside `BoardView`,
-    // which provides the board's links before rendering any column.
-    let links_index = expect_context::<BoardLinkIndex>();
     let on_sort_by_links = move |_: web_sys::MouseEvent| {
         if sorting.get_untracked() {
             return;
@@ -556,12 +570,17 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                     <For
                         each=move || {
                             let query = search_query.get();
+                            // Read the lock once, outside the filter: it is the
+                            // same for every card, and tracking it here is what
+                            // makes the column re-filter when the user collapses
+                            // a pinned card that no longer matches.
+                            let expanded = expanded_card_id.get();
                             cards
                                 .get()
                                 .into_iter()
                                 .filter(|sig| {
                                     let card = sig.get();
-                                    card_matches_query(&card, &query)
+                                    card_is_visible(&card, &query, expanded.as_deref())
                                 })
                                 .collect::<Vec<_>>()
                         }
