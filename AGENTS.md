@@ -187,9 +187,12 @@ Run the **`pr-review-loop`** skill (baseline §5: self-review every PR you open,
 then the one-comment-at-a-time triage loop). Repo parameters for the skill:
 
 - `OWNER=vcheesbrough`, `REPO=bored`.
-- **Review rubric:** apply [`.woodpecker/pr-review-prompt.md`](.woodpecker/pr-review-prompt.md)
-  **verbatim** — the same rubric the Woodpecker [`pr-review.yml`](.woodpecker/pr-review.yml)
-  pipeline runs (Correctness, Security, OWASP Top 10, Tests, Versioning, General).
-  Self-review regardless of whether the automated pipeline succeeded.
+- **Review criteria:** the baseline five — correctness, security / OWASP, test
+  coverage of the changed behaviour, versioning, scope. No repo-specific rubric
+  file; `.woodpecker/pr-review-prompt.md` is dead and is **not** to be applied.
+- **The local review is the only review this repo gets.** The Woodpecker
+  remote-review pipeline is disabled (`pr-review.yml.disabled`), so nothing
+  reviews a PR here except the `pr-self-review` subagent Part A spawns.
+  Self-review is not optional.
 - **Sanity check** before batching commits: `cargo check -p <crate>` (Rust) or
   `trunk build` (frontend).
