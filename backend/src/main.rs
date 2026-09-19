@@ -1,3 +1,15 @@
+// A crate-level lint override. It lives here rather than in
+// `backend/Cargo.toml` because this crate inherits `[lints] workspace = true`,
+// and Cargo forbids a member that both inherits the workspace lints and adds
+// its own entries. An inner attribute (`#![...]`) applies to the whole crate,
+// exactly as the manifest entry did, and — unlike the manifest — a source
+// attribute also outranks the `-D warnings` CI passes on the clippy command
+// line.
+//
+// surrealdb::Error is inherently >128 bytes; propagating it via `?` throughout
+// this crate is the intended usage of the driver, not something to box away.
+#![allow(clippy::result_large_err)]
+
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
 // These are private by default; the route handlers are reached via `routes::boards::...`.
 //

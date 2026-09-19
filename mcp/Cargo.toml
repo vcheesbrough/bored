@@ -8,20 +8,32 @@ rust-version.workspace = true
 name = "bored-mcp"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Official Anthropic Rust MCP SDK — "server" enables the server-side
 # runtime and "macros" enables #[tool_router] / #[tool] proc-macros.
 rmcp = { version = "1.5.0", features = ["server", "macros", "transport-io"] }
-tokio = { version = "1", features = ["full"] }
-# reqwest with JSON support for calling the bored REST API.
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
+tokio.workspace = true
+# reqwest for calling the bored REST API. The workspace entry brings JSON and
+# rustls with `default-features = false`, which has three consequences for this
+# binary — all of them matching how `backend` has always been built:
+#   * no system OpenSSL (it used to pull reqwest's default native-tls backend);
+#   * HTTP/1.1 only, since reqwest's `http2` default is off — see card #363,
+#     which decides whether to turn it back on workspace-wide;
+#   * certificates are checked against rustls' bundled webpki roots rather than
+#     the OS trust store, so a deployment behind a private CA would need
+#     `rustls-tls-native-roots` instead.
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 # Log to stderr so it doesn't corrupt the stdio MCP transport on stdout.
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Plain `fmt` from the workspace entry — no JSON layer here.
+tracing-subscriber.workspace = true
 anyhow = "1"
 # Used to peek at the JWT `exp` claim for proactive refresh.
 # We don't verify signatures here — the bored backend is the verifier;
 # we just base64-decode the payload to read the expiry.
-base64 = "0.22"
+base64.workspace = true

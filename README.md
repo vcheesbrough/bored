@@ -19,7 +19,7 @@ A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, SurrealD
 
 ```
 bored/
-├── Cargo.toml          # workspace: [shared, backend, frontend, mcp]
+├── Cargo.toml          # workspace: [shared, backend, frontend, mcp] + shared dep/lint tables
 ├── backend/            # Axum API server
 ├── frontend/           # Leptos WASM SPA
 ├── shared/             # request/response types (serde)
@@ -33,6 +33,18 @@ bored/
     ├── build.yml          # CI: build + e2e on push; manual deployment pipeline
     └── pr-review.yml.disabled  # Claude PR review agent (disabled; see below)
 ```
+
+**Adding a dependency.** If only one member needs it, declare it in that
+member's `Cargo.toml`. If a second member needs it, move it to
+`[workspace.dependencies]` in the root manifest and have both members write
+`dep.workspace = true`; a member that needs extra features adds them on top
+(`dep = { workspace = true, features = [...] }`), which is why the workspace
+entry carries the features *every* member wants and no more.
+
+**Lints** are set once in `[workspace.lints]` and inherited by every member via
+`[lints] workspace = true`. Cargo rejects a member that both inherits and adds
+its own entries, so a crate-specific exception goes in source as a `#![allow]`
+(see `backend/src/main.rs`).
 
 ## Versioning
 
