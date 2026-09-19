@@ -21,7 +21,7 @@ use crate::models::{DbCard, DbCardCounter, DbColumn};
 use crate::routes::boards::{AppState, editor_sub};
 
 use position::{POSITION_GAP, compute_sparse_position, compute_top_position};
-use update::CardUpdate;
+use update::{CardUpdate, CardWrite};
 
 /// Apply [`shared::tags::normalize`] to a client-supplied tag list, mapping a
 /// rejected list onto the HTTP status the handlers return.
@@ -81,7 +81,7 @@ async fn persist_update(
     db: &Surreal<Db>,
     card_id: String,
     editor: String,
-    write: update::CardWrite,
+    write: CardWrite,
 ) -> Result<DbCard, StatusCode> {
     let statement = write.statement();
     let card: Option<DbCard> = write
@@ -101,10 +101,13 @@ async fn persist_update(
 ///
 /// Unlike [`persist_update`] the fields are fixed, so the statement is a
 /// constant rather than something assembled per request.
+///
+/// Takes its ids by value, as [`persist_update`] does: `.bind` needs owned
+/// values, and the caller is finished with both by this point.
 async fn persist_move(
     db: &Surreal<Db>,
-    card_id: &str,
-    col_id: &str,
+    card_id: String,
+    col_id: String,
     position: i32,
     editor: String,
 ) -> Result<DbCard, StatusCode> {
@@ -113,8 +116,8 @@ async fn persist_move(
             "UPDATE type::thing('cards', $card_id) \
              SET column = type::thing('columns', $col_id), position = $position, last_edited_by = $editor",
         )
-        .bind(("card_id", card_id.to_string()))
-        .bind(("col_id", col_id.to_string()))
+        .bind(("card_id", card_id))
+        .bind(("col_id", col_id))
         .bind(("position", position))
         .bind(("editor", editor))
         .await
@@ -134,8 +137,9 @@ struct CardMutation<'a> {
     board_id: String,
     /// The card's id, as the audit log's `entity_id`.
     card_id: &'a str,
-    /// `"move"` or `"update"`.
-    action: &'a str,
+    /// `"move"` or `"update"` — a closed vocabulary, never request-derived,
+    /// which `&'static str` enforces at the type level.
+    action: &'static str,
     snapshot_before: serde_json::Value,
     snapshot_after: serde_json::Value,
     audit_edit_session: Option<&'a str>,
@@ -556,8 +560,8 @@ pub async fn move_card(
 
     let api_card = persist_move(
         &state.db,
-        &card_id,
-        &payload.column_id,
+        card_id,
+        payload.column_id,
         new_pos,
         editor_sub(&claims),
     )
