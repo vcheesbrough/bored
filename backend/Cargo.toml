@@ -8,19 +8,21 @@ rust-version.workspace = true
 name = "backend"
 path = "src/main.rs"
 
-[lints.clippy]
-# surrealdb::Error is inherently >128 bytes; propagating it via `?` throughout
-# this crate is the intended usage of the driver, not something to box away.
-result_large_err = "allow"
+# Inherited wholesale from `[workspace.lints]`. Cargo forbids a member that both
+# inherits and adds entries here, so this crate's one exception —
+# `clippy::result_large_err` — lives as a `#![allow]` in src/main.rs instead.
+[lints]
+workspace = true
 
 [dependencies]
 axum = "0.7"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
-tokio = { version = "1", features = ["full"] }
-shared = { path = "../shared" }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tokio.workspace = true
+shared.workspace = true
+tracing.workspace = true
+# `json` on top of the workspace features: the backend emits structured logs.
+tracing-subscriber = { workspace = true, features = ["json"] }
 tracing-loki = { version = "0.2", features = ["compat-0-2-1"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "fs"] }
@@ -32,15 +34,15 @@ futures-util = "0.3"
 url = "2"
 surrealdb = { version = "2", features = ["kv-mem", "kv-surrealkv"] }
 ulid = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 # OIDC auth — JWT validation against cached JWKS, code/token exchange,
 # httpOnly cookie handling, cryptographic state nonce generation.
 jsonwebtoken = "9"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest.workspace = true
 axum-extra = { version = "0.9", features = ["cookie", "cookie-private"] }
 rand = "0.8"
-base64 = "0.22"
+base64.workspace = true
 sha2 = "0.10"
 # Layered configuration composition root (backend/src/config.rs) — see
 # card #288. Pinned to the running sovereign-config server version (2.17.6):

@@ -4,7 +4,45 @@ default-members = ["shared", "backend"]
 resolver = "3"
 
 [workspace.package]
-version = "1.51.0"
+version = "1.52.0"
 edition = "2024"
 rust-version = "1.98"
 license = "PolyForm-Noncommercial-1.0.0"
+
+# Dependencies shared by more than one workspace member. A member opts in with
+# `dep.workspace = true`, which inherits the version *and* the features listed
+# here; a member may add further features on top
+# (`dep = { workspace = true, features = [...] }`) but cannot remove any, so
+# what lives here is the intersection every member is happy with.
+#
+# Single-member dependencies deliberately stay in their own manifest — an entry
+# used exactly once buys no deduplication and costs a second place to look.
+[workspace.dependencies]
+shared = { path = "shared" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+# The `json` layer is backend-only (structured logs shipped to Loki), so it is
+# added there rather than here — `mcp` logs plain text to stderr.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# One TLS stack across the workspace: rustls, no system OpenSSL. `backend`
+# already required this; `mcp` inherits it rather than pulling reqwest's
+# default native-tls backend for the same HTTPS calls to the same host.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+base64 = "0.22"
+
+# Lints applied to every member via `[lints] workspace = true`. This is the set
+# that was already in force — clippy's defaults, with CI adding `-D warnings` on
+# the command line — so the table is wiring, not a new policy. Raising it (e.g.
+# `clippy::pedantic`, `unsafe_code = "forbid"`) is a separate decision; the
+# candidates are recorded on card #350.
+#
+# `priority = -1` keeps `all` below any specific lint added later: without it,
+# Cargo refuses to order a group against an individual lint and the first
+# specific override would have to rewrite this table.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
