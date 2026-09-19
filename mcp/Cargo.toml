@@ -16,8 +16,15 @@ workspace = true
 # runtime and "macros" enables #[tool_router] / #[tool] proc-macros.
 rmcp = { version = "1.5.0", features = ["server", "macros", "transport-io"] }
 tokio.workspace = true
-# reqwest for calling the bored REST API — JSON and rustls come from the
-# workspace entry, so this binary needs no system OpenSSL.
+# reqwest for calling the bored REST API. The workspace entry brings JSON and
+# rustls with `default-features = false`, which has three consequences for this
+# binary — all of them matching how `backend` has always been built:
+#   * no system OpenSSL (it used to pull reqwest's default native-tls backend);
+#   * HTTP/1.1 only, since reqwest's `http2` default is off — see card #363,
+#     which decides whether to turn it back on workspace-wide;
+#   * certificates are checked against rustls' bundled webpki roots rather than
+#     the OS trust store, so a deployment behind a private CA would need
+#     `rustls-tls-native-roots` instead.
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
