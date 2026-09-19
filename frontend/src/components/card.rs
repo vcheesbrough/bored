@@ -161,19 +161,28 @@ pub fn CardItem(
     // module, and the rendered output is thrown away anyway.
     //
     // The same care is needed **where these signals are read**, not only inside
-    // the closures that compute them. `Signal::derive` stores the derived signal
-    // in the reactive arena too, so it is disposed along with everything else
-    // this component owns; a `number.get()` in a view closure then traps even
-    // though the closure above it is `try_get`-safe. Every read of a signal
-    // owned by this component is therefore `try_get`/`try_get_untracked` with a
-    // fallback.
+    // the closures that compute them. `Signal::derive` (and `Memo`) store the
+    // derived value in the reactive arena too, so it is disposed along with
+    // everything else this component owns; a `number.get()` in a view closure
+    // then traps even though the closure above it is `try_get`-safe. That is
+    // the mistake cards #304 and #313 were: this comment, and the matching ones
+    // in `TagEditor` and `LinkBadges`, each already claimed `try_get` safety
+    // while applying it only inside the derives.
     //
-    // Card #304 found eight such reads, and they masked one another — each fix
-    // only revealed the next panic behind it, so they were flushed out by
-    // repeating the reproduction against a debug build until it came back
-    // clean: the number badge (both states), the save-status icon, the body in
-    // the `Show` and the textarea, `card_state` and `edit_audit_session` inside
-    // the save future, `TagEditor`'s tag list, and `LinkGroup`'s link list.
+    // **The rule these conversions actually follow** is narrower than "every
+    // read in this file", so do not read it as a guarantee: it is *the reads
+    // reachable from the disposal paths reproduced for #304 and #313* — an
+    // expanded card unmounted by the search filter, and a card deleted from the
+    // board. Those were found empirically, by re-running the reproductions
+    // against a debug build (release strips `defined_at`) until they came back
+    // clean, because each panic masks the next one behind it.
+    //
+    // Deliberately **not** converted, because no reproduction reached them:
+    // `card_state` in `is_collapsed`/`is_expanded` and the `class:` closures,
+    // `context_menu_position`, `show_move_submenu`, `move_submenu_opens_left`,
+    // and `card` in the move-submenu — plus `LinkPicker`'s signals in
+    // `link_editor.rs`. If a new trap appears, that is where to look first, and
+    // the way to find it is the debug-build loop above, not inspection.
     let number = Signal::derive(move || card.try_get().map_or(0, |c| c.number));
     let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
 
@@ -285,34 +294,55 @@ pub fn CardItem(
         let card_id = card.get_untracked().id.clone();
         wasm_bindgen_futures::spawn_local(async move {
             TimeoutFuture::new(500).await;
-            if card_state.get_untracked() == CardState::Editing && body.get_untracked() == snapshot
+            // `try_get_untracked`, for the same reason `do_save` below uses it:
+            // this future sleeps 500ms and the card can be disposed in the
+            // meantime. The expanded-card pin makes that ordinary rather than
+            // exotic — a pinned card is unmounted when *another* card claims
+            // the board's expanded lock, which is one click away while typing.
+            // `None` means the card is gone, so there is nothing to save.
+            if card_state.try_get_untracked() == Some(CardState::Editing)
+                && body.try_get_untracked().as_deref() == Some(snapshot.as_str())
             {
-                do_save(card_id, body.get_untracked());
+                do_save(card_id, snapshot);
             }
         });
     };
 
     // ── Collapse helpers ──────────────────────────────────────────────────
 
+    // Both flush helpers read through `try_get_untracked` and write through
+    // `try_set`. `collapse_silent` is called from an Effect on
+    // `expanded_card_id`, and since the expanded card is pinned into the
+    // filtered list that same lock write is what unmounts it — so the effect
+    // and the disposal are in one batch, and this can run either side of it.
+    // `None` everywhere means the card is already gone: there is no body left
+    // to flush and no state left to set.
+
     // Flush any unsaved edit and go to Expanded (keeps the card open).
     let exit_editing = move || {
-        let current = body.get_untracked();
-        let last_saved = saved_body.get_untracked();
-        if current != last_saved {
-            do_save(card.get_untracked().id.clone(), current);
+        if let (Some(current), Some(last_saved), Some(this_card)) = (
+            body.try_get_untracked(),
+            saved_body.try_get_untracked(),
+            card.try_get_untracked(),
+        ) && current != last_saved
+        {
+            do_save(this_card.id.clone(), current);
         }
-        card_state.set(CardState::Expanded);
+        let _ = card_state.try_set(CardState::Expanded);
     };
 
     // Collapse without touching `expanded_card_id` — used when the reactive
     // Effect below kicks in because another card claimed the expanded slot.
     let collapse_silent = move || {
-        let current = body.get_untracked();
-        let last_saved = saved_body.get_untracked();
-        if current != last_saved {
-            do_save(card.get_untracked().id.clone(), current);
+        if let (Some(current), Some(last_saved), Some(this_card)) = (
+            body.try_get_untracked(),
+            saved_body.try_get_untracked(),
+            card.try_get_untracked(),
+        ) && current != last_saved
+        {
+            do_save(this_card.id.clone(), current);
         }
-        card_state.set(CardState::Collapsed);
+        let _ = card_state.try_set(CardState::Collapsed);
     };
 
     // Full collapse: also clears the board-level expanded-card lock.
@@ -322,10 +352,18 @@ pub fn CardItem(
     };
 
     // When the board-level signal points to a different card, collapse this one.
+    //
+    // This effect is the one the note above `exit_editing` is about: it is
+    // subscribed to the very signal whose change unmounts a pinned card, so its
+    // own reads have to tolerate having been disposed first.
     Effect::new(move |_| {
         let active = expanded_card_id.get();
-        let my_id = card.get_untracked().id.clone();
-        if active.as_deref() != Some(&my_id) && card_state.get_untracked() != CardState::Collapsed {
+        let (Some(this_card), Some(state)) =
+            (card.try_get_untracked(), card_state.try_get_untracked())
+        else {
+            return;
+        };
+        if active.as_deref() != Some(this_card.id.as_str()) && state != CardState::Collapsed {
             collapse_silent();
         }
     });

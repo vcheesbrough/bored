@@ -112,6 +112,24 @@ impl BoardLinkIndex {
     /// rule is unit-tested — this method needs a reactive runtime to hold its
     /// signal, so what is worth asserting lives on the plain data instead.
     pub fn remove_touching(&self, card_id: &str) {
+        // Check before writing: `update` notifies subscribers whether or not
+        // `retain` dropped anything, and the SSE `CardDeleted` arm calls this
+        // for every card delete on the board — almost always a card with no
+        // links at all. A no-op write would re-run every `LinkBadges` derive
+        // and every `LinkChip` closure on the board for nothing, which is the
+        // same spurious notification that makes a mid-unmount component read a
+        // disposed signal. The extra scan is over the board's link list, which
+        // `retain` walks anyway.
+        //
+        // The borrow ends before the `update`, so this is not the
+        // `with_untracked`-held-across-`update` shape that aborts the tab with
+        // "RefCell already borrowed".
+        if !self
+            .links
+            .with_untracked(|links| links.iter().any(|link| link.touches(card_id)))
+        {
+            return;
+        }
         self.links
             .update(|links| links.retain(|link| !link.touches(card_id)));
     }

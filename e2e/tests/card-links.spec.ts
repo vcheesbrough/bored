@@ -4,6 +4,7 @@ import {
   apiCreateCard,
   apiCreateColumn,
   apiCreateLink,
+  apiDeleteCard,
   apiListLinks,
   apiMoveCard,
   gotoBoardView,
@@ -441,6 +442,116 @@ test.describe('card links', () => {
       await expect.poll(async () => apiListLinks(request, board.name)).toEqual([]);
       expect(panics).toEqual([]);
     });
+  });
+
+  test('a lagged tab heals a deleted card\'s links from the card event alone', async ({
+    browser,
+    request,
+  }) => {
+    // Covers the SSE `CardDeleted` arm, which nothing else reaches. The
+    // SSE-down tests abort the stream entirely, and *any* healthy stream —
+    // local delete or remote — has already pruned the index through the
+    // ordinary `CardLinkDeleted` handler before this arm runs, because the
+    // backend broadcasts the link removals first. Verified by commenting the
+    // arm out: every other test in this file still passed.
+    //
+    // The arm exists for one situation only: a receiver that lagged out of the
+    // backend's 128-slot broadcast channel, losing the `card_link_deleted`
+    // events while still getting `card_deleted`. That is simulated faithfully
+    // here by dropping exactly those messages on the way into the app — the
+    // page sees precisely what a lagged receiver sees.
+    //
+    // The partner is left **expanded**, so the prune notifies a live
+    // `LinkChip` and `LinkBadges` from the SSE handler rather than from a
+    // click. Those are the components this iteration found disposal traps in,
+    // so a path that notifies them is exactly what needs asserting.
+    const board = await apiCreateBoard(request, `links-lagged-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const doomed = await apiCreateCard(request, col.id, '# Doomed card');
+    const partner = await apiCreateCard(request, col.id, '# Partner card');
+    const other = await apiCreateCard(request, col.id, '# Third card');
+    await apiCreateLink(request, doomed.id, 'successor', partner.id, 'because');
+    await apiCreateLink(request, partner.id, 'successor', other.id);
+
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    // Swallow every `card_link_deleted` before the app can see it. The board
+    // installs a single `onmessage` handler, so wrapping that setter is enough.
+    await page.addInitScript(() => {
+      const Native = window.EventSource;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).EventSource = function (...args: unknown[]) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const es = new (Native as any)(...args);
+        Object.defineProperty(es, 'onmessage', {
+          set(handler: (ev: MessageEvent) => void) {
+            Native.prototype.addEventListener.call(es, 'message', (ev: Event) => {
+              const msg = ev as MessageEvent;
+              try {
+                if (JSON.parse(msg.data)?.type === 'card_link_deleted') return;
+              } catch {
+                /* not JSON — pass it through untouched */
+              }
+              handler(msg);
+            });
+          },
+          configurable: true,
+        });
+        return es;
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).EventSource.prototype = Native.prototype;
+    });
+
+    const eventsReady = page.waitForResponse(
+      response =>
+        response.request().method() === 'GET' &&
+        response.url().includes(`/api/events?board_id=${board.id}`) &&
+        response.ok()
+    );
+    await gotoBoardView(page, board.name);
+    await eventsReady;
+
+    // Open the partner so its chips are mounted when the delete arrives.
+    await cardWith(page, 'Partner card').click();
+    const expanded = page.locator('.card-item.card-expanded');
+    await expect(
+      expanded.locator('.link-group[data-side="before"] .link-chip-card')
+    ).toHaveText(`#${doomed.number} Doomed card`);
+
+    await apiDeleteCard(request, doomed.id);
+
+    // The link goes even though this tab never saw its removal event — the
+    // card event alone is enough, which is the whole point of the arm.
+    await expect(
+      expanded.locator('.link-group[data-side="before"] .link-chip')
+    ).toHaveCount(0, { timeout: 5000 });
+    await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
+    // The partner's unrelated link is untouched, and still rendered.
+    await expect(
+      expanded.locator('.link-group[data-side="after"] .link-chip-card')
+    ).toHaveText(`#${other.number} Third card`);
+    await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
+      expect.objectContaining({ predecessor_id: partner.id, successor_id: other.id }),
+    ]);
+    expect(panics).toEqual([]);
+
+    // The tab still reacts — a wedged executor would repaint nothing. The
+    // partner is still expanded, so card #304's pin holds it in the filtered
+    // view whatever the query says; a query matching neither card therefore
+    // leaves exactly that one, and the third card disappearing is what proves
+    // the filter re-ran.
+    await page.locator('.navbar-search-input').fill('matches no card at all');
+    await expect(page.locator('.card-item')).toHaveCount(1);
+    await expect(page.locator('.card-item.card-expanded')).toHaveCount(1);
+
+    await context.close();
   });
 
   test('a healthy stream clears a deleted card\'s links exactly once', async ({

@@ -380,7 +380,21 @@ pub fn BoardView() -> AnyView {
         // and the writes below still land on the real column signals.
         let columns = board_card_index.get_untracked();
         for (_, cards) in columns {
-            cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
+            // Only the column that actually holds the card is written. An
+            // `update` notifies its subscribers whether or not `retain` removed
+            // anything, so writing every column would re-run each one's filter
+            // — and every `sig.get()` inside it — for a card they never held.
+            // That is wasted work, and one more chance to notify a component
+            // that is mid-unmount, which is the whole family of bug this
+            // iteration is about. `ColumnView`'s own SSE `CardDeleted` handler
+            // guards the same way; a card is in exactly one column, so stop at
+            // the first hit.
+            let owned =
+                cards.with_untracked(|cs| cs.iter().any(|s| s.get_untracked().id == card_id));
+            if owned {
+                cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
+                break;
+            }
         }
         link_index.remove_touching(&card_id);
     });

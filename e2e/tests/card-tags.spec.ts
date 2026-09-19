@@ -427,6 +427,49 @@ test.describe('card tags', () => {
       await expectBoardStillLive(page, 2);
     });
 
+    test('expanding another card while a pinned card is mid-edit saves it and does not trap', async ({
+      page,
+      request,
+    }) => {
+      // The pin does not remove the unmount — it moves it to the moment another
+      // card claims the board's expanded lock. That write makes two subscribers
+      // dirty at once: the column's filter, which drops and disposes the pinned
+      // card, and the pinned card's own effect, which flushes the unsaved body.
+      // So the flush and the disposal race, and the debounce future started by
+      // the last keystroke is still asleep when the card goes. All three have to
+      // tolerate it: the edit must reach the server and nothing may trap.
+      const board = await apiCreateBoard(request, `tags-filter-switch-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const a = await apiCreateCard(request, col.id, '# Card A', ['bug']);
+      await apiCreateCard(request, col.id, '# Card B', ['bug']);
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await page.locator('.navbar-search-input').fill('#bug');
+
+      // Expand A and remove the filtered tag, so A is pinned and unmatching.
+      await page.locator('.card-item').filter({ hasText: 'Card A' }).click();
+      const expanded = page.locator('.card-item.card-expanded');
+      await expanded.locator('.tag-chip-remove').first().click();
+      await expect(expanded.locator('.tag-chip')).toHaveCount(0);
+
+      // Type into A without waiting for the debounce to fire.
+      await expanded.locator('.card-markdown, .card-body-placeholder').first().click();
+      await expanded.locator('textarea').fill('# Card A\nedited while pinned');
+
+      // Claim the lock with B, never collapsing A.
+      await page.locator('.card-item').filter({ hasText: 'Card B' }).click();
+
+      // A's edit is flushed on the way out rather than dropped.
+      await expect
+        .poll(async () => (await apiGetCard(request, a.id)).body)
+        .toBe('# Card A\nedited while pinned');
+      // A has left the filtered view now that it is no longer pinned.
+      await expect(page.locator('.card-item').filter({ hasText: 'Card A' })).toHaveCount(0);
+      expect(panics).toEqual([]);
+      await expectBoardStillLive(page, 2);
+    });
+
     test('a remote edit that unmatches the expanded card does not trap', async ({
       page,
       request,
