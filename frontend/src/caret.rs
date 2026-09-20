@@ -23,7 +23,7 @@
 //! for not carrying a full character-level source map.
 
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{Element, HtmlTextAreaElement, Node};
+use web_sys::{Element, HtmlElement, HtmlTextAreaElement, Node};
 
 use crate::components::markdown::SRC_POS_ATTR;
 
@@ -31,11 +31,6 @@ use crate::components::markdown::SRC_POS_ATTR;
 /// Below a pixel there is nothing left to correct and browsers disagree about
 /// sub-pixel rounding anyway.
 const SCROLL_EPSILON: f64 = 1.0;
-
-/// Fallback line height, in pixels, when the computed style does not give a
-/// usable number (`line-height: normal` computes to `normal` in some engines).
-/// Only affects how far up the caret sits, not where it lands in the text.
-const FALLBACK_LINE_HEIGHT: f64 = 18.0;
 
 /// The markdown-source offset (UTF-16 code units) of the character at viewport
 /// point (`x`, `y`) inside `container`.
@@ -152,7 +147,16 @@ fn restore_scroll(scroller: Option<&Element>, top: Option<i32>) {
 /// the older WebKit one, still what Safari below 17.4 offers.
 fn caret_node_at(x: f64, y: f64) -> Option<(Node, u32)> {
     let document = web_sys::window()?.document()?;
-    if let Some(caret) = document.caret_position_from_point(x as f32, y as f32) {
+    // The binding for the standard spelling is `structural` with no `catch`,
+    // so calling it on an engine that does not have the method throws a
+    // `TypeError` that unwinds out through wasm and kills the click handler —
+    // taking click-to-edit with it, which is worse than not having the
+    // fallback at all. `Reflect::has` walks the prototype chain, so this is the
+    // `in` operator and costs nothing.
+    if js_sys::Reflect::has(&document, &JsValue::from_str("caretPositionFromPoint"))
+        .unwrap_or(false)
+    {
+        let caret = document.caret_position_from_point(x as f32, y as f32)?;
         return Some((caret.offset_node()?, caret.offset()));
     }
     // WebKit's older spelling. It never became standard, so `web-sys` generates
@@ -255,49 +259,93 @@ fn nearest_run_offset(container: &Element, x: f64, y: f64) -> Option<u32> {
 
 // ── Placing and scrolling ──────────────────────────────────────────────────
 
-/// Distance in pixels from the top of the textarea's content to the top of the
-/// line the caret is on.
+/// Distance in pixels from the top of the textarea's border box to the top of
+/// the line the caret sits on.
 ///
-/// A textarea exposes no caret geometry, so this measures it: shorten the value
-/// to everything before the caret, read the content height that produces, then
-/// put the value back. It all happens inside one event handler, so the browser
-/// never paints the truncated value.
+/// A textarea exposes no caret geometry, so this lays the text out a second
+/// time in a mirror `<div>` that copies the textarea's text metrics and content
+/// width, and reads the offset of a zero-width marker placed at the caret.
+///
+/// The cheaper trick — shorten the value, read `scrollHeight`, put it back —
+/// looks right and silently returns a constant here. The inline card's textarea
+/// shares a CSS grid cell with the rendered markdown and is `align-self:
+/// stretch`, so shrinking its value does not shrink the cell: it is pulled
+/// straight back to the sibling's height. The modal's is `height: 100%`, so any
+/// prefix shorter than the visible box just reads as the box height. Measured
+/// on card #382, that read 3751px for prefixes of 53, 416 and 7364 characters
+/// alike — against true offsets of 12, 137 and 2508 — which scrolled the column
+/// to the end of the card no matter where the user clicked.
 fn caret_top(textarea: &HtmlTextAreaElement, value: &str, pos: u32) -> Option<f64> {
-    let prefix = utf16_prefix(value, pos);
-    // A prefix ending in a newline is a caret on a fresh empty line, and an
-    // empty trailing line does not always count towards `scrollHeight`. The
-    // sentinel gives that line something to be as tall as.
-    let measured = if prefix.ends_with('\n') {
-        format!("{prefix}.")
-    } else {
-        prefix.to_string()
-    };
-
-    let scroll_top = textarea.scroll_top();
-    textarea.set_value(&measured);
-    let prefix_height = f64::from(textarea.scroll_height());
-    textarea.set_value(value);
-    // Restoring the value drops both, so put them back before anything reads
-    // them — the caller sets `scroll_top` again straight after.
-    let _ = textarea.set_selection_range(pos, pos);
-    textarea.set_scroll_top(scroll_top);
-
-    let style = web_sys::window()?
+    let window = web_sys::window()?;
+    let document = window.document()?;
+    let body = document.body()?;
+    let style = window
         .get_computed_style(textarea.unchecked_ref::<Element>())
         .ok()
         .flatten()?;
-    let px = |prop: &str| {
-        style
-            .get_property_value(prop)
-            .ok()
-            .and_then(|v| v.trim_end_matches("px").parse::<f64>().ok())
-    };
-    let line_height = px("line-height").unwrap_or(FALLBACK_LINE_HEIGHT);
-    let padding_bottom = px("padding-bottom").unwrap_or(0.0);
 
-    // `prefix_height` runs from the top of the padding box to the bottom of the
-    // caret's line, plus the bottom padding. Strip those to get the line's top.
-    Some((prefix_height - padding_bottom - line_height).max(0.0))
+    let prop = |name: &str| style.get_property_value(name).unwrap_or_default();
+    let px = |name: &str| {
+        prop(name)
+            .trim_end_matches("px")
+            .parse::<f64>()
+            .unwrap_or(0.0)
+    };
+
+    // `client_width` is the padding box, so take the padding back off to get the
+    // width the text actually wraps at.
+    let content_width =
+        (f64::from(textarea.client_width()) - px("padding-left") - px("padding-right")).max(0.0);
+
+    // Transparent borders of the real widths: `offset_top` is measured from the
+    // border edge, which is also what `get_bounding_client_rect().top` returns
+    // for the textarea, so the two agree without any correction term.
+    let css = format!(
+        "position:absolute;visibility:hidden;left:-9999px;top:0;\
+         box-sizing:content-box;white-space:pre-wrap;overflow-wrap:break-word;\
+         width:{content_width}px;\
+         font-family:{};font-size:{};font-weight:{};font-style:{};\
+         letter-spacing:{};line-height:{};text-transform:{};word-spacing:{};\
+         text-indent:{};tab-size:{};\
+         padding:{} {} {} {};\
+         border-width:{} {} {} {};border-style:solid;border-color:transparent;",
+        prop("font-family"),
+        prop("font-size"),
+        prop("font-weight"),
+        prop("font-style"),
+        prop("letter-spacing"),
+        prop("line-height"),
+        prop("text-transform"),
+        prop("word-spacing"),
+        prop("text-indent"),
+        prop("tab-size"),
+        prop("padding-top"),
+        prop("padding-right"),
+        prop("padding-bottom"),
+        prop("padding-left"),
+        prop("border-top-width"),
+        prop("border-right-width"),
+        prop("border-bottom-width"),
+        prop("border-left-width"),
+    );
+
+    let mirror = document.create_element("div").ok()?;
+    mirror.set_attribute("style", &css).ok()?;
+    // `white-space: pre-wrap` keeps a trailing newline, so a caret on a fresh
+    // empty line lands on that line rather than the end of the one above.
+    mirror.set_text_content(Some(utf16_prefix(value, pos)));
+
+    let marker = document.create_element("span").ok()?;
+    // Zero-width space: joins the layout without drawing anything.
+    marker.set_text_content(Some("\u{200b}"));
+    mirror.append_child(&marker).ok()?;
+    body.append_child(&mirror).ok()?;
+
+    let top = marker
+        .dyn_ref::<HtmlElement>()
+        .map(|el| f64::from(el.offset_top()));
+    let _ = body.remove_child(&mirror);
+    top
 }
 
 /// The nearest ancestor of `el` that actually scrolls — the column's card list

@@ -73,6 +73,13 @@ fn to_html_with(md: &str, query: &str, source_positions: bool) -> String {
     // DOM wants. Kept outside the closure so one cursor walks `md` once across
     // every run, rather than rescanning the prefix per run.
     let mut utf16 = Utf16Cursor::new(md);
+    // Depth of open images. `push_html` builds an image's `alt` attribute by
+    // running `raw_text()` over the events inside it, and `raw_text` escapes
+    // `InlineHtml` straight into the attribute — so annotating that text would
+    // put `alt="&lt;span data-src=…"` in front of every screen reader. There is
+    // nothing to click there either: an image renders as a picture, not as its
+    // alt text.
+    let mut image_depth: u32 = 0;
     let parser = parser.map(|(event, range)| match event {
         Event::Start(Tag::CodeBlock(_)) => {
             code_depth += 1;
@@ -82,11 +89,19 @@ fn to_html_with(md: &str, query: &str, source_positions: bool) -> String {
             code_depth = code_depth.saturating_sub(1);
             event
         }
+        Event::Start(Tag::Image { .. }) => {
+            image_depth += 1;
+            event
+        }
+        Event::End(TagEnd::Image) => {
+            image_depth = image_depth.saturating_sub(1);
+            event
+        }
         // Inline code is a single event whose range spans the backticks too, so
         // the run's own start has to be located inside that slice. `push_html`
         // escapes the payload of `Event::Code`, so the annotated form has to be
         // emitted as `InlineHtml` — `<code>` wrapper and all.
-        Event::Code(text) if source_positions => {
+        Event::Code(text) if source_positions && image_depth == 0 => {
             let start = locate_run(md, &range, &text);
             let mut out = String::with_capacity(text.len() + 48);
             out.push_str("<code>");
@@ -102,7 +117,7 @@ fn to_html_with(md: &str, query: &str, source_positions: bool) -> String {
             } else {
                 Vec::new()
             };
-            if source_positions {
+            if source_positions && image_depth == 0 {
                 let start = locate_run(md, &range, &text);
                 Event::InlineHtml(CowStr::from(wrap_run(
                     &text,
@@ -526,6 +541,34 @@ mod tests {
             "dangerous link still stripped: {link}"
         );
         assert!(!link.contains("javascript:"));
+    }
+
+    #[test]
+    fn image_alt_text_survives_annotation() {
+        // `push_html` builds `alt` with `raw_text()`, which escapes InlineHtml
+        // straight into the attribute — annotating an image's text put
+        // `alt="&lt;span data-src=…"` in front of every screen reader.
+        let plain = to_html("![alt text](x.png)");
+        let out = annotated("![alt text](x.png)");
+        assert!(
+            out.contains(r#"alt="alt text""#),
+            "alt must be clean: {out}"
+        );
+        assert!(
+            !out.contains("data-src"),
+            "an image's text must not be annotated: {out}"
+        );
+        assert_eq!(out, plain, "annotation must not change an image at all");
+    }
+
+    #[test]
+    fn text_around_an_image_is_still_annotated() {
+        // Only the alt text is exempt; the prose either side stays clickable.
+        let md = "before ![alt](x.png) after";
+        let out = annotated(md);
+        assert_eq!(src_of(&out, "before "), 0);
+        assert_eq!(src_of(&out, " after"), md.find(" after").unwrap());
+        assert!(out.contains(r#"alt="alt""#), "alt still clean: {out}");
     }
 
     #[test]

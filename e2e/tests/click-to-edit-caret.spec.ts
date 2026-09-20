@@ -59,6 +59,62 @@ async function openModal(page: Page) {
   await expect(page.locator('.modal-markdown')).toBeVisible();
 }
 
+/**
+ * The caret's screen Y, measured with a mirror div.
+ *
+ * Deliberately NOT the textarea's own `scrollHeight`: that is what the app used
+ * to use, and it returns a constant here (the inline textarea is stretched by
+ * its grid sibling, the modal's is `height: 100%`), so a test built on it
+ * agrees with a broken app and reports a perfect result. See card #382.
+ */
+async function caretScreenY(page: Page, sel: string) {
+  return await page.evaluate((sel) => {
+    const ta = document.querySelector(sel) as HTMLTextAreaElement;
+    const cs = getComputedStyle(ta);
+    const mirror = document.createElement('div');
+    for (const p of [
+      'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing',
+      'lineHeight', 'textTransform', 'wordSpacing', 'textIndent', 'tabSize',
+      'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+    ]) (mirror.style as any)[p] = (cs as any)[p];
+    mirror.style.position = 'absolute';
+    mirror.style.visibility = 'hidden';
+    mirror.style.left = '-9999px';
+    mirror.style.top = '0';
+    mirror.style.boxSizing = 'content-box';
+    mirror.style.borderStyle = 'solid';
+    mirror.style.borderColor = 'transparent';
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.overflowWrap = 'break-word';
+    mirror.style.width =
+      `${ta.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)}px`;
+    mirror.textContent = ta.value.slice(0, ta.selectionStart);
+    const span = document.createElement('span');
+    span.textContent = '\u200b';
+    mirror.appendChild(span);
+    document.body.appendChild(mirror);
+    const caretTop = span.offsetTop;
+    document.body.removeChild(mirror);
+
+    let scroller: HTMLElement | null = ta.parentElement;
+    while (scroller) {
+      const oy = getComputedStyle(scroller).overflowY;
+      if (scroller.scrollHeight > scroller.clientHeight && (oy === 'auto' || oy === 'scroll')) break;
+      scroller = scroller.parentElement;
+    }
+    return {
+      caretTop,
+      y: ta.getBoundingClientRect().top + caretTop - ta.scrollTop,
+      lineHeight: parseFloat(cs.lineHeight),
+      taScrollTop: ta.scrollTop,
+      taScrollMax: ta.scrollHeight - ta.clientHeight,
+      scrollerTop: scroller ? scroller.scrollTop : null,
+      scrollerMax: scroller ? scroller.scrollHeight - scroller.clientHeight : null,
+    };
+  }, sel);
+}
+
 test.describe('Click-to-edit caret placement', () => {
   test('modal: caret lands on the clicked word and scrolls under the pointer', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `caret-modal-board-${Date.now()}`);
@@ -81,37 +137,12 @@ test.describe('Click-to-edit caret placement', () => {
     expect(selectionStart).toBeGreaterThanOrEqual(offset);
     expect(selectionStart).toBeLessThanOrEqual(offset + word.length);
 
-    // The textarea must actually be scrollable, or the scroll assertion below
-    // would pass for the wrong reason.
-    const geom = await textarea.evaluate((el: HTMLTextAreaElement, pos: number) => {
-      const style = getComputedStyle(el);
-      const lineHeight = parseFloat(style.lineHeight);
-      const paddingBottom = parseFloat(style.paddingBottom);
-      // Measure the caret's line independently of the app: shorten the value,
-      // read the height that produces, put it back.
-      const value = el.value;
-      const savedScroll = el.scrollTop;
-      const prefix = value.slice(0, pos);
-      el.value = prefix.endsWith('\n') ? `${prefix}.` : prefix;
-      const prefixHeight = el.scrollHeight;
-      el.value = value;
-      el.scrollTop = savedScroll;
-      const rect = el.getBoundingClientRect();
-      const caretTop = Math.max(0, prefixHeight - paddingBottom - lineHeight);
-      return {
-        caretClientY: rect.top + caretTop - el.scrollTop,
-        lineHeight,
-        scrollTop: el.scrollTop,
-        scrollHeight: el.scrollHeight,
-        clientHeight: el.clientHeight,
-      };
-    }, selectionStart);
-
-    expect(geom.scrollHeight, 'body must be long enough to scroll').toBeGreaterThan(geom.clientHeight);
-    expect(geom.scrollTop, 'textarea must have scrolled to reach the caret').toBeGreaterThan(0);
+    const geom = await caretScreenY(page, '.modal-body-textarea');
+    expect(geom.taScrollMax, 'body must be long enough to scroll').toBeGreaterThan(0);
+    expect(geom.taScrollTop, 'textarea must have scrolled to reach the caret').toBeGreaterThan(0);
     expect(
-      Math.abs(geom.caretClientY - clicked.y),
-      `caret at ${geom.caretClientY} should be near the click at ${clicked.y}`
+      Math.abs(geom.y - clicked.y),
+      `caret at ${geom.y} should be near the click at ${clicked.y}`
     ).toBeLessThanOrEqual(2 * geom.lineHeight);
 
     // Liveness: the editor still works after the caret was placed — typing at
@@ -149,45 +180,63 @@ test.describe('Click-to-edit caret placement', () => {
     expect(selectionStart).toBeGreaterThanOrEqual(offset);
     expect(selectionStart).toBeLessThanOrEqual(offset + word.length);
 
-    // The inline textarea is `field-sizing: content` and never scrolls itself,
-    // so reaching the caret is entirely the column's job. Without this the
-    // column scrolled to the *end* of the card instead of to the caret, and
-    // nothing failed — `selectionStart` above is blind to where the column sat.
-    const geom = await textarea.evaluate((el: HTMLTextAreaElement, pos: number) => {
-      const style = getComputedStyle(el);
-      const lineHeight = parseFloat(style.lineHeight);
-      const paddingBottom = parseFloat(style.paddingBottom);
-      // Find the column that scrolls, so its position can be put back: the
-      // measurement below resizes the card and would otherwise disturb it.
-      let scroller: HTMLElement | null = el.parentElement;
-      while (scroller) {
-        const oy = getComputedStyle(scroller).overflowY;
-        if (scroller.scrollHeight > scroller.clientHeight && (oy === 'auto' || oy === 'scroll')) break;
-        scroller = scroller.parentElement;
-      }
-      const scrollerTop = scroller ? scroller.scrollTop : 0;
-
-      const value = el.value;
-      const prefix = value.slice(0, pos);
-      el.value = prefix.endsWith('\n') ? `${prefix}.` : prefix;
-      const prefixHeight = el.scrollHeight;
-      el.value = value;
-      el.setSelectionRange(pos, pos);
-      if (scroller) scroller.scrollTop = scrollerTop;
-
-      const caretTop = Math.max(0, prefixHeight - paddingBottom - lineHeight);
-      return {
-        caretClientY: el.getBoundingClientRect().top + caretTop - el.scrollTop,
-        lineHeight,
-        foundScroller: scroller !== null,
-      };
-    }, selectionStart);
-
-    expect(geom.foundScroller, 'the column must be the thing that scrolls here').toBe(true);
+    // The inline textarea never scrolls itself, so reaching the caret is
+    // entirely the column's job — and `selectionStart` above is blind to where
+    // the column ended up.
+    const geom = await caretScreenY(page, '.card-body-textarea');
+    expect(geom.scrollerTop, 'the column must be the thing that scrolls here').not.toBeNull();
     expect(
-      Math.abs(geom.caretClientY - clicked.y),
-      `caret at ${geom.caretClientY} should be near the click at ${clicked.y}`
+      Math.abs(geom.y - clicked.y),
+      `caret at ${geom.y} should be near the click at ${clicked.y}`
     ).toBeLessThanOrEqual(3 * geom.lineHeight);
+  });
+
+  // Independent of how the caret is measured: clicking progressively deeper
+  // into the same card must scroll the column progressively further. The
+  // `scrollHeight` measurement this replaced returned one constant for every
+  // prefix, so every click parked the column at the same place — and a test
+  // that measured the caret the same wrong way could not see it.
+  test('inline card: clicking deeper scrolls the column further', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `caret-monotonic-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(request, col.id, BODY);
+    await gotoBoardView(page, board.name);
+
+    await page.locator('.card-item').first().click();
+    await expect(page.locator('.card-item.card-expanded')).toBeVisible();
+
+    const seen: { idx: number; caretTop: number; scrollerTop: number; delta: number }[] = [];
+    for (const idx of [3, 40, 100]) {
+      const target = marker(page, '.card-markdown', idx);
+      const clicked = await clickCentre(page, target);
+      await expect(page.locator('.card-item.card-editing')).toBeVisible();
+      const geom = await caretScreenY(page, '.card-body-textarea');
+      seen.push({
+        idx,
+        caretTop: geom.caretTop,
+        scrollerTop: geom.scrollerTop ?? -1,
+        delta: geom.y - clicked.y,
+      });
+      // Back to the rendered view so the next marker can be clicked.
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.card-item.card-editing')).toHaveCount(0);
+    }
+
+    const summary = JSON.stringify(seen);
+    for (let i = 1; i < seen.length; i++) {
+      expect(
+        seen[i].caretTop,
+        `caret offset must grow with click depth, got ${summary}`
+      ).toBeGreaterThan(seen[i - 1].caretTop);
+      expect(
+        seen[i].scrollerTop,
+        `column scroll must grow with click depth, got ${summary}`
+      ).toBeGreaterThan(seen[i - 1].scrollerTop);
+    }
+    // And each one landed near its own click.
+    for (const s of seen) {
+      expect(Math.abs(s.delta), `marker${s.idx} delta too large in ${summary}`).toBeLessThanOrEqual(80);
+    }
   });
 
   test('modal: clicking below the last paragraph lands at the end, not the start', async ({ page, request }) => {
