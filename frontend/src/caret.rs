@@ -371,10 +371,15 @@ fn nearest_scrollable(el: &HtmlTextAreaElement) -> Option<Element> {
 }
 
 /// The viewport Y a rendered-body click should anchor the caret to, or `None`
-/// for a synthetic click that carries no coordinates (`element.click()`, and
-/// the keyboard activation browsers report the same way).
+/// when there was no pointer to anchor to.
+///
+/// `detail` is the click count, and it is `0` exactly when the event did not
+/// come from a pointer — `element.click()`, and the keyboard activation
+/// browsers report the same way. Those carry `(0, 0)` coordinates, but so does
+/// a genuine click in the top-left corner, which is why the coordinates
+/// themselves cannot be used to tell the two apart.
 pub fn anchor_of(ev: &web_sys::MouseEvent) -> Option<f64> {
-    if ev.client_x() == 0 && ev.client_y() == 0 {
+    if ev.detail() == 0 {
         None
     } else {
         Some(f64::from(ev.client_y()))
