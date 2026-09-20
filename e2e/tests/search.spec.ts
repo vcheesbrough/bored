@@ -3,6 +3,7 @@ import {
   apiCreateBoard,
   apiCreateColumn,
   apiCreateCard,
+  apiCreateLink,
   apiGetCard,
   apiUpdateCard,
   gotoBoardView,
@@ -291,6 +292,155 @@ test.describe('simple search', () => {
     await expect(page.locator('.card-item')).toHaveCount(1);
     await expect(page.locator('.card-item')).toContainText('The actual numbered card');
     await expect(page.locator('.card-item')).not.toContainText('Body mentions');
+  });
+
+  // ── `#number` reaches one hop along the links — card #305 ───────────────
+  // `#42` answers "what is going on around this ticket": card 42 plus the
+  // cards linked directly before and after it. The cards pulled in by a link
+  // carry neither the number nor the text, so the link badge that put them
+  // there is highlighted instead of their own number badge.
+  test.describe('#number includes linked cards', () => {
+    /** A trap surfaces as a `wasm panic:` console error or an `unreachable` page error. */
+    function watchForPanics(page: import('@playwright/test').Page) {
+      const panics: string[] = [];
+      page.on('console', msg => {
+        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+      });
+      page.on('pageerror', err => panics.push(String(err)));
+      return panics;
+    }
+
+    test('shows direct links in both directions, and stops there', async ({ page, request }) => {
+      const board = await apiCreateBoard(request, `search-link-board-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const target = await apiCreateCard(request, col.id, 'The hub card');
+      const before = await apiCreateCard(request, col.id, 'Comes first');
+      const after = await apiCreateCard(request, col.id, 'Deploy the thing');
+      const twoHops = await apiCreateCard(request, col.id, 'Two hops out');
+      await apiCreateCard(request, col.id, 'Nothing to do with it');
+
+      // before → target → after → twoHops.
+      await apiCreateLink(request, target.id, 'predecessor', before.id);
+      await apiCreateLink(request, target.id, 'successor', after.id);
+      await apiCreateLink(request, after.id, 'successor', twoHops.id);
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await expect(page.locator('.card-item')).toHaveCount(5);
+
+      const search = page.locator('.navbar-search-input');
+      await search.fill(`#${target.number}`);
+
+      // The hub and its two neighbours — not the card two hops out, and not
+      // the unlinked one.
+      const cards = page.locator('.card-item');
+      await expect(cards).toHaveCount(3);
+      await expect(cards.filter({ hasText: 'The hub card' })).toHaveCount(1);
+      await expect(cards.filter({ hasText: 'Comes first' })).toHaveCount(1);
+      await expect(cards.filter({ hasText: 'Deploy the thing' })).toHaveCount(1);
+      await expect(cards.filter({ hasText: 'Two hops out' })).toHaveCount(0);
+      await expect(cards.filter({ hasText: 'Nothing to do with it' })).toHaveCount(0);
+
+      // Why each card is on screen: the hub by its own number badge, the
+      // neighbours by the link badge naming the hub.
+      const hub = cards.filter({ hasText: 'The hub card' });
+      const neighbour = cards.filter({ hasText: 'Comes first' });
+      await expect(hub.locator('.card-number')).toHaveClass(/card-number-hit/);
+      await expect(neighbour.locator('.card-number')).not.toHaveClass(/card-number-hit/);
+      await expect(neighbour.locator('.link-badge-number.link-badge-hit')).toHaveText(
+        `#${target.number}`
+      );
+      // The hub's own badges name the neighbours, which are not what was typed.
+      await expect(hub.locator('.link-badge-number.link-badge-hit')).toHaveCount(0);
+
+      // A bare number does not reach along links: the hub alone.
+      await search.fill(`${target.number}`);
+      await expect(cards).toHaveCount(1);
+      await expect(cards).toContainText('The hub card');
+
+      // Other terms still apply to the linked card itself, not to the hub.
+      await search.fill(`#${target.number} deploy`);
+      await expect(cards).toHaveCount(1);
+      await expect(cards).toContainText('Deploy the thing');
+
+      // Liveness: the board still repaints, and the filter lets everything back.
+      await search.fill('');
+      await expect(cards).toHaveCount(5);
+      expect(panics).toEqual([]);
+    });
+
+    test('linking and unlinking during an active search moves cards in and out', async ({
+      page,
+      request,
+    }) => {
+      const board = await apiCreateBoard(request, `search-link-live-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const target = await apiCreateCard(request, col.id, 'The hub card');
+      const other = await apiCreateCard(request, col.id, 'Joins later');
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      const cards = page.locator('.card-item');
+      await expect(cards).toHaveCount(2);
+
+      await page.locator('.navbar-search-input').fill(`#${target.number}`);
+      await expect(cards).toHaveCount(1);
+
+      // The link arrives over SSE, with no reload and nothing else touched.
+      const link = await apiCreateLink(request, target.id, 'successor', other.id);
+      await expect(cards).toHaveCount(2);
+      await expect(cards.filter({ hasText: 'Joins later' })).toHaveCount(1);
+      await expect(
+        cards.filter({ hasText: 'Joins later' }).locator('.link-badge-number.link-badge-hit')
+      ).toHaveText(`#${target.number}`);
+
+      // …and removing it takes the card back out, again without a reload.
+      await request.delete(`/api/links/${link.id}`);
+      await expect(cards).toHaveCount(1);
+      await expect(cards).toContainText('The hub card');
+      expect(panics).toEqual([]);
+    });
+
+    test('an expanded card that matches only by link is not collapsed by the query', async ({
+      page,
+      request,
+    }) => {
+      // The #375 rule releases the expanded-card pin when the query moves past
+      // the card. A card linked to the number being typed has not been moved
+      // past — the filter keeps it — so the pin must hold and the card must
+      // stay open.
+      const board = await apiCreateBoard(request, `search-link-pin-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const target = await apiCreateCard(request, col.id, 'The hub card');
+      const linked = await apiCreateCard(request, col.id, 'Comes after');
+      await apiCreateLink(request, target.id, 'successor', linked.id);
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await expect(page.locator('.card-item')).toHaveCount(2);
+
+      await page.locator('.card-item').filter({ hasText: 'Comes after' }).click();
+      const expanded = page.locator('.card-item.card-expanded');
+      await expect(expanded).toHaveCount(1);
+
+      await page.locator('.navbar-search-input').fill(`#${target.number}`);
+      await expect(page.locator('.card-item')).toHaveCount(2);
+      await expect(expanded).toHaveCount(1);
+      await expect(expanded).toContainText('Comes after');
+
+      // A number it is *not* linked to still releases it, so the card is held
+      // by the link rule and not by the pin refusing to let go at all.
+      await page.locator('.navbar-search-input').fill(`#${target.number + 99999}`);
+      await expect(page.locator('.card-item')).toHaveCount(0);
+      await expect(expanded).toHaveCount(0);
+
+      // Liveness: the board repaints and takes a fresh expansion.
+      await page.locator('.navbar-search-input').fill('');
+      await expect(page.locator('.card-item')).toHaveCount(2);
+      await page.locator('.card-item').filter({ hasText: 'The hub card' }).click();
+      await expect(expanded).toContainText('The hub card');
+      expect(panics).toEqual([]);
+    });
   });
 
   test('is scoped to the current board', async ({ page, request }) => {

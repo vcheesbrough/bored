@@ -1775,6 +1775,16 @@ mark.search-hit {
   color: var(--yellow);
 }
 
+/* Searching `#42` also shows 42's linked cards, which have no matching text or
+   number of their own to light up — so the link that put them there does,
+   exactly as `.card-number-hit` marks the card the query names. */
+.link-badge-number.link-badge-hit {
+  background: var(--yellow);
+  color: var(--surface-2);
+  border-radius: 2px;
+  padding: 0 3px;
+}
+
 /* Expanded card and modal: one row per side, chips then the picker. */
 .link-editor {
   display: flex;

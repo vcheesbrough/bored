@@ -575,12 +575,19 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                             // makes the column re-filter when the user collapses
                             // a pinned card that no longer matches.
                             let expanded = expanded_card_id.get();
+                            // The board's links, likewise once and likewise
+                            // tracked: a `#42` query also shows 42's linked
+                            // cards (card #305), so linking or unlinking while
+                            // that search is active has to re-filter the column
+                            // — whether the change came from this tab or over
+                            // SSE from another.
+                            let links = links_index.links.get();
                             cards
                                 .get()
                                 .into_iter()
                                 .filter(|sig| {
                                     let card = sig.get();
-                                    card_is_visible(&card, &query, expanded.as_deref())
+                                    card_is_visible(&card, &query, expanded.as_deref(), &links)
                                 })
                                 .collect::<Vec<_>>()
                         }
