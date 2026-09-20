@@ -122,10 +122,14 @@ html[data-connection="offline"] .btn-restore {
   cursor: not-allowed;
 }
 
-/* Drag is a mutation too, and a half-completed drag that the server refuses
-   leaves the board looking wrong until the next fetch. `-webkit-user-drag`
-   is the only way to suppress a native drag from CSS; clicks still work, so
-   cards can still be opened and read. */
+/* Drag is a mutation too, so where the browser lets CSS say so, do not let one
+   start. `-webkit-user-drag` is non-standard — Chromium and WebKit honour it,
+   Firefox ignores it — so this is an affordance and nothing depends on it: a
+   drop that does happen is refused by `crate::api` like any other mutation,
+   and the board stays truthful either way. A card move is not applied locally
+   until its `CardMoved` event arrives, and the one optimistic write, the column
+   reorder, is undone on refusal (`crate::columns::restore_order`). Clicks still
+   work, so cards can still be opened and read. */
 html[data-connection="offline"] .card-item,
 html[data-connection="offline"] .column-grip,
 html[data-connection="offline"] .collapsed-column-grip {

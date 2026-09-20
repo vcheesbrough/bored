@@ -27,6 +27,19 @@
 //! is kept as pure functions over plain values, with no `web_sys` in sight, so
 //! `cargo test -p frontend` can exercise it on the host target where there is
 //! no DOM.
+//!
+//! ## The reload does not ask, and can discard an unsaved edit
+//!
+//! (1) and (2) meet in one window: a deploy lands while the user is typing.
+//! The stream dies, the tab goes `Disconnected`, the save is refused by
+//! [`crate::api`], so the new text exists only in this tab's signals — and
+//! within one heartbeat the reload takes it, with no prompt and nothing
+//! written anywhere. Nothing here defers the reload for an edit in progress,
+//! and that is the deliberate choice: a deploy reload that stops to ask, or
+//! that waits for a tab to go idle, is a tab still running code the server has
+//! moved past — which is the failure this module exists to end. The exposure
+//! is the seconds between a refused save and the next heartbeat, and it is the
+//! one case where this feature destroys user input.
 
 use leptos::prelude::*;
 use std::cell::Cell;
@@ -98,7 +111,10 @@ struct Conn {
     /// Set once [`start`] has spawned the heartbeat, so a second call (a
     /// remount, say) does not start a second one.
     started: Cell<bool>,
-    /// Guards against piling up probes when several SSE errors arrive at once.
+    /// Whether an *out-of-band* probe (see [`probe_now`]) is in flight, so a
+    /// burst of SSE errors spawns one extra probe rather than one each. Owned
+    /// by `probe_now` alone: the scheduled heartbeat neither sets nor clears
+    /// it, so it cannot release a claim that is not its own.
     probing: Cell<bool>,
     /// Whether the "refusing to reload again" warning has already been logged,
     /// so a [`ReloadDecision::Blocked`] heartbeat does not spam the console
@@ -260,26 +276,32 @@ pub fn start() {
     });
 }
 
-/// Run one heartbeat out of band, unless one is already in flight.
+/// Run one heartbeat out of band, unless an out-of-band one is already in
+/// flight.
 ///
 /// The scheduled loop keeps running either way; this only shortens the wait.
 fn probe_now() {
-    if CONN.with(|c| c.probing.get()) {
+    // Claim the slot *here*, synchronously. `spawn_local` only queues the
+    // task, so a flag the task set for itself would still read `false` for
+    // every other SSE error arriving in the same tick, and each of them would
+    // spawn a probe of its own. `replace` tests and sets in one step.
+    if CONN.with(|c| c.probing.replace(true)) {
         return;
     }
     wasm_bindgen_futures::spawn_local(async move {
         probe().await;
+        // Released by the task that claimed it, and by nothing else — the
+        // scheduled heartbeat runs `probe()` too, and if it cleared this flag
+        // when *it* finished, it could free the slot while this probe was
+        // still in flight.
+        CONN.with(|c| c.probing.set(false));
     });
 }
 
 /// One heartbeat: ask the server who it is, publish what that implies, and
 /// reload the tab if the server has moved to a different version.
 async fn probe() {
-    CONN.with(|c| c.probing.set(true));
-    let result = crate::api::fetch_app_info().await;
-    CONN.with(|c| c.probing.set(false));
-
-    let Ok(info) = result else {
+    let Ok(info) = crate::api::fetch_app_info().await else {
         // Any failure counts: a refused connection, a 502 from the proxy while
         // the container restarts, or a body that is not the JSON we expect.
         CONN.with(|c| {

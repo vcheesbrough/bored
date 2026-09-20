@@ -376,6 +376,15 @@ pub fn BoardView() -> AnyView {
             return;
         }
 
+        // The order as it stands, so the optimistic reorder below can be undone
+        // if the server does not accept it.
+        let previous_order: Vec<String> = columns.with_untracked(|current| {
+            current
+                .iter()
+                .map(|column| column.get_untracked().id.clone())
+                .collect()
+        });
+
         let mut reordered = false;
         columns.update(|current| {
             let Some(dragged_index) = current
@@ -410,6 +419,13 @@ pub fn BoardView() -> AnyView {
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(err) = crate::api::reorder_columns(&slug, order).await {
                     leptos::logging::error!("reorder_columns failed: {err}");
+                    // The list was reordered above, before the server had a
+                    // say. It said no — refused outright while the tab is
+                    // disconnected, or failed — so put the order back rather
+                    // than leave the board showing one the server never took.
+                    // This is the only optimistic write among the drag
+                    // handlers: a card move waits for its `CardMoved` event.
+                    crate::columns::restore_order(columns, &previous_order);
                 }
             });
         }
@@ -552,7 +568,6 @@ pub fn BoardView() -> AnyView {
                 sse_event.set(Some(event));
             });
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
-        cb.forget();
 
         // The stream is live: the board is receiving other tabs' changes
         // again, so mutations are allowed and the offline badge goes away.
@@ -563,7 +578,6 @@ pub fn BoardView() -> AnyView {
             crate::connection::stream_up();
         });
         es.set_onopen(Some(onopen_cb.as_ref().unchecked_ref()));
-        onopen_cb.forget();
 
         let es_for_error = es.clone();
         let onerror_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
@@ -580,8 +594,8 @@ pub fn BoardView() -> AnyView {
             if es_for_error.ready_state() != web_sys::EventSource::CLOSED {
                 return;
             }
-            // `try_*` throughout: this closure is `forget`-ed, so a reply that
-            // arrives after the view unmounted would otherwise touch disposed
+            // `try_*` throughout: the timer below outlives this closure, so a
+            // wake-up after the view unmounted would otherwise touch disposed
             // signals.
             let failures = sse_failures
                 .try_update(|n| {
@@ -598,9 +612,24 @@ pub fn BoardView() -> AnyView {
             });
         });
         es.set_onerror(Some(onerror_cb.as_ref().unchecked_ref()));
-        onerror_cb.forget();
 
-        on_cleanup(move || es_for_cleanup.close());
+        // The closures are handed to the cleanup rather than `forget`-ed. A
+        // forgotten closure lives as long as the tab, which was tolerable when
+        // this effect re-ran only on a board change; it now re-runs on every
+        // reconnect attempt, so against a server that stays down that would
+        // leak three closures — and the signal handles they capture — every
+        // ten seconds, for as long as the tab is open. Dropping them here ties
+        // each generation's closures to the `EventSource` they serve, after it
+        // is closed and can no longer call them.
+        //
+        // `SendWrapper` because `on_cleanup` demands `Send + Sync` and a
+        // `Closure` is neither. It panics if touched from another thread, which
+        // cannot happen: a wasm SPA has exactly one.
+        let handlers = send_wrapper::SendWrapper::new((cb, onopen_cb, onerror_cb));
+        on_cleanup(move || {
+            es_for_cleanup.close();
+            drop(handlers);
+        });
     });
 
     // ── Initial data fetch ────────────────────────────────────────────────
