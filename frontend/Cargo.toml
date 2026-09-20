@@ -30,6 +30,7 @@ web-sys = { version = "0.3", features = [
     "HtmlInputElement",
     "Storage",
     "CaretPosition",
+    "FocusOptions",
     "Range",
     "DomRect",
     "CssStyleDeclaration",

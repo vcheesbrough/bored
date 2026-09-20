@@ -140,7 +140,7 @@ test.describe('Click-to-edit caret placement', () => {
     const word = 'marker40';
     const target = marker(page, '.card-markdown', 40);
     const offset = await runOffset(target, word);
-    await clickCentre(page, target);
+    const clicked = await clickCentre(page, target);
 
     const textarea = page.locator('.card-body-textarea').first();
     await expect(page.locator('.card-item.card-editing')).toBeVisible();
@@ -148,6 +148,46 @@ test.describe('Click-to-edit caret placement', () => {
     const selectionStart = await textarea.evaluate((el: HTMLTextAreaElement) => el.selectionStart);
     expect(selectionStart).toBeGreaterThanOrEqual(offset);
     expect(selectionStart).toBeLessThanOrEqual(offset + word.length);
+
+    // The inline textarea is `field-sizing: content` and never scrolls itself,
+    // so reaching the caret is entirely the column's job. Without this the
+    // column scrolled to the *end* of the card instead of to the caret, and
+    // nothing failed — `selectionStart` above is blind to where the column sat.
+    const geom = await textarea.evaluate((el: HTMLTextAreaElement, pos: number) => {
+      const style = getComputedStyle(el);
+      const lineHeight = parseFloat(style.lineHeight);
+      const paddingBottom = parseFloat(style.paddingBottom);
+      // Find the column that scrolls, so its position can be put back: the
+      // measurement below resizes the card and would otherwise disturb it.
+      let scroller: HTMLElement | null = el.parentElement;
+      while (scroller) {
+        const oy = getComputedStyle(scroller).overflowY;
+        if (scroller.scrollHeight > scroller.clientHeight && (oy === 'auto' || oy === 'scroll')) break;
+        scroller = scroller.parentElement;
+      }
+      const scrollerTop = scroller ? scroller.scrollTop : 0;
+
+      const value = el.value;
+      const prefix = value.slice(0, pos);
+      el.value = prefix.endsWith('\n') ? `${prefix}.` : prefix;
+      const prefixHeight = el.scrollHeight;
+      el.value = value;
+      el.setSelectionRange(pos, pos);
+      if (scroller) scroller.scrollTop = scrollerTop;
+
+      const caretTop = Math.max(0, prefixHeight - paddingBottom - lineHeight);
+      return {
+        caretClientY: el.getBoundingClientRect().top + caretTop - el.scrollTop,
+        lineHeight,
+        foundScroller: scroller !== null,
+      };
+    }, selectionStart);
+
+    expect(geom.foundScroller, 'the column must be the thing that scrolls here').toBe(true);
+    expect(
+      Math.abs(geom.caretClientY - clicked.y),
+      `caret at ${geom.caretClientY} should be near the click at ${clicked.y}`
+    ).toBeLessThanOrEqual(3 * geom.lineHeight);
   });
 
   test('modal: clicking below the last paragraph lands at the end, not the start', async ({ page, request }) => {

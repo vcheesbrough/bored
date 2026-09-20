@@ -69,30 +69,78 @@ pub fn place_caret(textarea: &HtmlTextAreaElement, pos: u32, anchor_y: Option<f6
     let value = textarea.value();
     let pos = pos.min(utf16_len(&value));
 
-    let _ = textarea.focus();
-    let _ = textarea.set_selection_range(pos, pos);
-
     let Some(anchor_y) = anchor_y else {
-        return;
-    };
-    let Some(caret_top) = caret_top(textarea, &value, pos) else {
+        focus_without_scroll(textarea);
+        let _ = textarea.set_selection_range(pos, pos);
         return;
     };
 
-    let rect = textarea.get_bounding_client_rect();
+    // `anchor_y` is a screen coordinate from the click, so every measurement it
+    // is compared against has to be taken in the same scroll state. Both steps
+    // below can scroll an ancestor on their own, so snapshot first and put the
+    // scroller back after each one:
+    //
+    //   * `focus()` scrolls the focused element into view, and the inline
+    //     card's textarea is `field-sizing: content` — as tall as the whole
+    //     card — so that alone hauls the column across.
+    //   * restoring `value` after the measurement moves the caret to the *end*
+    //     of the text, and a focused textarea gets its caret scrolled into
+    //     view, which is what used to leave the column showing the card's end
+    //     rather than the click.
+    let scroller = nearest_scrollable(textarea);
+    let scroller_top = scroller.as_ref().map(|el| el.scroll_top());
+    let box_top = textarea.get_bounding_client_rect().top();
+
+    // Measured before focusing: an unfocused textarea has no caret for the
+    // browser to chase when the value is swapped.
+    let caret_top = caret_top(textarea, &value, pos);
+    restore_scroll(scroller.as_ref(), scroller_top);
+
+    focus_without_scroll(textarea);
+    let _ = textarea.set_selection_range(pos, pos);
+    restore_scroll(scroller.as_ref(), scroller_top);
+
+    let Some(caret_top) = caret_top else {
+        return;
+    };
+
     // Where the caret should sit inside the textarea's own box, so that it
     // lands back under the pointer.
-    let wanted_within_box = anchor_y - rect.top();
+    let wanted_within_box = anchor_y - box_top;
 
     let max_scroll = f64::from(textarea.scroll_height() - textarea.client_height()).max(0.0);
     let scroll = (caret_top - wanted_within_box).clamp(0.0, max_scroll);
     textarea.set_scroll_top(scroll as i32);
 
     // Whatever the textarea could not absorb — all of it, when the textarea
-    // grows to fit its content instead of scrolling — is left for an ancestor.
+    // grows to fit its content instead of scrolling — is left for the scroller.
+    // Scrolling it down by `remainder` moves the textarea's box up by the same
+    // amount, which puts the caret at `anchor_y`.
+    //
+    // Applied as an absolute target measured from the snapshot rather than a
+    // nudge from wherever the scroller happens to be, so a stray scroll from
+    // focus or layout cannot compound into it.
     let remainder = (caret_top - scroll) - wanted_within_box;
-    if remainder.abs() > SCROLL_EPSILON {
-        scroll_ancestor(textarea, remainder);
+    if remainder.abs() > SCROLL_EPSILON
+        && let (Some(el), Some(from)) = (scroller.as_ref(), scroller_top)
+    {
+        let max = f64::from(el.scroll_height() - el.client_height()).max(0.0);
+        el.set_scroll_top((f64::from(from) + remainder).clamp(0.0, max) as i32);
+    }
+}
+
+/// Focus without the browser scrolling the element into view — this module
+/// does its own scrolling, and the default behaviour fights it.
+fn focus_without_scroll(textarea: &HtmlTextAreaElement) {
+    let options = web_sys::FocusOptions::new();
+    options.set_prevent_scroll(true);
+    let _ = textarea.focus_with_options(&options);
+}
+
+/// Puts a scroller back where the snapshot found it.
+fn restore_scroll(scroller: Option<&Element>, top: Option<i32>) {
+    if let (Some(el), Some(top)) = (scroller, top) {
+        el.set_scroll_top(top);
     }
 }
 
@@ -252,11 +300,11 @@ fn caret_top(textarea: &HtmlTextAreaElement, value: &str, pos: u32) -> Option<f6
     Some((prefix_height - padding_bottom - line_height).max(0.0))
 }
 
-/// Scrolls the nearest scrollable ancestor of `el` down by `delta` pixels.
-fn scroll_ancestor(el: &HtmlTextAreaElement, delta: f64) {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
+/// The nearest ancestor of `el` that actually scrolls — the column's card list
+/// for an inline card, and nothing at all in the modal, whose textarea scrolls
+/// on its own.
+fn nearest_scrollable(el: &HtmlTextAreaElement) -> Option<Element> {
+    let window = web_sys::window()?;
     let mut current = el.parent_element();
     while let Some(candidate) = current {
         let scrollable = candidate.scroll_height() > candidate.client_height()
@@ -267,13 +315,11 @@ fn scroll_ancestor(el: &HtmlTextAreaElement, delta: f64) {
                 .and_then(|s| s.get_property_value("overflow-y").ok())
                 .is_some_and(|o| o == "auto" || o == "scroll" || o == "overlay");
         if scrollable {
-            let max = f64::from(candidate.scroll_height() - candidate.client_height());
-            let target = (f64::from(candidate.scroll_top()) + delta).clamp(0.0, max);
-            candidate.set_scroll_top(target as i32);
-            return;
+            return Some(candidate);
         }
         current = candidate.parent_element();
     }
+    None
 }
 
 /// The viewport Y a rendered-body click should anchor the caret to, or `None`
