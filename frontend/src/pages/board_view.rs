@@ -188,6 +188,23 @@ pub fn BoardView() -> AnyView {
     // Only `search_query.get()` is tracked. The lock and the card are read
     // untracked on purpose: tracking either would wake this effect when a card
     // is expanded or edited, and an edit is precisely when the pin must hold.
+    //
+    // **A known, accepted race.** The card judged here is the *saved* card, not
+    // the text in its editor. `CardItem`'s `do_save` writes the card signal only
+    // once its PUT has answered, so for one round trip after the editor is
+    // blurred the signal still holds the old body. Type a query inside that
+    // window that the new body matches and the old one does not, and the card
+    // is released on the keystroke that should have kept it, then reappears —
+    // collapsed — when the PUT lands and the column re-filters. It needs a
+    // keystroke within tens of milliseconds of the click, it heals itself, and
+    // nothing is lost: the blur flushed the save before any query could change.
+    // `BoardView` cannot do better from here — it has no view of the editor's
+    // buffer, and the card is `Expanded`, not `Editing`, by then, so there is
+    // no state to guard on. The real fix would be `do_save` updating the card
+    // signal optimistically, which changes what "saved" means on a failed PUT
+    // and is not this effect's call to make. If this shows up as a bug report,
+    // that is where to look; it is deliberately not covered by a test, since
+    // one would have to stall the PUT in order to assert a flicker.
     Effect::new(move |previous: Option<String>| {
         let query = search_query.get();
         if let Some(previous) = previous {

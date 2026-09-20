@@ -41,6 +41,21 @@ impl BoardCardIndex {
     /// a column removes its entry in `on_cleanup`, and a card signal can be
     /// disposed between the column dropping it and this lookup running. Both
     /// simply mean "not on the board any more", which is `None`.
+    ///
+    /// **Which way `None` fails.** The caller cannot tell this `None` from
+    /// "nothing is expanded", and `query_change_unpins(None, ..)` is `false`, so
+    /// a lock this index cannot resolve **keeps** the pin. That is the safe
+    /// direction — releasing a lock on a guess is what would unmount an open
+    /// card mid-edit, the #304 trap — and it costs nothing, because a card this
+    /// lookup cannot find is a card no column can render either: each entry is
+    /// the very `cards` signal its `ColumnView` filters and renders from,
+    /// registered in the component body as the column mounts. Walking the ways
+    /// a lock goes unresolved: deleting a card locally clears the lock itself; a
+    /// remote delete leaves a stale lock naming a card that is in no column's
+    /// list; a removed column takes its cards off screen with it. In each, the
+    /// pin that survives is pinning nothing on screen. If that ever stops being
+    /// true — an index entry that is a *copy* of the column's list, say — this
+    /// is where #375 would come back, so keep the two the same signal.
     pub fn find_untracked(&self, id: &str) -> Option<shared::Card> {
         self.0
             .get_untracked()
