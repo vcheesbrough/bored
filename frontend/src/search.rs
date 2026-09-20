@@ -283,7 +283,34 @@ pub fn apply_hash_suggestion(query: &str, value: &str) -> String {
     format!("{trimmed_end}#{value} ")
 }
 
-pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
+/// Whether `card_number` sits one hop from `target` on the board's links, in
+/// either direction — `target`'s predecessors and its successors alike.
+///
+/// Both ends are compared by **number**, not id, because [`shared::CardLink`]
+/// carries `predecessor_number` and `successor_number` already (projected from
+/// the cards when the link is read). That is what keeps the `#42` filter a pure
+/// function of the card and the link list: no `BoardCardIndex` lookup to turn
+/// the typed number into an id, and nothing to go stale between the two.
+///
+/// Deliberately one hop. Links form a DAG, so following the chain would answer
+/// `#42` with everything up- and downstream of it — on a board where the cards
+/// are sequenced end to end, that is most of the board, and a filter that
+/// returns most of the board is not a filter. "Before and after this ticket" is
+/// the question the link editor poses and the one this answers.
+pub fn linked_to_number(links: &[shared::CardLink], card_number: u32, target: u32) -> bool {
+    links.iter().any(|link| {
+        (link.predecessor_number == target && link.successor_number == card_number)
+            || (link.successor_number == target && link.predecessor_number == card_number)
+    })
+}
+
+/// Whether `card` survives `query`.
+///
+/// `links` is the board's whole link list ([`crate::links::BoardLinkIndex`]),
+/// which only the `#42` card-number arm consults — see [`linked_to_number`].
+/// Pass an empty slice where there are no links to consider; every other kind
+/// of term ignores it.
+pub fn card_matches_query(card: &shared::Card, query: &str, links: &[shared::CardLink]) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return true;
@@ -291,8 +318,13 @@ pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
 
     let parsed = parse_query(query);
 
-    // `#42` is an exact card-number term — it deliberately ignores body text.
-    if !parsed.numbers.iter().all(|n| *n == card.number) {
+    // `#42` is a card-number term — it deliberately ignores body text, and
+    // matches card 42 *or* any card directly linked to it (card #305).
+    if !parsed
+        .numbers
+        .iter()
+        .all(|n| *n == card.number || linked_to_number(links, card.number, *n))
+    {
         return false;
     }
     // Every `#tag` term must match some tag on the card (prefix, ignoring case).
@@ -310,7 +342,11 @@ pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
         return true;
     }
 
-    // A bare number matches the card number *or* the body, unlike `#42`.
+    // A bare number matches the card number *or* the body, unlike `#42` — and,
+    // also unlike `#42`, it stops there: it does not reach along links. `42` is
+    // as often someone searching for a figure in a body as for a ticket, and
+    // widening that to a card's neighbours would pull in cards containing
+    // neither. The link expansion is what the explicit `#` asks for.
     if text.chars().all(|c| c.is_ascii_digit())
         && text
             .parse::<u32>()
@@ -372,11 +408,16 @@ pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
 /// one query, not which of them just changed — so the distinction is drawn by
 /// [`query_change_unpins`], which `BoardView` consults whenever the query
 /// changes and answers by releasing the lock.
-pub fn card_is_visible(card: &shared::Card, query: &str, expanded_id: Option<&str>) -> bool {
+pub fn card_is_visible(
+    card: &shared::Card,
+    query: &str,
+    expanded_id: Option<&str>,
+    links: &[shared::CardLink],
+) -> bool {
     if expanded_id == Some(card.id.as_str()) {
         return true;
     }
-    card_matches_query(card, query)
+    card_matches_query(card, query, links)
 }
 
 /// Whether the search moving from `old_query` to `new_query` should release the
@@ -402,12 +443,19 @@ pub fn card_is_visible(card: &shared::Card, query: &str, expanded_id: Option<&st
 /// is the case the pin exists for) is released by the next query change just
 /// the same. "The user changed the search" re-evaluates every card on the
 /// board; the pin is a courtesy that lasts while the search stands still.
+///
+/// `links` is passed through to [`card_matches_query`] so that "fails the new
+/// query" means the same thing here as it does in the column filter. Without
+/// it, typing `#42` while a card linked to 42 is expanded would release the pin
+/// and collapse a card the filter then keeps on screen anyway (card #305).
 pub fn query_change_unpins(
     expanded: Option<&shared::Card>,
     old_query: &str,
     new_query: &str,
+    links: &[shared::CardLink],
 ) -> bool {
-    old_query != new_query && expanded.is_some_and(|card| !card_matches_query(card, new_query))
+    old_query != new_query
+        && expanded.is_some_and(|card| !card_matches_query(card, new_query, links))
 }
 
 /// Returns `true` when `query` contains a card-number search (`#42` or a bare
@@ -595,9 +643,41 @@ mod tests {
         items.iter().map(|s| (*s).to_string()).collect()
     }
 
+    /// A link `#predecessor → #successor`. Only the two numbers are ever read
+    /// by the filter, so the rest is filler.
+    fn link(predecessor: u32, successor: u32) -> shared::CardLink {
+        shared::CardLink {
+            id: format!("link-{predecessor}-{successor}"),
+            predecessor_id: format!("card-{predecessor}"),
+            successor_id: format!("card-{successor}"),
+            predecessor_number: predecessor,
+            successor_number: successor,
+            reason: None,
+            last_edited_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    // The three filter rules on a board with **no** links, which is what all
+    // but the link tests below are about: there, `#42` means card 42 and
+    // nothing else, exactly as it did before card #305. The link cases call the
+    // real functions with a list.
+    fn matches(card: &shared::Card, query: &str) -> bool {
+        card_matches_query(card, query, &[])
+    }
+
+    fn visible(card: &shared::Card, query: &str, expanded_id: Option<&str>) -> bool {
+        card_is_visible(card, query, expanded_id, &[])
+    }
+
+    fn unpins(expanded: Option<&shared::Card>, old_query: &str, new_query: &str) -> bool {
+        query_change_unpins(expanded, old_query, new_query, &[])
+    }
+
     #[test]
     fn matches_empty_query() {
-        assert!(card_matches_query(&card(42, "Deploy preview"), "  "));
+        assert!(matches(&card(42, "Deploy preview"), "  "));
     }
 
     // ── card_is_visible: the expanded-card pin ─────────────────────────────
@@ -605,8 +685,8 @@ mod tests {
     #[test]
     fn visibility_follows_the_query_when_nothing_is_expanded() {
         let c = tagged_card(1, "Deploy preview", &["bug"]);
-        assert!(card_is_visible(&c, "#bug", None));
-        assert!(!card_is_visible(&c, "#chore", None));
+        assert!(visible(&c, "#bug", None));
+        assert!(!visible(&c, "#chore", None));
     }
 
     #[test]
@@ -615,8 +695,8 @@ mod tests {
         // card, and removes that very tag. Without the pin the card unmounts
         // mid-edit and the disposal trap kills the tab.
         let c = tagged_card(1, "Deploy preview", &[]);
-        assert!(!card_matches_query(&c, "#bug"));
-        assert!(card_is_visible(&c, "#bug", Some("card-1")));
+        assert!(!matches(&c, "#bug"));
+        assert!(visible(&c, "#bug", Some("card-1")));
     }
 
     #[test]
@@ -624,20 +704,20 @@ mod tests {
         // The other half of the behaviour: collapsing is what lets a card that
         // stopped matching finally leave the filtered view.
         let c = tagged_card(1, "Deploy preview", &[]);
-        assert!(!card_is_visible(&c, "#bug", None));
+        assert!(!visible(&c, "#bug", None));
     }
 
     #[test]
     fn a_different_expanded_card_does_not_pin_this_one() {
         let c = tagged_card(1, "Deploy preview", &[]);
-        assert!(!card_is_visible(&c, "#bug", Some("card-2")));
+        assert!(!visible(&c, "#bug", Some("card-2")));
     }
 
     #[test]
     fn an_empty_query_shows_every_card_expanded_or_not() {
         let c = tagged_card(1, "Deploy preview", &[]);
-        assert!(card_is_visible(&c, "", None));
-        assert!(card_is_visible(&c, "", Some("card-1")));
+        assert!(visible(&c, "", None));
+        assert!(visible(&c, "", Some("card-1")));
     }
 
     // ── query_change_unpins: the query moving releases the pin ─────────────
@@ -651,17 +731,17 @@ mod tests {
         // Card #375 verbatim: an expanded card reading `abcdef`, and a search
         // that grows from the prefix it matches to one it cannot.
         let c = card(1, "abcdef");
-        assert!(query_change_unpins(Some(&c), "abc", "abcX"));
-        assert!(query_change_unpins(Some(&c), "abcXX", "abcXXX"));
+        assert!(unpins(Some(&c), "abc", "abcX"));
+        assert!(unpins(Some(&c), "abcXX", "abcXXX"));
     }
 
     #[test]
     fn narrowing_around_a_still_matching_expanded_card_keeps_it_open() {
         let c = card(1, "abcdef");
-        assert!(!query_change_unpins(Some(&c), "", "a"));
-        assert!(!query_change_unpins(Some(&c), "ab", "abc"));
+        assert!(!unpins(Some(&c), "", "a"));
+        assert!(!unpins(Some(&c), "ab", "abc"));
         // Clearing the search matches everything, so it never collapses a card.
-        assert!(!query_change_unpins(Some(&c), "abcXXX", ""));
+        assert!(!unpins(Some(&c), "abcXXX", ""));
     }
 
     #[test]
@@ -670,59 +750,154 @@ mod tests {
         // unmatching, the state #304 protects. A signal write that sets the
         // identical string must leave it alone…
         let c = tagged_card(1, "Deploy preview", &[]);
-        assert!(!query_change_unpins(Some(&c), "#bug", "#bug"));
+        assert!(!unpins(Some(&c), "#bug", "#bug"));
         // …but the user really changing the search re-evaluates it like any
         // other card, even though it did not match the old query either.
-        assert!(query_change_unpins(Some(&c), "#bug", "#bug "));
-        assert!(query_change_unpins(Some(&c), "#bug", "#bu"));
+        assert!(unpins(Some(&c), "#bug", "#bug "));
+        assert!(unpins(Some(&c), "#bug", "#bu"));
     }
 
     #[test]
     fn nothing_expanded_means_nothing_to_release() {
-        assert!(!query_change_unpins(None, "abc", "abcX"));
+        assert!(!unpins(None, "abc", "abcX"));
     }
 
     #[test]
     fn tag_and_number_terms_release_the_pin_too() {
         // The rule is about the whole query, not just free text.
         let c = tagged_card(7, "Deploy preview", &["bug"]);
-        assert!(!query_change_unpins(Some(&c), "", "#bug"));
-        assert!(!query_change_unpins(Some(&c), "", "#7"));
-        assert!(query_change_unpins(Some(&c), "#bug", "#chore"));
-        assert!(query_change_unpins(Some(&c), "#7", "#8"));
+        assert!(!unpins(Some(&c), "", "#bug"));
+        assert!(!unpins(Some(&c), "", "#7"));
+        assert!(unpins(Some(&c), "#bug", "#chore"));
+        assert!(unpins(Some(&c), "#7", "#8"));
     }
 
     #[test]
     fn the_pin_also_covers_a_body_edit_past_a_text_search() {
         // Same shape as the tag case, reached by editing the body instead.
         let c = card(1, "unrelated now");
-        assert!(!card_matches_query(&c, "deploy"));
-        assert!(card_is_visible(&c, "deploy", Some("card-1")));
+        assert!(!matches(&c, "deploy"));
+        assert!(visible(&c, "deploy", Some("card-1")));
     }
 
     #[test]
     fn matches_card_number_with_or_without_hash() {
         let c = card(42, "Deploy preview");
-        assert!(card_matches_query(&c, "#42"));
-        assert!(card_matches_query(&c, "42"));
-        assert!(!card_matches_query(&c, "#41"));
+        assert!(matches(&c, "#42"));
+        assert!(matches(&c, "42"));
+        assert!(!matches(&c, "#41"));
     }
 
     #[test]
     fn hash_prefixed_number_does_not_match_body_text() {
-        assert!(!card_matches_query(&card(7, "See #42 in the notes"), "#42"));
+        assert!(!matches(&card(7, "See #42 in the notes"), "#42"));
+    }
+
+    // ── `#42` reaches one hop along the links — card #305 ──────────────────
+
+    #[test]
+    fn linked_to_number_reads_a_link_from_either_end() {
+        // 42 comes before 7, and 9 comes before 42.
+        let links = [link(42, 7), link(9, 42)];
+        assert!(linked_to_number(&links, 7, 42));
+        assert!(linked_to_number(&links, 9, 42));
+        // …and the same two links seen from the other card's point of view.
+        assert!(linked_to_number(&links, 42, 7));
+        assert!(linked_to_number(&links, 42, 9));
+        // A card at neither end of any link, and a link between two other cards.
+        assert!(!linked_to_number(&links, 5, 42));
+        assert!(!linked_to_number(&links, 7, 9));
+        assert!(!linked_to_number(&[], 7, 42));
+    }
+
+    #[test]
+    fn hash_number_matches_cards_linked_in_either_direction() {
+        let links = [link(42, 7), link(9, 42)];
+        // The card the query names.
+        assert!(card_matches_query(&card(42, "The ticket"), "#42", &links));
+        // Its successor and its predecessor, neither of which says "42".
+        assert!(card_matches_query(&card(7, "Comes after"), "#42", &links));
+        assert!(card_matches_query(&card(9, "Comes before"), "#42", &links));
+        // An unlinked card stays out.
+        assert!(!card_matches_query(&card(5, "Unrelated"), "#42", &links));
+        // And the same card list with no links behaves as it did before #305.
+        assert!(!card_matches_query(&card(7, "Comes after"), "#42", &[]));
+    }
+
+    #[test]
+    fn hash_number_does_not_follow_a_chain() {
+        // 42 → 7 → 8: card 8 is two hops out, so `#42` leaves it hidden.
+        let links = [link(42, 7), link(7, 8)];
+        assert!(card_matches_query(&card(7, "One hop"), "#42", &links));
+        assert!(!card_matches_query(&card(8, "Two hops"), "#42", &links));
+    }
+
+    #[test]
+    fn a_bare_number_does_not_reach_along_links() {
+        let links = [link(42, 7)];
+        assert!(!card_matches_query(&card(7, "Comes after"), "42", &links));
+        // The bare form still does what it always did: number, or body text.
+        assert!(card_matches_query(&card(42, "The ticket"), "42", &links));
+        assert!(card_matches_query(
+            &card(7, "See 42 in the notes"),
+            "42",
+            &links
+        ));
+    }
+
+    #[test]
+    fn a_linked_card_still_has_to_satisfy_the_other_terms() {
+        let links = [link(42, 7), link(42, 9)];
+        let tagged = tagged_card(7, "Deploy preview", &["bug"]);
+        let plain = card(9, "Release notes");
+        assert!(card_matches_query(&tagged, "#42 deploy", &links));
+        assert!(card_matches_query(&tagged, "#42 #bug", &links));
+        // Linked to 42, but the text and the tag term are not satisfied.
+        assert!(!card_matches_query(&plain, "#42 deploy", &links));
+        assert!(!card_matches_query(&plain, "#42 #bug", &links));
+    }
+
+    #[test]
+    fn two_number_terms_can_now_both_be_satisfied() {
+        // `#1 #2` matches nothing without links — no card has two numbers — but
+        // a card linked to both is in the neighbourhood of both.
+        let links = [link(1, 7), link(2, 7)];
+        assert!(card_matches_query(&card(7, "After both"), "#1 #2", &links));
+        // Card 1 satisfies `#1` by being itself, but is not linked to 2.
+        assert!(!card_matches_query(&card(1, "First"), "#1 #2", &links));
+    }
+
+    #[test]
+    fn a_linked_card_lights_up_its_link_badge_not_its_number() {
+        // What `LinkBadges` and the card's number badge ask, for card 7 under
+        // `#42`: the link pill naming 42 is the hit; 7's own badge is not.
+        assert!(query_matches_number(42, "#42"));
+        assert!(!query_matches_number(7, "#42"));
+    }
+
+    #[test]
+    fn the_pin_holds_for_a_card_that_matches_only_by_link() {
+        let c = card(7, "Comes after");
+        let links = [link(42, 7)];
+        // Typing `#42` leaves card 7 on screen, so releasing the pin would
+        // collapse a card the filter keeps — the effect must not fire.
+        assert!(!query_change_unpins(Some(&c), "", "#42", &links));
+        // Control: without that link the same query does release it.
+        assert!(query_change_unpins(Some(&c), "", "#42", &[]));
+        // And a query that card 7 fails either way still releases it.
+        assert!(query_change_unpins(Some(&c), "", "#41", &links));
     }
 
     #[test]
     fn matches_case_insensitive_substrings() {
-        assert!(card_matches_query(&card(1, "Deploy Preview"), "deploy"));
+        assert!(matches(&card(1, "Deploy Preview"), "deploy"));
     }
 
     #[test]
     fn matches_fuzzy_word_subsequences() {
         let c = card(1, "SSE card created in another browser context");
-        assert!(card_matches_query(&c, "sse crd"));
-        assert!(card_matches_query(&c, "brwsr ctx"));
+        assert!(matches(&c, "sse crd"));
+        assert!(matches(&c, "brwsr ctx"));
     }
 
     // ── `#` token parsing ────────────────────────────────────────────
@@ -746,32 +921,32 @@ mod tests {
 
     #[test]
     fn bare_hash_matches_every_card() {
-        assert!(card_matches_query(&card(1, "anything"), "#"));
+        assert!(matches(&card(1, "anything"), "#"));
     }
 
     #[test]
     fn tag_token_filters_by_tag() {
         let tagged = tagged_card(1, "Deploy preview", &["bug"]);
         let untagged = card(2, "Deploy preview");
-        assert!(card_matches_query(&tagged, "#bug"));
-        assert!(!card_matches_query(&untagged, "#bug"));
+        assert!(matches(&tagged, "#bug"));
+        assert!(!matches(&untagged, "#bug"));
     }
 
     #[test]
     fn tag_token_matches_a_prefix_case_insensitively() {
         // Filtering narrows as the tag is typed, and `Bug` == `bug`.
         let tagged = tagged_card(1, "body", &["Bug"]);
-        assert!(card_matches_query(&tagged, "#bu"));
-        assert!(card_matches_query(&tagged, "#BUG"));
-        assert!(!card_matches_query(&tagged, "#ug"));
+        assert!(matches(&tagged, "#bu"));
+        assert!(matches(&tagged, "#BUG"));
+        assert!(!matches(&tagged, "#ug"));
     }
 
     #[test]
     fn multiple_tag_tokens_are_anded() {
         let both = tagged_card(1, "body", &["bug", "urgent"]);
         let one = tagged_card(2, "body", &["bug"]);
-        assert!(card_matches_query(&both, "#bug #urgent"));
-        assert!(!card_matches_query(&one, "#bug #urgent"));
+        assert!(matches(&both, "#bug #urgent"));
+        assert!(!matches(&one, "#bug #urgent"));
     }
 
     #[test]
@@ -779,16 +954,16 @@ mod tests {
         let match_both = tagged_card(1, "Deploy preview", &["bug"]);
         let wrong_text = tagged_card(2, "Something else", &["bug"]);
         let wrong_tag = tagged_card(3, "Deploy preview", &["chore"]);
-        assert!(card_matches_query(&match_both, "#bug deploy"));
-        assert!(!card_matches_query(&wrong_text, "#bug deploy"));
-        assert!(!card_matches_query(&wrong_tag, "#bug deploy"));
+        assert!(matches(&match_both, "#bug deploy"));
+        assert!(!matches(&wrong_text, "#bug deploy"));
+        assert!(!matches(&wrong_tag, "#bug deploy"));
     }
 
     #[test]
     fn number_token_still_ignores_body_text_when_combined_with_a_tag() {
         let c = tagged_card(7, "See 42 in the notes", &["bug"]);
-        assert!(!card_matches_query(&c, "#42 #bug"));
-        assert!(card_matches_query(&c, "#7 #bug"));
+        assert!(!matches(&c, "#42 #bug"));
+        assert!(matches(&c, "#7 #bug"));
     }
 
     #[test]
@@ -1054,7 +1229,7 @@ mod tests {
         // up, so a filtered card never renders with zero marks.
         let c = card(1, "SSE card created in another browser context");
         for query in ["sse crd", "brwsr ctx", "created", "Another Browser"] {
-            assert!(card_matches_query(&c, query), "{query} should match");
+            assert!(matches(&c, query), "{query} should match");
             assert!(
                 !highlight_spans(&c.body, query).is_empty(),
                 "{query} should highlight"

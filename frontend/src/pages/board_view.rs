@@ -185,9 +185,10 @@ pub fn BoardView() -> AnyView {
     // query therefore gives the next run the *old* query to compare against,
     // and makes the first run (mount, nothing has "changed") a no-op.
     //
-    // Only `search_query.get()` is tracked. The lock and the card are read
-    // untracked on purpose: tracking either would wake this effect when a card
-    // is expanded or edited, and an edit is precisely when the pin must hold.
+    // Only `search_query.get()` is tracked. The lock, the card and the board's
+    // links are read untracked on purpose: tracking any of them would wake this
+    // effect when a card is expanded, edited or linked, and those are precisely
+    // when the pin must hold.
     //
     // **A known, accepted race.** The card judged here is the *saved* card, not
     // the text in its editor. `CardItem`'s `do_save` writes the card signal only
@@ -211,7 +212,13 @@ pub fn BoardView() -> AnyView {
             let expanded = expanded_card_id
                 .get_untracked()
                 .and_then(|id| card_index.find_untracked(&id));
-            if query_change_unpins(expanded.as_ref(), &previous, &query) {
+            // Links too, and untracked for the same reason as the card: a
+            // `#42` query keeps a card linked to 42 on screen (card #305), so
+            // the pin must survive it — but a link *appearing* under a query
+            // that stands still is the board changing beneath the user, which
+            // is exactly what the pin is for.
+            let links = board_links.get_untracked();
+            if query_change_unpins(expanded.as_ref(), &previous, &query, &links) {
                 expanded_card_id.set(None);
             }
         }

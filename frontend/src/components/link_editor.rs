@@ -16,7 +16,7 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 
 use crate::links::BoardLinkIndex;
 use crate::recent::RecentPicks;
-use crate::search::BoardCardIndex;
+use crate::search::{BoardCardIndex, BoardSearchQuery, query_matches_number};
 
 /// How many cards the picker offers at once.
 const MAX_SUGGESTIONS: usize = 6;
@@ -706,11 +706,35 @@ fn LinkPicker(
 /// One pill per linked card for a collapsed card: an arrow for the side plus
 /// the other card's `#number`. Renders nothing when the card has no links, so
 /// an unlinked board looks exactly as it did before.
+///
+/// A pill naming the number the user is searching for is highlighted, the way
+/// the card's own number badge is (`card-number-hit`). That is this card's
+/// answer to "why am I in these results?": under `#42` it is on screen because
+/// of that link and nothing else, since a `#` number term ignores body text
+/// (card #305). The verdict comes from [`crate::search::query_matches_number`],
+/// the same function the card's number badge uses, so a number the user is
+/// searching for is marked the same way wherever it appears on the card.
+///
+/// **Only the `#42` form expands links, but the cue answers to `42` as well**,
+/// because `query_matches_number` accepts both. A card can therefore light its
+/// `↑#42` pill while it is really on screen for its *body* — one reading
+/// "budget is 42", linked to 42, under the bare query `42`. It takes a card
+/// that is both linked to the number and a text match for it, the card is a
+/// genuine hit either way, and the highlighted body text says what actually
+/// matched; narrowing this to `parse_query(..).numbers` would be a second
+/// definition of "the number the user typed" to keep in step with the card
+/// badge, for a case where the pill is at worst over-eager. Deliberately left,
+/// deliberately written down (PR #72 review).
 #[component]
 pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
     let Some(links) = use_context::<BoardLinkIndex>() else {
         return ().into_any();
     };
+    // Optional, unlike the card's own badge: `LinkBadges` renders wherever a
+    // `BoardLinkIndex` is provided, and a mount without a search box simply
+    // highlights nothing. `try_get` for the same disposal reason as below.
+    let search_query = use_context::<BoardSearchQuery>().map(|q| q.0);
+    let query = Signal::derive(move || search_query.and_then(|q| q.try_get()).unwrap_or_default());
     // `try_get` throughout, in the derives *and* at every read of them: the
     // collapsed card can be asked to render once more after its signals were
     // disposed (see the long note in `CardItem`), and a `Signal::derive` is
@@ -751,7 +775,15 @@ pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
                         view! {
                             <span class="link-badge link-badge-before" title=title>
                                 <span aria-hidden="true">"↑"</span>
-                                <span class="link-badge-number">{format!("#{number}")}</span>
+                                <span
+                                    class="link-badge-number"
+                                    class:link-badge-hit=move || {
+                                        query_matches_number(
+                                            number,
+                                            &query.try_get().unwrap_or_default(),
+                                        )
+                                    }
+                                >{format!("#{number}")}</span>
                             </span>
                         }
                     }
@@ -765,7 +797,15 @@ pub fn LinkBadges(card_id: Signal<Option<String>>) -> AnyView {
                         view! {
                             <span class="link-badge link-badge-after" title=title>
                                 <span aria-hidden="true">"↓"</span>
-                                <span class="link-badge-number">{format!("#{number}")}</span>
+                                <span
+                                    class="link-badge-number"
+                                    class:link-badge-hit=move || {
+                                        query_matches_number(
+                                            number,
+                                            &query.try_get().unwrap_or_default(),
+                                        )
+                                    }
+                                >{format!("#{number}")}</span>
                             </span>
                         }
                     }
