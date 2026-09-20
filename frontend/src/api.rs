@@ -30,6 +30,46 @@ fn check_auth(resp: Response) -> Result<Response, gloo_net::Error> {
     Ok(resp)
 }
 
+/// What the user is told when a mutation is refused because the link to the
+/// server is down. Callers surface it through whatever they already do with an
+/// error, so the wording has to stand alone.
+const OFFLINE_MESSAGE: &str = "disconnected from the server — changes are not being saved";
+
+/// Refuse a mutating request while this tab is disconnected.
+///
+/// This is the single choke point for the rule that a disconnected UI performs
+/// no mutations (see [`crate::connection`]): every mutating function below
+/// starts with `offline_guard()?`, so there is no way to add a new mutation
+/// that forgets it beyond forgetting the line itself. Reads are deliberately
+/// left alone — refreshing a stale view is exactly what a reconnecting tab
+/// wants to do.
+///
+/// It also matters that the request is never *sent*. A queued mutation that
+/// lands after the server comes back would write the user's pre-outage
+/// intention over whatever happened in the meantime.
+fn offline_guard() -> Result<(), gloo_net::Error> {
+    if crate::connection::is_connected() {
+        Ok(())
+    } else {
+        Err(gloo_net::Error::GlooError(OFFLINE_MESSAGE.to_string()))
+    }
+}
+
+/// The same guard for the card-link routes, which report failures as a
+/// [`LinkApiError`] so the link editor can show the server's own wording.
+/// `status: 0` is this module's existing convention for "never reached the
+/// server" (see the `From<gloo_net::Error>` impl below).
+fn offline_guard_link() -> Result<(), LinkApiError> {
+    if crate::connection::is_connected() {
+        Ok(())
+    } else {
+        Err(LinkApiError {
+            status: 0,
+            message: OFFLINE_MESSAGE.to_string(),
+        })
+    }
+}
+
 pub async fn fetch_app_info() -> Result<shared::AppInfo, gloo_net::Error> {
     // `/api/info` is intentionally public, but go through `check_auth` anyway
     // so the redirect-on-401 invariant holds uniformly.
@@ -53,6 +93,7 @@ pub async fn fetch_boards() -> Result<Vec<shared::Board>, gloo_net::Error> {
 }
 
 pub async fn create_board(name: String) -> Result<shared::Board, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::post("/api/boards")
             .json(&shared::CreateBoardRequest { name })
@@ -65,6 +106,7 @@ pub async fn create_board(name: String) -> Result<shared::Board, gloo_net::Error
 }
 
 pub async fn delete_board(board_id: &str) -> Result<(), gloo_net::Error> {
+    offline_guard()?;
     let resp = check_auth(
         Request::delete(&format!("/api/boards/{board_id}"))
             .send()
@@ -105,6 +147,7 @@ pub async fn create_column(
     name: String,
     position: i32,
 ) -> Result<shared::Column, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::post(&format!("/api/boards/{board_id}/columns"))
             .json(&shared::CreateColumnRequest { name, position })
@@ -120,6 +163,7 @@ pub async fn update_column(
     column_id: &str,
     payload: shared::UpdateColumnRequest,
 ) -> Result<shared::Column, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::put(&format!("/api/columns/{column_id}"))
             .json(&payload)?
@@ -131,6 +175,7 @@ pub async fn update_column(
 }
 
 pub async fn delete_column(column_id: &str) -> Result<(), gloo_net::Error> {
+    offline_guard()?;
     let resp = check_auth(
         Request::delete(&format!("/api/columns/{column_id}"))
             .send()
@@ -169,6 +214,7 @@ pub async fn fetch_cards(column_id: &str) -> Result<Vec<shared::Card>, gloo_net:
 }
 
 pub async fn create_card(column_id: &str, body: String) -> Result<shared::Card, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::post(&format!("/api/columns/{column_id}/cards"))
             .json(&shared::CreateCardRequest {
@@ -188,6 +234,7 @@ pub async fn update_card(
     card_id: &str,
     payload: shared::UpdateCardRequest,
 ) -> Result<shared::Card, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::put(&format!("/api/cards/{card_id}"))
             .json(&payload)?
@@ -199,6 +246,7 @@ pub async fn update_card(
 }
 
 pub async fn delete_card(card_id: &str) -> Result<(), gloo_net::Error> {
+    offline_guard()?;
     let resp = check_auth(
         Request::delete(&format!("/api/cards/{card_id}"))
             .send()
@@ -223,6 +271,7 @@ pub async fn reorder_columns(
     board_slug: &str,
     order: Vec<String>,
 ) -> Result<Vec<shared::Column>, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::put(&format!("/api/boards/{board_slug}/columns/reorder"))
             .json(&shared::ColumnsReorderRequest { order })?
@@ -243,6 +292,7 @@ pub async fn reorder_cards(
     column_id: &str,
     order: Vec<String>,
 ) -> Result<Vec<shared::Card>, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::put(&format!("/api/columns/{column_id}/cards/reorder"))
             .json(&shared::CardsReorderRequest { order })?
@@ -292,6 +342,7 @@ pub async fn fetch_card_history(
 pub async fn restore_audit_entry(
     audit_id: &str,
 ) -> Result<Vec<shared::AuditLogEntry>, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::post(&format!("/api/audit/{audit_id}/restore"))
             .send()
@@ -306,6 +357,7 @@ pub async fn move_card(
     column_id: String,
     position: i32,
 ) -> Result<shared::Card, gloo_net::Error> {
+    offline_guard()?;
     check_auth(
         Request::post(&format!("/api/cards/{card_id}/move"))
             .json(&shared::MoveCardRequest {
@@ -372,6 +424,7 @@ pub async fn create_card_link(
     card_id: &str,
     payload: shared::CreateCardLinkRequest,
 ) -> Result<shared::CardLink, LinkApiError> {
+    offline_guard_link()?;
     let resp = check_auth(
         Request::post(&format!("/api/cards/{card_id}/links"))
             .json(&payload)?
@@ -388,6 +441,7 @@ pub async fn update_card_link(
     link_id: &str,
     payload: shared::UpdateCardLinkRequest,
 ) -> Result<shared::CardLink, LinkApiError> {
+    offline_guard_link()?;
     let resp = check_auth(
         Request::put(&format!("/api/links/{link_id}"))
             .json(&payload)?
@@ -401,6 +455,7 @@ pub async fn update_card_link(
 }
 
 pub async fn delete_card_link(link_id: &str) -> Result<(), LinkApiError> {
+    offline_guard_link()?;
     let resp = check_auth(
         Request::delete(&format!("/api/links/{link_id}"))
             .send()

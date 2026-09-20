@@ -7,6 +7,7 @@ use crate::components::board_chooser::BoardChooser;
 use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
+use crate::components::connection_status::ConnectionStatus;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel, HistoryScope};
 use crate::components::search_suggestions::SearchSuggestions;
 use crate::components::user_badge::UserBadge;
@@ -116,7 +117,28 @@ pub fn BoardView() -> AnyView {
     let loading = RwSignal::new(true);
     let search_query = RwSignal::new(String::new());
 
-    let watermark = RwSignal::new(format!("v{}", shared::app_version()));
+    // Deployment environment from `/api/info` ("production", or a branch name
+    // on dev). Fetched once: it cannot change without a redeploy, and a
+    // redeploy reloads the tab (see `crate::connection`).
+    let environment = RwSignal::new(String::new());
+    // The version half of the watermark comes from the heartbeat, so it tracks
+    // what the server is actually running rather than freezing at whatever was
+    // true when this tab mounted.
+    let server_version = crate::connection::server_version();
+    let watermark = Signal::derive(move || {
+        let version = server_version
+            .get()
+            .unwrap_or_else(|| shared::app_version().to_string());
+        let env = environment.get();
+        if env.is_empty() || env == "production" {
+            format!("v{version}")
+        } else {
+            // Dev environments are named after the branch they were built
+            // from, sometimes with a `refs/heads/`-style prefix.
+            let branch = env.splitn(2, '/').last().unwrap_or(&env).to_string();
+            format!("v{version} {branch}")
+        }
+    });
 
     // ── Context signals ────────────────────────────────────────────────────
     let sse_event: RwSignal<Option<BoardSseEvent>> = RwSignal::new(None);
@@ -464,17 +486,13 @@ pub fn BoardView() -> AnyView {
         link_index.remove_touching(&card_id);
     });
 
-    // ── Watermark fetch ────────────────────────────────────────────────────
+    // ── Watermark environment fetch ────────────────────────────────────────
+    // Only the environment: the version half of the label is fed by the
+    // connection heartbeat, which re-reads `/api/info` on a timer.
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(info) = crate::api::fetch_app_info().await {
-                let label = if info.env == "production" {
-                    format!("v{}", info.version)
-                } else {
-                    let branch = info.env.splitn(2, '/').last().unwrap_or(&info.env);
-                    format!("v{} {}", info.version, branch)
-                };
-                watermark.set(label);
+                environment.set(info.env);
             }
         });
     });
@@ -493,8 +511,26 @@ pub fn BoardView() -> AnyView {
     // all server-side events carry the ULID as their `board_id`. The ULID is
     // set after the first successful board fetch, so the effect re-runs once
     // the async fetch completes.
+    //
+    // The stream is supervised here rather than left to the browser. An
+    // `EventSource` only retries by itself after a *transport* failure; if the
+    // server answers with something that is not `text/event-stream` — which is
+    // exactly what a proxy does with 502/503 while the container restarts —
+    // the browser gives up for good and the tab sits there silently
+    // disconnected. Bumping `sse_reconnect` re-runs this effect, whose cleanup
+    // closes the dead stream and whose body opens a fresh one.
+    let sse_reconnect = RwSignal::new(0u32);
+    // Consecutive failed connects, which sets how long to wait before the next
+    // attempt. Reset the moment a stream opens.
+    let sse_failures = RwSignal::new(0u32);
+    // Leaving the board must not leave the app looking offline: the next page
+    // has no stream of its own, so its health is the heartbeat's alone.
+    on_cleanup(crate::connection::stream_reset);
+
     Effect::new(move |_| {
         let ulid = board_ulid.get();
+        // Subscribe to the reconnect counter so a bump re-runs this effect.
+        let _ = sse_reconnect.get();
         if ulid.is_empty() {
             return;
         }
@@ -518,43 +554,48 @@ pub fn BoardView() -> AnyView {
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
 
-        // Deployment-triggered reload via SSE reconnect.
-        let initial_version: std::rc::Rc<std::cell::RefCell<Option<String>>> =
-            std::rc::Rc::new(std::cell::RefCell::new(None));
-        let had_error: std::rc::Rc<std::cell::Cell<bool>> =
-            std::rc::Rc::new(std::cell::Cell::new(false));
-
-        let initial_version_open = initial_version.clone();
-        let had_error_open = had_error.clone();
+        // The stream is live: the board is receiving other tabs' changes
+        // again, so mutations are allowed and the offline badge goes away.
+        // The version check is *not* here — it belongs to the heartbeat, which
+        // runs whether or not this stream ever comes back.
         let onopen_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
-            let is_reconnect = had_error_open.get();
-            had_error_open.set(false);
-            let iv = initial_version_open.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(info) = crate::api::fetch_app_info().await {
-                    if is_reconnect {
-                        let stored = iv.borrow().clone();
-                        match stored {
-                            None => leptos::logging::warn!(
-                                "auto-reload: baseline version unknown; skipping reload check"
-                            ),
-                            Some(baseline) if baseline != info.version => {
-                                let _ = leptos::prelude::window().location().reload();
-                            }
-                            Some(_) => {}
-                        }
-                    } else {
-                        *iv.borrow_mut() = Some(info.version);
-                    }
-                }
-            });
+            let _ = sse_failures.try_set(0);
+            crate::connection::stream_up();
         });
         es.set_onopen(Some(onopen_cb.as_ref().unchecked_ref()));
         onopen_cb.forget();
 
-        let had_error_err = had_error.clone();
+        let es_for_error = es.clone();
         let onerror_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
-            had_error_err.set(true);
+            // Whatever kind of failure this is, the board is now stale: mark
+            // the tab disconnected (which blocks mutations) and let the
+            // heartbeat probe immediately, since a redeploy is one reason a
+            // stream dies.
+            crate::connection::stream_down();
+
+            // `CONNECTING` means the browser is retrying by itself and a fresh
+            // `onopen` is on its way; reopening on top of that would leave two
+            // streams racing. `CLOSED` means it has given up, and only we can
+            // recover it.
+            if es_for_error.ready_state() != web_sys::EventSource::CLOSED {
+                return;
+            }
+            // `try_*` throughout: this closure is `forget`-ed, so a reply that
+            // arrives after the view unmounted would otherwise touch disposed
+            // signals.
+            let failures = sse_failures
+                .try_update(|n| {
+                    *n = n.saturating_add(1);
+                    *n
+                })
+                .unwrap_or(1);
+            let delay = crate::connection::next_delay_ms(failures);
+            wasm_bindgen_futures::spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(delay).await;
+                // Bumping re-runs the effect: its cleanup closes this dead
+                // stream and its body opens a new one.
+                let _ = sse_reconnect.try_update(|n| *n = n.wrapping_add(1));
+            });
         });
         es.set_onerror(Some(onerror_cb.as_ref().unchecked_ref()));
         onerror_cb.forget();
@@ -784,6 +825,7 @@ pub fn BoardView() -> AnyView {
                 title="Board history"
                 on:click=move |_| history_scope.set(Some(HistoryScope::Board))
             ><HistoryIcon /></button>
+            <ConnectionStatus />
             <span class="navbar-watermark">{move || watermark.get()}</span>
             <UserBadge />
         </nav>

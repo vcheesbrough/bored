@@ -56,7 +56,11 @@ services:
       # fallback path e2e is meant to exercise.
       BORED__SERVER__DATABASE_PATH: /tmp/bored-test.db
       BORED__OBSERVABILITY__ENVIRONMENT: test
-      APP_VERSION: test
+      # Deliberately no APP_VERSION override. The frontend reloads itself when
+      # /api/info reports a version its own bundle was not built from (see
+      # frontend/src/connection.rs), and both halves of the image are built
+      # from the same RELEASE_TAG — so an override here would be a permanent
+      # mismatch and every page in the suite would reload on a loop.
       BORED__OBSERVABILITY__LOG_LEVEL: warn
       # OIDC configured against the mock. The /default issuer is built in
       # to mock-oauth2-server and accepts tokens for any client_id.

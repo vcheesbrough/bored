@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
+use crate::components::connection_status::ConnectionStatus;
+
 #[component]
 pub fn BoardsList() -> impl IntoView {
     let boards = RwSignal::new(Vec::<shared::Board>::new());
@@ -37,6 +39,7 @@ pub fn BoardsList() -> impl IntoView {
     view! {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
+            <ConnectionStatus />
         </nav>
 
         <div class="page">

@@ -64,6 +64,74 @@ body {
   font-family: var(--mono);
 }
 
+/* Offline badge — rendered only while the tab has lost the server (see
+   frontend/src/connection.rs). `margin-left: auto` pushes it to the right on
+   the navbars that have nothing else there; on the board view the watermark
+   claims the auto margin first, so this simply sits to its left. */
+.navbar-connection {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--danger);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 2px 8px;
+  user-select: none;
+}
+
+.navbar-connection-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  /* Slow pulse: enough to read as "still trying", not enough to nag. */
+  animation: connection-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes connection-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Disconnected controls.
+   `crate::api` refuses every mutation while the tab is offline, so these rules
+   are about making that refusal visible rather than enforcing it: a control
+   that still looks live but silently does nothing is worse than one that shows
+   it is unavailable. Read-only affordances (search, history, expanding a card)
+   are deliberately left working — a disconnected tab is still worth reading. */
+html[data-connection="offline"] .add-card-btn,
+html[data-connection="offline"] .chooser-phantom-plus,
+html[data-connection="offline"] .chooser-col-new,
+html[data-connection="offline"] .chooser-col-delete,
+html[data-connection="offline"] .chooser-board-delete,
+html[data-connection="offline"] .card-context-menu-danger,
+html[data-connection="offline"] .btn-restore {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Drag is a mutation too, and a half-completed drag that the server refuses
+   leaves the board looking wrong until the next fetch. `-webkit-user-drag`
+   is the only way to suppress a native drag from CSS; clicks still work, so
+   cards can still be opened and read. */
+html[data-connection="offline"] .card-item,
+html[data-connection="offline"] .column-grip,
+html[data-connection="offline"] .collapsed-column-grip {
+  -webkit-user-drag: none;
+}
+
 /* Version watermark — shown in the navbar right edge */
 .navbar-watermark {
   margin-left: auto;

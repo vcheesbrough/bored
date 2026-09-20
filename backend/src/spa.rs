@@ -2,6 +2,17 @@
 
 use tower_http::services::ServeDir;
 
+/// Sent with the SPA document so a browser always revalidates it.
+///
+/// `no-cache` does not mean "do not store" — it means "store it, but ask me
+/// before reusing it", so the usual 304 still saves the transfer. It matters
+/// because the frontend reloads itself when the server reports a version it
+/// was not built from (see `frontend/src/connection.rs`): `index.html` is the
+/// one file whose URL never changes across deploys — trunk fingerprints the
+/// wasm, JS and CSS it links to — so a heuristically cached copy of it would
+/// hand the reload the very bundle it was trying to escape.
+const SPA_DOCUMENT_CACHE_CONTROL: &str = "no-cache";
+
 // Wraps ServeDir and replaces any 404 response with index.html so that SPA
 // deep-links (e.g. /boards/123) survive a browser reload.
 // tower-http 0.6's ServeDir::not_found_service does not fire for paths that
@@ -50,6 +61,7 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
                     Ok(bytes) => Ok(axum::http::Response::builder()
                         .status(StatusCode::OK)
                         .header("content-type", "text/html; charset=utf-8")
+                        .header("cache-control", SPA_DOCUMENT_CACHE_CONTROL)
                         .body(axum::body::Body::from(bytes))
                         .expect("static index.html response is always valid")),
                     // index.html itself is missing — pass through the 404
@@ -62,7 +74,24 @@ impl tower::Service<axum::http::Request<axum::body::Body>> for SpaSvc {
                     }
                 }
             } else {
-                let (parts, body) = resp.into_parts();
+                let (mut parts, body) = resp.into_parts();
+                // `/` and any other path that really is a file on disk come
+                // from ServeDir, not from the fallback above — so the
+                // revalidation header has to be added here too. Keyed on the
+                // content type rather than the path so it covers exactly the
+                // HTML documents and never the fingerprinted assets, which are
+                // safe to cache hard precisely because their URLs change.
+                let is_html = parts
+                    .headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.starts_with("text/html"));
+                if is_html {
+                    parts.headers.insert(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static(SPA_DOCUMENT_CACHE_CONTROL),
+                    );
+                }
                 Ok(axum::http::Response::from_parts(
                     parts,
                     axum::body::Body::new(body),
