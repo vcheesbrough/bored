@@ -28,6 +28,45 @@ impl BoardCardIndex {
             .collect()
     }
 
+    /// The card with this ID, wherever on the board it sits — or `None` if no
+    /// column holds it (deleted, or moved to another board).
+    ///
+    /// Read **untracked** at every level, unlike [`Self::all_cards`]. The one
+    /// caller is the `BoardView` effect that reacts to the search *query*
+    /// changing (card #375); were these reads tracked, that effect would also
+    /// wake on every card edit, and "the card changed" is exactly the case in
+    /// which the expanded-card pin must hold (see `card_is_visible`).
+    ///
+    /// `try_*` throughout because the index hands out signals it does not own:
+    /// a column removes its entry in `on_cleanup`, and a card signal can be
+    /// disposed between the column dropping it and this lookup running. Both
+    /// simply mean "not on the board any more", which is `None`.
+    ///
+    /// **Which way `None` fails.** The caller cannot tell this `None` from
+    /// "nothing is expanded", and `query_change_unpins(None, ..)` is `false`, so
+    /// a lock this index cannot resolve **keeps** the pin. That is the safe
+    /// direction — releasing a lock on a guess is what would unmount an open
+    /// card mid-edit, the #304 trap — and it costs nothing, because a card this
+    /// lookup cannot find is a card no column can render either: each entry is
+    /// the very `cards` signal its `ColumnView` filters and renders from,
+    /// registered in the component body as the column mounts. Walking the ways
+    /// a lock goes unresolved: deleting a card locally clears the lock itself; a
+    /// remote delete leaves a stale lock naming a card that is in no column's
+    /// list; a removed column takes its cards off screen with it. In each, the
+    /// pin that survives is pinning nothing on screen. If that ever stops being
+    /// true — an index entry that is a *copy* of the column's list, say — this
+    /// is where #375 would come back, so keep the two the same signal.
+    pub fn find_untracked(&self, id: &str) -> Option<shared::Card> {
+        self.0
+            .get_untracked()
+            .into_iter()
+            .flat_map(|(_, cards)| cards.try_get_untracked().unwrap_or_default())
+            // Compare IDs through `try_with_untracked` — a borrow — so only the
+            // one matching card is cloned, not every body on the board.
+            .find(|card| card.try_with_untracked(|c| c.id == id).unwrap_or_default())
+            .and_then(|card| card.try_get_untracked())
+    }
+
     /// Distinct tags in use anywhere on the board, case-insensitively deduped
     /// and sorted so the suggestion list is stable between keystrokes.
     pub fn all_tags(&self) -> Vec<String> {
@@ -322,11 +361,53 @@ pub fn card_matches_query(card: &shared::Card, query: &str) -> bool {
 ///
 /// `expanded_id` is the board-level `ExpandedCardId` lock, so at most one card
 /// on the board is ever pinned.
+///
+/// **What the pin does not cover.** It protects a card from *its own content*
+/// moving out from under a query that is standing still. It is not meant to
+/// hold a card against the *query* moving: someone typing a new search has
+/// turned their attention to the search box, and every card that fails the new
+/// query should leave — the expanded one included (card #375, where a freshly
+/// created, still-expanded card sat in the results of every search typed after
+/// it). This function cannot tell the two cases apart — it sees one card and
+/// one query, not which of them just changed — so the distinction is drawn by
+/// [`query_change_unpins`], which `BoardView` consults whenever the query
+/// changes and answers by releasing the lock.
 pub fn card_is_visible(card: &shared::Card, query: &str, expanded_id: Option<&str>) -> bool {
     if expanded_id == Some(card.id.as_str()) {
         return true;
     }
     card_matches_query(card, query)
+}
+
+/// Whether the search moving from `old_query` to `new_query` should release the
+/// expanded-card pin described on [`card_is_visible`].
+///
+/// True only when **both** hold:
+///
+/// * the query really changed. The caller is an `Effect`, which can be woken
+///   by a write that set the same string again; that is not the user moving
+///   the search, so it must not collapse the card they are working in;
+/// * there is an expanded card and it fails the new query. An expanded card
+///   that still matches stays open — narrowing a search around the card you are
+///   reading should not slam it shut.
+///
+/// `expanded` is the card the board-level `ExpandedCardId` lock currently names,
+/// or `None` when nothing is expanded (or the lock names a card that is no
+/// longer on the board). Borrowed as `Option<&Card>` rather than taking an ID,
+/// so this stays a pure function of its arguments: no signals, no board lookup,
+/// and therefore testable on the host target.
+///
+/// Note what is deliberately *absent*: whether the card matched `old_query`. A
+/// card that was already pinned-and-unmatching (edited out of the filter, which
+/// is the case the pin exists for) is released by the next query change just
+/// the same. "The user changed the search" re-evaluates every card on the
+/// board; the pin is a courtesy that lasts while the search stands still.
+pub fn query_change_unpins(
+    expanded: Option<&shared::Card>,
+    old_query: &str,
+    new_query: &str,
+) -> bool {
+    old_query != new_query && expanded.is_some_and(|card| !card_matches_query(card, new_query))
 }
 
 /// Returns `true` when `query` contains a card-number search (`#42` or a bare
@@ -557,6 +638,58 @@ mod tests {
         let c = tagged_card(1, "Deploy preview", &[]);
         assert!(card_is_visible(&c, "", None));
         assert!(card_is_visible(&c, "", Some("card-1")));
+    }
+
+    // ── query_change_unpins: the query moving releases the pin ─────────────
+    //
+    // Expected values below are written out by hand from the card bodies, never
+    // derived by calling `card_matches_query` — the function under test is built
+    // on it, so an oracle that shared it could not disagree with it.
+
+    #[test]
+    fn typing_past_the_expanded_card_releases_the_pin() {
+        // Card #375 verbatim: an expanded card reading `abcdef`, and a search
+        // that grows from the prefix it matches to one it cannot.
+        let c = card(1, "abcdef");
+        assert!(query_change_unpins(Some(&c), "abc", "abcX"));
+        assert!(query_change_unpins(Some(&c), "abcXX", "abcXXX"));
+    }
+
+    #[test]
+    fn narrowing_around_a_still_matching_expanded_card_keeps_it_open() {
+        let c = card(1, "abcdef");
+        assert!(!query_change_unpins(Some(&c), "", "a"));
+        assert!(!query_change_unpins(Some(&c), "ab", "abc"));
+        // Clearing the search matches everything, so it never collapses a card.
+        assert!(!query_change_unpins(Some(&c), "abcXXX", ""));
+    }
+
+    #[test]
+    fn a_rewrite_of_the_same_query_is_not_the_search_moving() {
+        // The card was edited out of `#bug` while expanded — pinned and
+        // unmatching, the state #304 protects. A signal write that sets the
+        // identical string must leave it alone…
+        let c = tagged_card(1, "Deploy preview", &[]);
+        assert!(!query_change_unpins(Some(&c), "#bug", "#bug"));
+        // …but the user really changing the search re-evaluates it like any
+        // other card, even though it did not match the old query either.
+        assert!(query_change_unpins(Some(&c), "#bug", "#bug "));
+        assert!(query_change_unpins(Some(&c), "#bug", "#bu"));
+    }
+
+    #[test]
+    fn nothing_expanded_means_nothing_to_release() {
+        assert!(!query_change_unpins(None, "abc", "abcX"));
+    }
+
+    #[test]
+    fn tag_and_number_terms_release_the_pin_too() {
+        // The rule is about the whole query, not just free text.
+        let c = tagged_card(7, "Deploy preview", &["bug"]);
+        assert!(!query_change_unpins(Some(&c), "", "#bug"));
+        assert!(!query_change_unpins(Some(&c), "", "#7"));
+        assert!(query_change_unpins(Some(&c), "#bug", "#chore"));
+        assert!(query_change_unpins(Some(&c), "#7", "#8"));
     }
 
     #[test]
