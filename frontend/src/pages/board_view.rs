@@ -15,7 +15,7 @@ use crate::links::BoardLinkIndex;
 use crate::recent::RecentPicks;
 use crate::search::{
     BoardCardIndex, BoardSearchQuery, ColumnCardsEntry, HashSuggestion, active_hash_prefix,
-    apply_hash_suggestion, hash_suggestions,
+    apply_hash_suggestion, hash_suggestions, query_change_unpins,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,6 +159,47 @@ pub fn BoardView() -> AnyView {
     let recent = RecentPicks::new(board_ulid);
     Effect::new(move |_| recent.load());
     provide_context(recent);
+
+    // ── A query change releases the expanded-card pin — card #375 ──────────
+    // The column filter keeps the expanded card on screen even when it fails
+    // the query (`card_is_visible`), so that editing a card out of the active
+    // filter cannot unmount it mid-edit. That courtesy is for the *card*
+    // changing under a query that stands still. It was also holding against
+    // the *query* changing under a card that stands still: a freshly created
+    // card is auto-expanded, so it sat in the results of every search typed
+    // after it, matching or not.
+    //
+    // So: whenever the query changes, let go of an expanded card that fails the
+    // new query. Releasing the lock is all this does — the card's own effect on
+    // `ExpandedCardId` then flushes and collapses it, and the column's filter,
+    // subscribed to the same lock, drops it. That is the path another card
+    // claiming the lock already takes, proven trap-free for #304.
+    //
+    // It has to be an effect on the query rather than a line in the `<input>`
+    // handler because the query has several writers (typing, Escape, the clear
+    // button, accepting a `#` suggestion, and anything holding the
+    // `BoardSearchQuery` context); subscribing to the signal covers them all.
+    //
+    // The closure's argument is what it returned last time — Leptos hands an
+    // effect its previous return value, `None` on the first run. Returning the
+    // query therefore gives the next run the *old* query to compare against,
+    // and makes the first run (mount, nothing has "changed") a no-op.
+    //
+    // Only `search_query.get()` is tracked. The lock and the card are read
+    // untracked on purpose: tracking either would wake this effect when a card
+    // is expanded or edited, and an edit is precisely when the pin must hold.
+    Effect::new(move |previous: Option<String>| {
+        let query = search_query.get();
+        if let Some(previous) = previous {
+            let expanded = expanded_card_id
+                .get_untracked()
+                .and_then(|id| card_index.find_untracked(&id));
+            if query_change_unpins(expanded.as_ref(), &previous, &query) {
+                expanded_card_id.set(None);
+            }
+        }
+        query
+    });
 
     // ── `#` search suggestions ─────────────────────────────────────────────
     // Typing `#` opens a helper listing the tags and card numbers that could

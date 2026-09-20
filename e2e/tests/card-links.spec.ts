@@ -542,14 +542,18 @@ test.describe('card links', () => {
     ]);
     expect(panics).toEqual([]);
 
-    // The tab still reacts — a wedged executor would repaint nothing. The
-    // partner is still expanded, so card #304's pin holds it in the filtered
-    // view whatever the query says; a query matching neither card therefore
-    // leaves exactly that one, and the third card disappearing is what proves
-    // the filter re-ran.
+    // The tab still reacts — a wedged executor would repaint nothing. A query
+    // matching neither card empties the board, the expanded partner included:
+    // card #304's pin holds a card against its own edits, not against the
+    // search moving (card #375), so the query change lets go of it. Clearing
+    // the search then has to bring both survivors back, the partner collapsed
+    // now that the search released it — two repaints a dead tab cannot make.
     await page.locator('.navbar-search-input').fill('matches no card at all');
-    await expect(page.locator('.card-item')).toHaveCount(1);
-    await expect(page.locator('.card-item.card-expanded')).toHaveCount(1);
+    await expect(page.locator('.card-item')).toHaveCount(0);
+    await page.locator('.navbar-search-input').fill('');
+    await expect(page.locator('.card-item')).toHaveCount(2);
+    await expect(page.locator('.card-item.card-expanded')).toHaveCount(0);
+    expect(panics).toEqual([]);
 
     await context.close();
   });
