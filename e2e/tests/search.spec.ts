@@ -9,6 +9,21 @@ import {
   gotoBoardView,
 } from './helpers';
 
+/**
+ * A trap surfaces as a `wasm panic:` console error or an `unreachable` page
+ * error. One definition for the whole file: the describe blocks that assert
+ * liveness (#375, #305) both watch for the same thing, and the regex should
+ * only have to be corrected once if a future Leptos changes the message.
+ */
+function watchForPanics(page: import('@playwright/test').Page) {
+  const panics: string[] = [];
+  page.on('console', msg => {
+    if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+  });
+  page.on('pageerror', err => panics.push(String(err)));
+  return panics;
+}
+
 test.describe('simple search', () => {
   test('filters by card number, card body, fuzzy query, and clear', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `search-board-${Date.now()}`);
@@ -112,16 +127,6 @@ test.describe('simple search', () => {
   // (#304), and the pin held against the query changing too. A freshly created
   // card is auto-expanded, which is how the report was reached.
   test.describe('typing past a match', () => {
-    /** A trap surfaces as a `wasm panic:` console error or an `unreachable` page error. */
-    function watchForPanics(page: import('@playwright/test').Page) {
-      const panics: string[] = [];
-      page.on('console', msg => {
-        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
-      });
-      page.on('pageerror', err => panics.push(String(err)));
-      return panics;
-    }
-
     /** Body text of every card on screen, in order — `<mark>`s contribute only their text. */
     const visibleBodies = (page: import('@playwright/test').Page) =>
       page.locator('.card-item .card-preview');
@@ -300,16 +305,6 @@ test.describe('simple search', () => {
   // carry neither the number nor the text, so the link badge that put them
   // there is highlighted instead of their own number badge.
   test.describe('#number includes linked cards', () => {
-    /** A trap surfaces as a `wasm panic:` console error or an `unreachable` page error. */
-    function watchForPanics(page: import('@playwright/test').Page) {
-      const panics: string[] = [];
-      page.on('console', msg => {
-        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
-      });
-      page.on('pageerror', err => panics.push(String(err)));
-      return panics;
-    }
-
     test('shows direct links in both directions, and stops there', async ({ page, request }) => {
       const board = await apiCreateBoard(request, `search-link-board-${Date.now()}`);
       const col = await apiCreateColumn(request, board.name, 'Todo');

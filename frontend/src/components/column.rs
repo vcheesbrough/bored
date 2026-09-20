@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use crate::components::card::{CardItem, ExpandedCardId};
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::links::BoardLinkIndex;
-use crate::search::{BoardCardIndex, BoardSearchQuery, card_is_visible};
+use crate::search::{BoardCardIndex, BoardSearchQuery, card_is_visible, parse_query};
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -575,13 +575,30 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                             // makes the column re-filter when the user collapses
                             // a pinned card that no longer matches.
                             let expanded = expanded_card_id.get();
-                            // The board's links, likewise once and likewise
-                            // tracked: a `#42` query also shows 42's linked
-                            // cards (card #305), so linking or unlinking while
-                            // that search is active has to re-filter the column
-                            // — whether the change came from this tab or over
-                            // SSE from another.
-                            let links = links_index.links.get();
+                            // The board's links, likewise once — but only for a
+                            // query that has a `#N` term, because that is the
+                            // only kind `card_matches_query` consults them for
+                            // (card #305). Reading conditionally keeps the
+                            // *subscription* conditional: a `#42` search
+                            // re-filters when a link is added or removed, from
+                            // this tab or over SSE, while a plain text search
+                            // is not woken by link traffic anywhere on the
+                            // board — and does not clone the list on every
+                            // keystroke either.
+                            //
+                            // The cost is that `parse_query` runs once here and
+                            // again inside the filter. It is a split over
+                            // whitespace on a search box's worth of text, next
+                            // to a per-card body match that runs for every card
+                            // in the column. The coupling is the part to keep
+                            // an eye on: if another kind of term ever reads
+                            // `links`, this condition has to learn about it, or
+                            // the column will quietly stop re-filtering for it.
+                            let links = if parse_query(query.trim()).numbers.is_empty() {
+                                Vec::new()
+                            } else {
+                                links_index.links.get()
+                            };
                             cards
                                 .get()
                                 .into_iter()
