@@ -19,5 +19,20 @@ serde.workspace = true
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-# EventSource for SSE; DragEvent for drag-and-drop
-web-sys = { version = "0.3", features = ["EventSource", "MessageEvent", "DragEvent", "HtmlInputElement", "Storage"] }
+# EventSource for SSE; DragEvent for drag-and-drop; the caret group
+# (CaretPosition/Range/DomRect/CssStyleDeclaration/NodeList) is what
+# `crate::caret` needs to turn a click on rendered markdown into a textarea
+# caret position — see that module.
+web-sys = { version = "0.3", features = [
+    "EventSource",
+    "MessageEvent",
+    "DragEvent",
+    "HtmlInputElement",
+    "Storage",
+    "CaretPosition",
+    "Range",
+    "DomRect",
+    "CssStyleDeclaration",
+    "NodeList",
+    "HtmlTextAreaElement",
+] }

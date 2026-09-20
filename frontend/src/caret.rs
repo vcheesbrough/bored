@@ -1,0 +1,361 @@
+//! Turning a click on rendered markdown into a caret position in the textarea.
+//!
+//! The rendered body and the textarea show the same card in two different
+//! shapes: one is HTML produced by `pulldown-cmark`, the other is the markdown
+//! source. Clicking the rendered view used to drop the user at offset 0 of the
+//! source, which on a long card means hunting for the place they just clicked.
+//!
+//! The bridge between the two shapes is the `data-src` attribute that
+//! [`crate::components::markdown`] writes onto every run of body text: the
+//! offset of that run's first character in the markdown source, counted in
+//! UTF-16 code units (the unit `selectionStart` speaks). Given a click point
+//! this module finds the run under it, adds the offset within that run, and
+//! then places and scrolls the textarea.
+//!
+//! ## What "exact" means here
+//!
+//! The offset within a run is measured in *rendered* characters and added to
+//! the run's *source* offset. Those agree character for character for plain
+//! text, which is nearly all card prose. Where the source spends more
+//! characters than it renders — a `\*` escape, an `&amp;` entity — the caret
+//! lands a character or two **early**, never late, because the source of a run
+//! is never shorter than what it renders. Card #382 accepted that in exchange
+//! for not carrying a full character-level source map.
+
+use wasm_bindgen::{JsCast, JsValue};
+use web_sys::{Element, HtmlTextAreaElement, Node};
+
+use crate::components::markdown::SRC_POS_ATTR;
+
+/// How close to the click the caret has to land before we stop scrolling.
+/// Below a pixel there is nothing left to correct and browsers disagree about
+/// sub-pixel rounding anyway.
+const SCROLL_EPSILON: f64 = 1.0;
+
+/// Fallback line height, in pixels, when the computed style does not give a
+/// usable number (`line-height: normal` computes to `normal` in some engines).
+/// Only affects how far up the caret sits, not where it lands in the text.
+const FALLBACK_LINE_HEIGHT: f64 = 18.0;
+
+/// The markdown-source offset (UTF-16 code units) of the character at viewport
+/// point (`x`, `y`) inside `container`.
+///
+/// `None` when nothing under the point can be resolved, which callers should
+/// read as "leave the caret where it would have gone anyway".
+pub fn source_offset_at(container: &Element, x: f64, y: f64) -> Option<u32> {
+    if let Some((node, offset)) = caret_node_at(x, y)
+        && container.contains(Some(&node))
+        && node.node_type() == Node::TEXT_NODE
+        && let Some(run) = closest_run(&node)
+        && let Some(start) = run_offset(&run)
+    {
+        let within = text_offset_within(&run, &node, offset);
+        return Some(start.saturating_add(within));
+    }
+    // The point did not land on annotated text: the container's padding, a list
+    // bullet, the gap below the last paragraph. Fall back to the nearest run.
+    nearest_run_offset(container, x, y)
+}
+
+/// Places the caret at `pos` and scrolls so it sits as close as possible to
+/// `anchor_y` (the viewport Y of the click that started the edit).
+///
+/// The textarea absorbs as much of the scroll as it can; whatever is left over
+/// is taken up by the nearest scrollable ancestor. That split is what makes one
+/// code path serve both editors: the modal's textarea scrolls internally
+/// (`height: 100%`), while the inline card's is `field-sizing: content;
+/// overflow: hidden` and never scrolls, so its column scrolls instead.
+pub fn place_caret(textarea: &HtmlTextAreaElement, pos: u32, anchor_y: Option<f64>) {
+    let value = textarea.value();
+    let pos = pos.min(utf16_len(&value));
+
+    let _ = textarea.focus();
+    let _ = textarea.set_selection_range(pos, pos);
+
+    let Some(anchor_y) = anchor_y else {
+        return;
+    };
+    let Some(caret_top) = caret_top(textarea, &value, pos) else {
+        return;
+    };
+
+    let rect = textarea.get_bounding_client_rect();
+    // Where the caret should sit inside the textarea's own box, so that it
+    // lands back under the pointer.
+    let wanted_within_box = anchor_y - rect.top();
+
+    let max_scroll = f64::from(textarea.scroll_height() - textarea.client_height()).max(0.0);
+    let scroll = (caret_top - wanted_within_box).clamp(0.0, max_scroll);
+    textarea.set_scroll_top(scroll as i32);
+
+    // Whatever the textarea could not absorb — all of it, when the textarea
+    // grows to fit its content instead of scrolling — is left for an ancestor.
+    let remainder = (caret_top - scroll) - wanted_within_box;
+    if remainder.abs() > SCROLL_EPSILON {
+        scroll_ancestor(textarea, remainder);
+    }
+}
+
+// ── Resolving the click ────────────────────────────────────────────────────
+
+/// The DOM (node, offset) caret position at a viewport point.
+///
+/// `caretPositionFromPoint` is the standard spelling; `caretRangeFromPoint` is
+/// the older WebKit one, still what Safari below 17.4 offers.
+fn caret_node_at(x: f64, y: f64) -> Option<(Node, u32)> {
+    let document = web_sys::window()?.document()?;
+    if let Some(caret) = document.caret_position_from_point(x as f32, y as f32) {
+        return Some((caret.offset_node()?, caret.offset()));
+    }
+    // WebKit's older spelling. It never became standard, so `web-sys` generates
+    // no binding for it and it has to be reached by name; Safari below 17.4
+    // offers only this one.
+    let method = js_sys::Reflect::get(&document, &JsValue::from_str("caretRangeFromPoint")).ok()?;
+    let range = method
+        .dyn_ref::<js_sys::Function>()?
+        .call2(&document, &JsValue::from_f64(x), &JsValue::from_f64(y))
+        .ok()?;
+    let range = range.dyn_ref::<web_sys::Range>()?;
+    Some((range.start_container().ok()?, range.start_offset().ok()?))
+}
+
+/// The nearest ancestor element (or `node` itself) carrying `data-src`.
+fn closest_run(node: &Node) -> Option<Element> {
+    let start = match node.dyn_ref::<Element>() {
+        Some(el) => el.clone(),
+        None => node.parent_element()?,
+    };
+    start.closest(&format!("[{SRC_POS_ATTR}]")).ok().flatten()
+}
+
+/// The source offset recorded on a run element.
+fn run_offset(run: &Element) -> Option<u32> {
+    run.get_attribute(SRC_POS_ATTR)?.parse().ok()
+}
+
+/// Characters (UTF-16) between the start of `run` and the caret at
+/// (`target`, `offset`).
+///
+/// A run is usually a single text node, but a live search splits it around
+/// `<mark>` elements, so the text nodes before the caret's own have to be
+/// counted.
+fn text_offset_within(run: &Element, target: &Node, offset: u32) -> u32 {
+    let mut seen = 0u32;
+    if walk_text(run.unchecked_ref::<Node>(), target, &mut seen) {
+        seen.saturating_add(offset)
+    } else {
+        // The caret node is not inside this run after all; the run's own start
+        // is the safest answer.
+        0
+    }
+}
+
+/// Depth-first walk that adds up text-node lengths until `target` is reached.
+/// Returns whether `target` was found.
+fn walk_text(node: &Node, target: &Node, seen: &mut u32) -> bool {
+    if node.is_same_node(Some(target)) {
+        return true;
+    }
+    if node.node_type() == Node::TEXT_NODE {
+        *seen = seen.saturating_add(utf16_len(&node.text_content().unwrap_or_default()));
+        return false;
+    }
+    let children = node.child_nodes();
+    for i in 0..children.length() {
+        if let Some(child) = children.item(i)
+            && walk_text(&child, target, seen)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The offset for a click that missed every annotated run: the end of the run
+/// nearest the point, or its start if the point sits above or before it.
+fn nearest_run_offset(container: &Element, x: f64, y: f64) -> Option<u32> {
+    let runs = container
+        .query_selector_all(&format!("[{SRC_POS_ATTR}]"))
+        .ok()?;
+    let mut best: Option<(f64, Element)> = None;
+    for i in 0..runs.length() {
+        let Some(run) = runs.item(i).and_then(|n| n.dyn_into::<Element>().ok()) else {
+            continue;
+        };
+        let rect = run.get_bounding_client_rect();
+        // Vertical distance dominates: on a wrapped paragraph the run on the
+        // clicked line is the right answer even when the pointer is far to its
+        // right, which is exactly where clicks past the end of a line land.
+        let dy = (rect.top() - y).max(y - rect.bottom()).max(0.0);
+        let dx = (rect.left() - x).max(x - rect.right()).max(0.0);
+        let score = dy * 1000.0 + dx;
+        if best.as_ref().is_none_or(|(b, _)| score < *b) {
+            best = Some((score, run));
+        }
+    }
+    let (_, run) = best?;
+    let start = run_offset(&run)?;
+    let rect = run.get_bounding_client_rect();
+    // Past the end of the run in reading order → its end; before it → its start.
+    if y > rect.bottom() || (y >= rect.top() && x > rect.right()) {
+        let len = utf16_len(&run.text_content().unwrap_or_default());
+        Some(start.saturating_add(len))
+    } else {
+        Some(start)
+    }
+}
+
+// ── Placing and scrolling ──────────────────────────────────────────────────
+
+/// Distance in pixels from the top of the textarea's content to the top of the
+/// line the caret is on.
+///
+/// A textarea exposes no caret geometry, so this measures it: shorten the value
+/// to everything before the caret, read the content height that produces, then
+/// put the value back. It all happens inside one event handler, so the browser
+/// never paints the truncated value.
+fn caret_top(textarea: &HtmlTextAreaElement, value: &str, pos: u32) -> Option<f64> {
+    let prefix = utf16_prefix(value, pos);
+    // A prefix ending in a newline is a caret on a fresh empty line, and an
+    // empty trailing line does not always count towards `scrollHeight`. The
+    // sentinel gives that line something to be as tall as.
+    let measured = if prefix.ends_with('\n') {
+        format!("{prefix}.")
+    } else {
+        prefix.to_string()
+    };
+
+    let scroll_top = textarea.scroll_top();
+    textarea.set_value(&measured);
+    let prefix_height = f64::from(textarea.scroll_height());
+    textarea.set_value(value);
+    // Restoring the value drops both, so put them back before anything reads
+    // them — the caller sets `scroll_top` again straight after.
+    let _ = textarea.set_selection_range(pos, pos);
+    textarea.set_scroll_top(scroll_top);
+
+    let style = web_sys::window()?
+        .get_computed_style(textarea.unchecked_ref::<Element>())
+        .ok()
+        .flatten()?;
+    let px = |prop: &str| {
+        style
+            .get_property_value(prop)
+            .ok()
+            .and_then(|v| v.trim_end_matches("px").parse::<f64>().ok())
+    };
+    let line_height = px("line-height").unwrap_or(FALLBACK_LINE_HEIGHT);
+    let padding_bottom = px("padding-bottom").unwrap_or(0.0);
+
+    // `prefix_height` runs from the top of the padding box to the bottom of the
+    // caret's line, plus the bottom padding. Strip those to get the line's top.
+    Some((prefix_height - padding_bottom - line_height).max(0.0))
+}
+
+/// Scrolls the nearest scrollable ancestor of `el` down by `delta` pixels.
+fn scroll_ancestor(el: &HtmlTextAreaElement, delta: f64) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let mut current = el.parent_element();
+    while let Some(candidate) = current {
+        let scrollable = candidate.scroll_height() > candidate.client_height()
+            && window
+                .get_computed_style(&candidate)
+                .ok()
+                .flatten()
+                .and_then(|s| s.get_property_value("overflow-y").ok())
+                .is_some_and(|o| o == "auto" || o == "scroll" || o == "overlay");
+        if scrollable {
+            let max = f64::from(candidate.scroll_height() - candidate.client_height());
+            let target = (f64::from(candidate.scroll_top()) + delta).clamp(0.0, max);
+            candidate.set_scroll_top(target as i32);
+            return;
+        }
+        current = candidate.parent_element();
+    }
+}
+
+/// The viewport Y a rendered-body click should anchor the caret to, or `None`
+/// for a synthetic click that carries no coordinates (`element.click()`, and
+/// the keyboard activation browsers report the same way).
+pub fn anchor_of(ev: &web_sys::MouseEvent) -> Option<f64> {
+    if ev.client_x() == 0 && ev.client_y() == 0 {
+        None
+    } else {
+        Some(f64::from(ev.client_y()))
+    }
+}
+
+/// The element a rendered-body click landed in, as the container to search.
+pub fn event_container(ev: &web_sys::MouseEvent) -> Option<Element> {
+    ev.current_target()?.dyn_into::<Element>().ok()
+}
+
+/// Focus without any caret placement — the behaviour before card #382, kept for
+/// the paths that have no click to work from.
+pub fn focus_only(textarea: &HtmlTextAreaElement) {
+    let _ = textarea.focus();
+}
+
+// ── UTF-16 helpers ─────────────────────────────────────────────────────────
+//
+// Rust strings index by byte, `selectionStart` and DOM text offsets by UTF-16
+// code unit. Everything crossing that boundary goes through these two.
+
+/// Length of `s` in UTF-16 code units.
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// The first `units` UTF-16 code units of `s`, rounded down to a character
+/// boundary if `units` would split a surrogate pair.
+fn utf16_prefix(s: &str, units: u32) -> &str {
+    let mut seen = 0u32;
+    for (byte, ch) in s.char_indices() {
+        // Stop *before* a character that would take the count past `units`, so
+        // a cut inside a surrogate pair yields the character boundary below it
+        // rather than a byte index that would panic the slice.
+        if seen + ch.len_utf16() as u32 > units {
+            return &s[..byte];
+        }
+        seen += ch.len_utf16() as u32;
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{utf16_len, utf16_prefix};
+
+    #[test]
+    fn utf16_len_counts_code_units_not_bytes_or_chars() {
+        assert_eq!(utf16_len("abc"), 3);
+        // 2 bytes, 1 unit.
+        assert_eq!(utf16_len("é"), 1);
+        // 4 bytes, 1 char, 2 units — the case that makes byte offsets wrong.
+        assert_eq!(utf16_len("𝄞"), 2);
+        assert_eq!(utf16_len("a𝄞é"), 4);
+    }
+
+    #[test]
+    fn utf16_prefix_cuts_at_the_requested_unit() {
+        assert_eq!(utf16_prefix("abcdef", 3), "abc");
+        assert_eq!(utf16_prefix("abc", 0), "");
+        assert_eq!(utf16_prefix("aéb", 2), "aé");
+    }
+
+    #[test]
+    fn utf16_prefix_never_splits_a_surrogate_pair() {
+        // Asking for one unit of a two-unit character must not slice mid-char
+        // (which would panic on a byte index) — it rounds down to before it.
+        assert_eq!(utf16_prefix("a𝄞b", 2), "a");
+        assert_eq!(utf16_prefix("a𝄞b", 3), "a𝄞");
+    }
+
+    #[test]
+    fn utf16_prefix_clamps_past_the_end() {
+        assert_eq!(utf16_prefix("abc", 99), "abc");
+        assert_eq!(utf16_prefix("", 5), "");
+    }
+}

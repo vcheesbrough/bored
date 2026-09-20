@@ -78,6 +78,9 @@ pub fn CardItem(
 
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
     let body_rendered_ref = NodeRef::<leptos::html::Div>::new();
+    // Where the click that started the edit landed, as (markdown-source offset,
+    // viewport Y). Read and cleared by the focus effect below.
+    let pending_caret: RwSignal<Option<(u32, Option<f64>)>> = RwSignal::new(None);
 
     // ── State machine ─────────────────────────────────────────────────────
     let card_state: RwSignal<CardState> = RwSignal::new(CardState::Collapsed);
@@ -126,12 +129,19 @@ pub fn CardItem(
         }
     });
 
-    // Focus textarea whenever the card enters editing mode.
+    // Focus textarea whenever the card enters editing mode, placing the caret
+    // where the click landed when the edit started from one. A card that enters
+    // editing without a click — a freshly created card — has nothing pending
+    // and just takes focus, as before. See `crate::caret`.
     Effect::new(move |_| {
         if card_state.get() == CardState::Editing
             && let Some(el) = textarea_ref.get()
         {
-            let _ = el.focus();
+            match pending_caret.get_untracked() {
+                Some((offset, anchor)) => crate::caret::place_caret(&el, offset, anchor),
+                None => crate::caret::focus_only(&el),
+            }
+            pending_caret.set(None);
         }
     });
 
@@ -628,6 +638,14 @@ pub fn CardItem(
                         class:card-body-hidden=move || !is_expanded()
                         on:click=move |e: leptos::ev::MouseEvent| {
                             e.stop_propagation();
+                            pending_caret.set(crate::caret::event_container(&e).map(|container| {
+                                let offset = crate::caret::source_offset_at(
+                                    &container,
+                                    f64::from(e.client_x()),
+                                    f64::from(e.client_y()),
+                                );
+                                (offset.unwrap_or(0), crate::caret::anchor_of(&e))
+                            }));
                             card_state.set(CardState::Editing);
                         }
                     >
@@ -642,7 +660,12 @@ pub fn CardItem(
                                 <p class="card-body-placeholder">"Click to edit…"</p>
                             }
                         >
-                            <MarkdownPreview body=body_signal class="card-markdown" highlight=highlight />
+                            <MarkdownPreview
+                                body=body_signal
+                                class="card-markdown"
+                                highlight=highlight
+                                source_positions=true
+                            />
                         </Show>
                     </div>
 

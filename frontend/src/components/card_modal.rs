@@ -223,6 +223,40 @@ pub fn CardModal(
     let modal_ref = NodeRef::<leptos::html::Div>::new();
     let history_drawer = use_context::<HistoryDrawer>();
 
+    // Where the click that opened the editor landed, as
+    // (markdown-source offset, viewport Y). Consumed by the focus effect below
+    // once the textarea exists, then cleared so a later focus does not reuse a
+    // stale position. See `crate::caret`.
+    let pending_caret: RwSignal<Option<(u32, Option<f64>)>> = RwSignal::new(None);
+    let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
+
+    let on_rendered_click = move |ev: leptos::ev::MouseEvent| {
+        pending_caret.set(crate::caret::event_container(&ev).map(|container| {
+            let offset = crate::caret::source_offset_at(
+                &container,
+                f64::from(ev.client_x()),
+                f64::from(ev.client_y()),
+            );
+            (offset.unwrap_or(0), crate::caret::anchor_of(&ev))
+        }));
+        editing.set(true);
+    };
+
+    // The textarea only exists while editing, so this runs on mount: place the
+    // caret where the click was, or just focus when there was no click to work
+    // from (an empty body's placeholder, a synthetic click).
+    Effect::new(move |_| {
+        if editing.get()
+            && let Some(el) = textarea_ref.get()
+        {
+            match pending_caret.get_untracked() {
+                Some((offset, anchor)) => crate::caret::place_caret(&el, offset, anchor),
+                None => crate::caret::focus_only(&el),
+            }
+            pending_caret.set(None);
+        }
+    });
+
     // Keep focus on the modal div when viewing (not editing) so keyboard Esc
     // is received without requiring a click first.
     Effect::new(move |_| {
@@ -293,7 +327,7 @@ pub fn CardModal(
                         <Show when=move || !editing.get() fallback=|| ()>
                             <div
                                 class="modal-body-rendered"
-                                on:click=move |_| editing.set(true)
+                                on:click=on_rendered_click
                             >
                                 <Show
                                     when=move || !body.get().is_empty()
@@ -301,18 +335,23 @@ pub fn CardModal(
                                         <p class="modal-body-placeholder">"Click to edit…"</p>
                                     }
                                 >
-                                    <MarkdownPreview body=body_signal class="modal-markdown" highlight=highlight />
+                                    <MarkdownPreview
+                                        body=body_signal
+                                        class="modal-markdown"
+                                        highlight=highlight
+                                        source_positions=true
+                                    />
                                 </Show>
                             </div>
                         </Show>
 
                         <Show when=move || editing.get() fallback=|| ()>
                             <textarea
+                                node_ref=textarea_ref
                                 class="modal-body-textarea"
                                 prop:value=move || body.get()
                                 on:input=on_body_input
                                 on:blur=move |_| editing.set(false)
-                                autofocus=true
                             />
                         </Show>
                     </div>
