@@ -49,6 +49,39 @@ test.describe('Reload when the server is redeployed', () => {
     expect(loads).toBe(1);
   });
 
+  test('does not reload when the reload could not be remembered', async ({ page, request }) => {
+    // The loop guard is a marker in sessionStorage. Where storage is blocked —
+    // a browser setting, a privacy mode — the tab could not tell its second
+    // reload from its first, and a mismatch that never resolves would reload it
+    // on every heartbeat, forever. So no usable storage means no reload at all.
+    //
+    // Blocked the way real browsers block it: the object is there, and throws
+    // the moment it is written to.
+    await page.addInitScript(() => {
+      Storage.prototype.setItem = () => {
+        throw new DOMException('blocked for this test', 'SecurityError');
+      };
+    });
+    const board = await apiCreateBoard(request, `no-storage-${Date.now()}`);
+    // Mismatched from the very first heartbeat.
+    await page.route('**/api/info', (route) =>
+      route.fulfill({ json: { version: '99.99.0', env: 'test' } }),
+    );
+    await gotoBoardView(page, board.name);
+
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+
+    // The anchor that keeps the assertion below from being vacuous: the
+    // watermark follows the heartbeat, so 99.99.0 here proves a heartbeat ran,
+    // saw the mismatch, and the tab is still standing.
+    await expect(page.locator('.navbar-watermark')).toContainText('99.99.0', { timeout: 15000 });
+    await page.waitForTimeout(4000);
+    expect(loads).toBe(0);
+    // Staying put must not cost the user the board.
+    await expect(page.locator('.columns-row')).toBeVisible();
+  });
+
   test('does not reload while the server version is unchanged', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `no-reload-${Date.now()}`);
     // Routed before the page loads: a `page.route` only intercepts requests
@@ -66,6 +99,59 @@ test.describe('Reload when the server is redeployed', () => {
 
     // Long enough to cover several heartbeats at the backoff intervals.
     await page.waitForTimeout(8000);
+    expect(loads).toBe(0);
+  });
+});
+
+// Home is the only page with no event stream, which makes it the only place
+// two things can be observed at all: the heartbeat-only offline state, and the
+// stream state being forgotten when a board is left behind.
+//
+// It redirects to the first board whenever one exists, and this suite's
+// database always has some — so these specs answer the board *list* with `[]`
+// to hold home on its empty state. Only that one GET is mocked; the glob ends
+// at `/api/boards`, so `/api/boards/<slug>` and everything under it is real.
+test.describe('Home, which has no event stream', () => {
+  const noBoards = (route: import('@playwright/test').Route) =>
+    route.request().method() === 'GET' ? route.fulfill({ json: [] }) : route.fallback();
+
+  test('goes offline on the heartbeat alone, and its create form is inert', async ({ page }) => {
+    let streams = 0;
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname === '/api/events') streams += 1;
+    });
+    await page.route('**/api/boards', noBoards);
+    await page.route('**/api/info', (route) => route.abort());
+    await page.goto('/');
+    await expect(page.locator('.empty-state')).toBeVisible();
+
+    await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+    // Nothing but the heartbeat can have done that: this page never opened a
+    // stream to lose.
+    expect(streams).toBe(0);
+    await expect(page.locator('.create-form button')).toHaveCSS('pointer-events', 'none');
+  });
+
+  test('leaving a board whose stream is dead does not leave home offline', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `leave-dead-stream-${Date.now()}`);
+    await page.route('**/api/events*', (route) => route.abort());
+    await gotoBoardView(page, board.name);
+    // Offline because of the stream, and only the stream: /api/info is
+    // untouched, so the heartbeat is healthy throughout.
+    await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+
+    // A client-side navigation, proven rather than assumed: a full page load
+    // would reset all state and clear the badge for free, and this spec would
+    // pass without the code it is here for.
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+    await page.route('**/api/boards', noBoards);
+    await page.locator('.navbar-brand').click();
+    await expect(page.locator('.empty-state')).toBeVisible();
+
+    // The dead stream belonged to the board. Home has none, so its health is
+    // the heartbeat's alone — and the heartbeat is fine.
+    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 5000 });
     expect(loads).toBe(0);
   });
 });
@@ -122,6 +208,41 @@ test.describe('Disconnected UI', () => {
     // control that still looks live but silently does nothing is the failure
     // mode this iteration is about.
     await expect(page.locator('.add-card-btn').first()).toHaveCSS('pointer-events', 'none');
+
+    // Delete in particular, because its refusal is otherwise invisible: the
+    // confirm dialog would close, the card would stay, and only the console
+    // would know why. The card is still expanded from the edit above, so its
+    // toolbar — and the delete button in it — is on screen.
+    const deleteButton = page.locator('.card-item.card-expanded .card-toolbar-close');
+    await expect(deleteButton).toBeVisible();
+    await expect(deleteButton).toHaveCSS('pointer-events', 'none');
+    // `force` skips Playwright's own actionability wait, which would otherwise
+    // time out on exactly the property under test; the browser still honours
+    // `pointer-events: none`, so the click lands on nothing.
+    await deleteButton.click({ force: true });
+    await expect(page.locator('.btn-danger')).toHaveCount(0);
+    await expect(page.locator('.card-item')).toHaveCount(1);
+  });
+
+  test('a server that accepts the heartbeat and never answers is offline too', async ({ page, request }) => {
+    // The outage a bare `await` cannot see: no refusal, no 502, just silence.
+    // The route handler below never fulfils, continues or aborts, so every
+    // /api/info request hangs exactly as it would against a wedged container.
+    //
+    // The event stream is deliberately left alone. With the stream healthy the
+    // heartbeat is the *only* thing that can mark this tab disconnected — so
+    // the badge appearing is the request deadline firing and nothing else.
+    // Without the deadline the heartbeat awaits forever and this never shows.
+    const board = await apiCreateBoard(request, `hung-heartbeat-${Date.now()}`);
+    await page.route('**/api/info', () => { /* never answered */ });
+    await gotoBoardView(page, board.name);
+
+    await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+
+    // Liveness: the tab recovers once the server answers again, which also
+    // proves the heartbeat loop survived the abort rather than dying with it.
+    await page.unroute('**/api/info');
+    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 20000 });
   });
 
   test('refuses to add a card link while disconnected, and says why', async ({ page, request }) => {

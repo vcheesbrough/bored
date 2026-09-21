@@ -29,6 +29,9 @@ js-sys = "0.3"
 # `crate::caret` needs to turn a click on rendered markdown into a textarea
 # caret position — see that module.
 web-sys = { version = "0.3", features = [
+    # Deadline on the connection heartbeat's GET — see `api::fetch_app_info_within`.
+    "AbortController",
+    "AbortSignal",
     "EventSource",
     "MessageEvent",
     "DragEvent",

@@ -116,6 +116,15 @@ html[data-connection="offline"] .chooser-col-new,
 html[data-connection="offline"] .chooser-col-delete,
 html[data-connection="offline"] .chooser-board-delete,
 html[data-connection="offline"] .card-context-menu-danger,
+/* The card's delete button, inline and in the modal — named for where it sits
+   in the toolbar, not for what it does. It opens the confirm dialog, so with
+   it inert the dialog's own button cannot be reached and needs no rule. */
+html[data-connection="offline"] .card-toolbar-close,
+/* Home's "create your first board" form — the one mutation outside the board
+   view. Only the button: typing a name is harmless. Enter in the field still
+   submits, which CSS cannot stop; `crate::api` refuses it like anything else,
+   and the dimmed button is what tells the user why nothing happened. */
+html[data-connection="offline"] .create-form button,
 html[data-connection="offline"] .btn-restore {
   opacity: 0.4;
   pointer-events: none;

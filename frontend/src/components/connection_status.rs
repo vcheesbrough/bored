@@ -6,7 +6,7 @@
 // answering. See [`crate::connection`] for what sets that state and
 // [`crate::api`] for the mutations it refuses while it holds.
 //
-// Lives in every navbar (board view, home, boards list) so the explanation is
+// Lives in both navbars (board view and home) so the explanation is
 // wherever the user is when their edits stop being accepted.
 
 use leptos::prelude::*;

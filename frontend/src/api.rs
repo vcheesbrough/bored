@@ -78,6 +78,45 @@ pub async fn fetch_app_info() -> Result<shared::AppInfo, gloo_net::Error> {
         .await
 }
 
+/// `/api/info` with a deadline, for the connection heartbeat.
+///
+/// A plain `fetch` has no timeout of its own. A server that accepts the
+/// connection and then never answers — a wedged container, a proxy holding an
+/// upstream socket open — would leave the heartbeat awaiting forever: no
+/// failure is ever recorded, so the tab goes on believing it is connected and
+/// goes on accepting edits. That is the one shape of outage a bare `await`
+/// cannot see, so this request is aborted if it has not completed within
+/// `timeout_ms`, and the abort surfaces as an ordinary `Err`.
+///
+/// Aborted rather than merely abandoned: racing the fetch against a timer would
+/// stop *waiting* for it but leave the request open in the browser, and a tab
+/// sat against a wedged server would pile up one of those per heartbeat.
+pub async fn fetch_app_info_within(timeout_ms: u32) -> Result<shared::AppInfo, gloo_net::Error> {
+    // `ok()`: a browser too old to have `AbortController` still gets a
+    // heartbeat, just one without a deadline — better than a heartbeat that
+    // fails every time and pins the tab offline.
+    let controller = web_sys::AbortController::new().ok();
+    let signal = controller.as_ref().map(web_sys::AbortController::signal);
+
+    // Dropping a `Timeout` cancels it, so holding this until the function
+    // returns means the abort fires only if the request is still in flight at
+    // the deadline — a request that finished in time takes its timer with it.
+    let _deadline = controller.map(|controller| {
+        gloo_timers::callback::Timeout::new(timeout_ms, move || controller.abort())
+    });
+
+    // The signal covers the body as well as the headers, so a response that
+    // starts and then stalls mid-JSON is cut off by the same deadline.
+    check_auth(
+        Request::get("/api/info")
+            .abort_signal(signal.as_ref())
+            .send()
+            .await?,
+    )?
+    .json::<shared::AppInfo>()
+    .await
+}
+
 /// Fetch the current user's identity from `/api/me`.
 /// Used by the navbar to render `preferred_username` + avatar.
 pub async fn fetch_me() -> Result<shared::UserInfo, gloo_net::Error> {

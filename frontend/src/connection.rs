@@ -20,8 +20,8 @@
 //! browser puts the `EventSource` in `CLOSED` and never retries — `onopen`
 //! never fires again and the check never ran. That is why the version check now
 //! lives on an independent `/api/info` heartbeat: it does not depend on the SSE
-//! stream ever coming back, and it works on pages that have no stream at all
-//! (home, boards list).
+//! stream ever coming back, and it works on the page that has no stream at all
+//! (home).
 //!
 //! The decision logic — [`reload_decision`], [`next_delay_ms`], [`combine`] —
 //! is kept as pure functions over plain values, with no `web_sys` in sight, so
@@ -51,6 +51,18 @@ use std::cell::Cell;
 /// the server has replaced.
 const HEALTHY_INTERVAL_MS: u32 = 10_000;
 
+/// How long one heartbeat may take before it is aborted and counted as a
+/// failure. Generous for a route that touches no database, and short enough
+/// that a server which has stopped answering is noticed in seconds rather than
+/// at the browser's own network timeout, which is minutes.
+const HEARTBEAT_TIMEOUT_MS: u32 = 5_000;
+
+// A heartbeat must be over — answered or aborted — before the next one is due,
+// or a slow server would have two in flight and the older one's verdict could
+// land last. Checked at compile time, so retuning either constant cannot
+// quietly break the ordering.
+const _: () = assert!(HEARTBEAT_TIMEOUT_MS < HEALTHY_INTERVAL_MS);
+
 /// Ceiling for the backoff while the server is unreachable. Deliberately the
 /// same as the healthy interval: once a deploy is under way we want to notice
 /// the new version promptly, and the request costs nothing when it fails fast.
@@ -79,12 +91,32 @@ pub enum ReloadDecision {
     Stay,
     /// The server is on a different version: reload onto the new bundle.
     Reload,
-    /// The versions disagree but this tab has *already* reloaded for exactly
-    /// this server version and come back still mismatched. Reloading again
-    /// would loop forever, so the tab stays where it is. In practice this means
-    /// a runtime `APP_VERSION` that does not match the image's `RELEASE_TAG`,
-    /// or a cached `index.html` re-serving the old bundle.
+    /// The versions disagree, but reloading would loop, so the tab stays where
+    /// it is. Two ways to get here. This tab has *already* reloaded for exactly
+    /// this server version and come back still mismatched — in practice a
+    /// runtime `APP_VERSION` that does not match the image's `RELEASE_TAG`, or
+    /// a cached `index.html` re-serving the old bundle. Or `sessionStorage` is
+    /// unusable ([`Marker::Unavailable`]), so a reload could not be remembered
+    /// and the first case could never be detected.
     Blocked,
+}
+
+/// What this tab can say about its own earlier reloads — the input to the loop
+/// guard in [`reload_decision`].
+///
+/// Three states rather than an `Option`, because "storage holds no marker" and
+/// "storage cannot be used" look the same to a caller and mean opposite things.
+/// The first says this tab has not reloaded yet. The second says that if it
+/// had, it could not know — and a guard that cannot remember is no guard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Marker {
+    /// `sessionStorage` is missing, blocked, or throws on use (a browser
+    /// setting, a privacy mode, partitioned third-party storage).
+    Unavailable,
+    /// Storage works, and records no reload for a version mismatch.
+    Absent,
+    /// This tab has already reloaded because the server reported this version.
+    ReloadedFor(String),
 }
 
 /// The pieces of connection state, kept in one thread-local because the wasm
@@ -208,7 +240,7 @@ pub fn stream_up() {
 }
 
 /// Forget about the stream entirely — called when a board view unmounts, so a
-/// page with no SSE (home, boards list) is not left permanently "offline" by
+/// page with no SSE (home) is not left permanently "offline" by
 /// the last board's dead stream.
 pub fn stream_reset() {
     stream_up();
@@ -237,24 +269,26 @@ pub(crate) fn next_delay_ms(failures: u32) -> u32 {
 /// Decide what a reported server version means for this tab.
 ///
 /// `client` is the version compiled into this bundle, `server` is what
-/// `/api/info` just said, and `attempted` is the server version this tab has
-/// already reloaded for (if any).
+/// `/api/info` just said, and `marker` is what this tab remembers of its own
+/// earlier reloads.
 ///
 /// Pure so it can be tested on the host target.
-pub(crate) fn reload_decision(
-    client: &str,
-    server: &str,
-    attempted: Option<&str>,
-) -> ReloadDecision {
+pub(crate) fn reload_decision(client: &str, server: &str, marker: &Marker) -> ReloadDecision {
     // An empty version is not evidence of anything — treat it as agreement
     // rather than reloading the user out of their work on a malformed answer.
     if server.is_empty() || client == server {
         return ReloadDecision::Stay;
     }
-    if attempted == Some(server) {
-        return ReloadDecision::Blocked;
+    match marker {
+        // A reload that cannot be recorded cannot be told apart from the next
+        // one, so against a mismatch that never resolves — a mis-set
+        // `APP_VERSION` — the tab would reload on every heartbeat, forever.
+        // Never reloading is the lesser failure: it is exactly how a tab
+        // behaved before this module existed, stale until refreshed by hand.
+        Marker::Unavailable => ReloadDecision::Blocked,
+        Marker::ReloadedFor(version) if version == server => ReloadDecision::Blocked,
+        Marker::Absent | Marker::ReloadedFor(_) => ReloadDecision::Reload,
     }
-    ReloadDecision::Reload
 }
 
 /// Start the heartbeat. Idempotent: only the first call spawns the loop.
@@ -301,9 +335,10 @@ fn probe_now() {
 /// One heartbeat: ask the server who it is, publish what that implies, and
 /// reload the tab if the server has moved to a different version.
 async fn probe() {
-    let Ok(info) = crate::api::fetch_app_info().await else {
+    let Ok(info) = crate::api::fetch_app_info_within(HEARTBEAT_TIMEOUT_MS).await else {
         // Any failure counts: a refused connection, a 502 from the proxy while
-        // the container restarts, or a body that is not the JSON we expect.
+        // the container restarts, a body that is not the JSON we expect, or a
+        // server that accepted the request and then never answered it.
         CONN.with(|c| {
             c.failures.set(c.failures.get().saturating_add(1));
             c.heartbeat_ok.set(false);
@@ -321,11 +356,8 @@ async fn probe() {
     });
     publish();
 
-    match reload_decision(
-        shared::app_version(),
-        &info.version,
-        read_marker().as_deref(),
-    ) {
+    let marker = read_marker();
+    match reload_decision(shared::app_version(), &info.version, &marker) {
         ReloadDecision::Stay => {
             // Clear any marker from an earlier mismatch: the next deploy must
             // be free to reload this tab even if a previous one could not.
@@ -333,10 +365,15 @@ async fn probe() {
             CONN.with(|c| c.warned_blocked.set(false));
         }
         ReloadDecision::Reload => {
-            // Write the marker *before* reloading. If the reload brings back
-            // the same mismatched bundle, the next heartbeat reads this and
-            // stops, so a misconfiguration costs one reload instead of a loop.
-            write_marker(&info.version);
+            // Write the marker *before* reloading, and only reload if the write
+            // took. If the reload brings back the same mismatched bundle, the
+            // next heartbeat reads this and stops, so a misconfiguration costs
+            // one reload instead of a loop — and a reload that could not be
+            // recorded is not attempted at all.
+            if !write_marker(&info.version) {
+                warn_blocked_once(&info.version, &Marker::Unavailable);
+                return;
+            }
             leptos::logging::log!(
                 "server is on {} (this tab is {}) — reloading",
                 info.version,
@@ -344,41 +381,70 @@ async fn probe() {
             );
             let _ = window().location().reload();
         }
-        ReloadDecision::Blocked => {
-            if !CONN.with(|c| c.warned_blocked.replace(true)) {
-                leptos::logging::warn!(
-                    "server reports {} but this tab is {} after reloading for it already — \
-                     not reloading again (check APP_VERSION matches the image's RELEASE_TAG)",
-                    info.version,
-                    shared::app_version()
-                );
-            }
-        }
+        ReloadDecision::Blocked => warn_blocked_once(&info.version, &marker),
+    }
+}
+
+/// Say why the tab is staying on a version the server has moved past — once,
+/// not on every heartbeat.
+fn warn_blocked_once(server: &str, marker: &Marker) {
+    if CONN.with(|c| c.warned_blocked.replace(true)) {
+        return;
+    }
+    let client = shared::app_version();
+    match marker {
+        Marker::Unavailable => leptos::logging::warn!(
+            "server reports {server} but this tab is {client}; not reloading, because \
+             sessionStorage is unavailable and a reload could not be remembered — \
+             refresh the page to pick up the new version"
+        ),
+        Marker::Absent | Marker::ReloadedFor(_) => leptos::logging::warn!(
+            "server reports {server} but this tab is {client} after reloading for it \
+             already — not reloading again (check APP_VERSION matches the image's \
+             RELEASE_TAG)"
+        ),
     }
 }
 
 // ── `sessionStorage` marker ──────────────────────────────────────────────
 //
-// Wrapped rather than inlined because every access can fail in three ways
-// (no window, storage disabled by the browser, quota) and none of them is
-// worth failing a heartbeat over: a missing marker only means the loop guard
-// is unavailable, which is how it behaved before this existed.
+// Every access can fail — no window, storage disabled by the browser, quota —
+// and none of those is worth failing a heartbeat over. What they *are* worth is
+// refusing to reload: without the marker there is no loop guard, and before
+// this module existed a tab never reloaded on this path at all, so "cannot
+// remember" has to mean "do not reload" rather than "reload and hope".
+
+/// Key for the write that proves storage really works. Separate from the
+/// marker so probing never disturbs it.
+const STORAGE_PROBE_KEY: &str = "bored:storage-probe";
 
 fn session_storage() -> Option<web_sys::Storage> {
     window().session_storage().ok().flatten()
 }
 
-fn read_marker() -> Option<String> {
-    session_storage()?
-        .get_item(RELOAD_MARKER_KEY)
-        .ok()
-        .flatten()
+fn read_marker() -> Marker {
+    let Some(store) = session_storage() else {
+        return Marker::Unavailable;
+    };
+    // Having the object is not having storage: some browsers hand it over and
+    // then throw on the first write. The guard depends on a write surviving a
+    // reload, so a write is what gets tested.
+    if store.set_item(STORAGE_PROBE_KEY, "1").is_err() {
+        return Marker::Unavailable;
+    }
+    let _ = store.remove_item(STORAGE_PROBE_KEY);
+
+    match store.get_item(RELOAD_MARKER_KEY) {
+        Ok(Some(version)) => Marker::ReloadedFor(version),
+        Ok(None) => Marker::Absent,
+        Err(_) => Marker::Unavailable,
+    }
 }
 
-fn write_marker(version: &str) {
-    if let Some(store) = session_storage() {
-        let _ = store.set_item(RELOAD_MARKER_KEY, version);
-    }
+/// Record the version this tab is about to reload for. `false` if it could not
+/// be recorded, in which case the caller must not reload.
+fn write_marker(version: &str) -> bool {
+    session_storage().is_some_and(|store| store.set_item(RELOAD_MARKER_KEY, version).is_ok())
 }
 
 fn clear_marker() {
@@ -396,7 +462,7 @@ mod tests {
     #[test]
     fn matching_versions_stay() {
         assert_eq!(
-            reload_decision("1.58.0", "1.58.0", None),
+            reload_decision("1.58.0", "1.58.0", &Marker::Absent),
             ReloadDecision::Stay
         );
     }
@@ -404,7 +470,7 @@ mod tests {
     #[test]
     fn a_different_server_version_reloads() {
         assert_eq!(
-            reload_decision("1.58.0", "1.59.0", None),
+            reload_decision("1.58.0", "1.59.0", &Marker::Absent),
             ReloadDecision::Reload
         );
     }
@@ -414,20 +480,23 @@ mod tests {
         // Rolling back a bad deploy moves the server *backwards*; the tab is
         // just as wrong as it is after an upgrade, so this is not a `>` test.
         assert_eq!(
-            reload_decision("1.59.0", "1.58.0", None),
+            reload_decision("1.59.0", "1.58.0", &Marker::Absent),
             ReloadDecision::Reload
         );
     }
 
     #[test]
     fn an_empty_server_version_is_not_evidence() {
-        assert_eq!(reload_decision("1.58.0", "", None), ReloadDecision::Stay);
+        assert_eq!(
+            reload_decision("1.58.0", "", &Marker::Absent),
+            ReloadDecision::Stay
+        );
     }
 
     #[test]
     fn reloading_twice_for_the_same_version_is_blocked() {
         assert_eq!(
-            reload_decision("1.58.0", "1.59.0", Some("1.59.0")),
+            reload_decision("1.58.0", "1.59.0", &Marker::ReloadedFor("1.59.0".into())),
             ReloadDecision::Blocked
         );
     }
@@ -437,8 +506,28 @@ mod tests {
         // The tab gave up on 1.59.0, but 1.60.0 is a fresh deploy and deserves
         // its own attempt.
         assert_eq!(
-            reload_decision("1.58.0", "1.60.0", Some("1.59.0")),
+            reload_decision("1.58.0", "1.60.0", &Marker::ReloadedFor("1.59.0".into())),
             ReloadDecision::Reload
+        );
+    }
+
+    #[test]
+    fn a_mismatch_is_not_reloaded_for_when_storage_is_unavailable() {
+        // With nowhere to record the reload, the tab could not tell its second
+        // reload from its first, and a mismatch that never resolves would
+        // reload it on every heartbeat. Staying put is the lesser failure.
+        assert_eq!(
+            reload_decision("1.58.0", "1.59.0", &Marker::Unavailable),
+            ReloadDecision::Blocked
+        );
+    }
+
+    #[test]
+    fn unavailable_storage_changes_nothing_while_versions_agree() {
+        // `Blocked` would log a warning about a problem that does not exist.
+        assert_eq!(
+            reload_decision("1.58.0", "1.58.0", &Marker::Unavailable),
+            ReloadDecision::Stay
         );
     }
 
