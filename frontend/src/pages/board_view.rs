@@ -421,11 +421,29 @@ pub fn BoardView() -> AnyView {
                     leptos::logging::error!("reorder_columns failed: {err}");
                     // The list was reordered above, before the server had a
                     // say. It said no — refused outright while the tab is
-                    // disconnected, or failed — so put the order back rather
-                    // than leave the board showing one the server never took.
-                    // This is the only optimistic write among the drag
-                    // handlers: a card move waits for its `CardMoved` event.
-                    crate::columns::restore_order(columns, &previous_order);
+                    // disconnected, or failed — so the board must not keep
+                    // showing an order the server never took. This is the only
+                    // optimistic write among the drag handlers: a card move
+                    // waits for its `CardMoved` event.
+                    //
+                    // Ask the server for the order it actually has, rather than
+                    // going back to the snapshot taken at the drag. A failure
+                    // can arrive late, after a *later* drag the server did
+                    // accept; restoring the snapshot then would undo that one
+                    // too. The server's answer covers both cases.
+                    //
+                    // The snapshot is the fallback for when the server cannot
+                    // be asked either — which is the offline refusal. Nothing
+                    // can have been accepted since while offline, so there the
+                    // snapshot *is* the server's order.
+                    let server_order = crate::api::fetch_columns(&slug).await.map(|fetched| {
+                        fetched
+                            .into_iter()
+                            .map(|column| column.id)
+                            .collect::<Vec<_>>()
+                    });
+                    let order = server_order.as_deref().unwrap_or(&previous_order);
+                    crate::columns::restore_order(columns, order);
                 }
             });
         }

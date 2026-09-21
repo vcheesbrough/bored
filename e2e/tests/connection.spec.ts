@@ -334,6 +334,72 @@ test.describe('Disconnected UI', () => {
     await expect(page.locator('.column-name')).toHaveText(['Beta', 'Alpha']);
   });
 
+  test('a late failure does not undo a later reorder the server accepted', async ({ page, request }) => {
+    // Two drags, and the *first* request fails only after the second has been
+    // accepted. Undoing the first by restoring its pre-drag snapshot would undo
+    // the second as well, and leave the board on an order the server does not
+    // have. The rollback has to end on the server's actual order.
+    const board = await apiCreateBoard(request, `reorder-race-${Date.now()}`);
+    await apiCreateColumn(request, board.name, 'A', 0);
+    await apiCreateColumn(request, board.name, 'B', 1);
+    await apiCreateColumn(request, board.name, 'C', 2);
+    await gotoBoardView(page, board.name);
+    await expect(page.locator('.column-name')).toHaveText(['A', 'B', 'C']);
+
+    // Hold the first reorder request until released, then fail it. Every later
+    // one goes through to the real server.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reorders = 0;
+    let firstHeld!: () => void;
+    const held = new Promise<void>((resolve) => { firstHeld = resolve; });
+    await page.route('**/columns/reorder', async (route) => {
+      reorders += 1;
+      if (reorders === 1) {
+        firstHeld();
+        await gate;
+        await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' });
+      } else {
+        await route.continue();
+      }
+    });
+
+    // Drag 1: B to the front -> [B, A, C]. Its request hangs.
+    await page.locator('.column-grip').nth(1).dragTo(
+      page.locator('.column-view').nth(0).locator('.card-list'),
+    );
+    await held;
+    await expect(page.locator('.column-name')).toHaveText(['B', 'A', 'C']);
+
+    // Drag 2: C before A -> [B, C, A]. The server accepts this one.
+    const accepted = page.waitForResponse(
+      (res) => res.url().includes('/columns/reorder') && res.status() === 200,
+    );
+    await page.locator('.column-grip').nth(2).dragTo(
+      page.locator('.column-view').nth(1).locator('.card-list'),
+    );
+    await accepted;
+    await expect(page.locator('.column-name')).toHaveText(['B', 'C', 'A']);
+
+    // Now the first request fails, late.
+    const failed = page.waitForResponse(
+      (res) => res.url().includes('/columns/reorder') && res.status() === 500,
+    );
+    release();
+    await failed;
+
+    // Settle on what the server holds, which is drag 2's order — asserted
+    // against the server itself, not a hardcoded expectation.
+    const serverNames = async () =>
+      ((await (await request.get(`/api/boards/${board.name}/columns`)).json()) as { name: string }[])
+        .map((c) => c.name);
+    expect(await serverNames()).toEqual(['B', 'C', 'A']);
+    // Give the rollback its refetch, then require the board to match. A
+    // snapshot restore would have put it back to [A, B, C].
+    await page.waitForTimeout(1500);
+    await expect(page.locator('.column-name')).toHaveText(await serverNames());
+  });
+
   test('catches up after a gap the browser recovers from by itself', async ({ page, request }) => {
     // The common real-world gap — a network blip, a laptop waking — is not a
     // CLOSED stream. It is a transport failure the browser retries on its own

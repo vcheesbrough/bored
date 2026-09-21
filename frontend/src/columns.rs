@@ -85,28 +85,29 @@ pub fn rank_in(order: &[String], id: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// Put the column list back into `previous` order — the undo for an optimistic
-/// reorder the server did not accept.
+/// Put the column list into `order` — the undo for an optimistic reorder the
+/// server did not accept.
 ///
 /// Dragging a column reorders the list locally *before* the request goes out, so
 /// the drop feels instant. When that request is refused (the tab is
 /// disconnected — see [`crate::connection`]) or fails (a 5xx), the list has to
 /// go back, or the board keeps showing an order the server never agreed to
-/// until the next reload.
+/// until the next reload. `order` is the server's own answer when it can be
+/// fetched, and the pre-drag snapshot when it cannot (see the caller).
 ///
-/// Only the *order* is restored, by sorting the list as it is now. Putting a
-/// saved copy of the old list back wholesale would be simpler and wrong: a
-/// request can take a while to fail, and a column created or deleted over SSE
-/// in the meantime would be dropped or resurrected by the stale copy. Sorting
-/// cannot add or remove an entry, and the sort is stable, so a column that
-/// appeared since simply keeps its place after the ones `previous` knows about.
+/// Only the *order* is changed, by sorting the list as it is now. Putting a
+/// saved copy of a list back wholesale would be simpler and wrong: a request
+/// can take a while to fail, and a column created or deleted over SSE in the
+/// meantime would be dropped or resurrected by the stale copy. Sorting cannot
+/// add or remove an entry, and the sort is stable, so a column that appeared
+/// since simply keeps its place after the ones `order` knows about.
 ///
 /// `try_update`, because this runs after an `await`: the board may have been
 /// unmounted while the request was in flight, and writing a disposed signal
 /// panics.
-pub fn restore_order(columns: RwSignal<Vec<RwSignal<shared::Column>>>, previous: &[String]) {
+pub fn restore_order(columns: RwSignal<Vec<RwSignal<shared::Column>>>, order: &[String]) {
     let _ = columns.try_update(|cs| {
-        cs.sort_by_key(|column| rank_in(previous, &column.get_untracked().id));
+        cs.sort_by_key(|column| rank_in(order, &column.get_untracked().id));
     });
 }
 
