@@ -13,6 +13,11 @@ leptos_router = { version = "=0.7.8" }
 shared.workspace = true
 gloo-net = { version = "0.6", features = ["http"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
+# Already in the tree via leptos. Needed directly to hand a wasm-bindgen
+# `Closure` to `on_cleanup`, whose callback must be `Send + Sync`: a `Closure`
+# boxes a plain `dyn Fn`, which is neither, even though nothing here ever leaves
+# the one thread a wasm SPA has.
+send_wrapper = "0.6"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 serde_json.workspace = true
 serde.workspace = true
@@ -24,6 +29,9 @@ js-sys = "0.3"
 # `crate::caret` needs to turn a click on rendered markdown into a textarea
 # caret position — see that module.
 web-sys = { version = "0.3", features = [
+    # Deadline on the connection heartbeat's GET — see `api::fetch_app_info_within`.
+    "AbortController",
+    "AbortSignal",
     "EventSource",
     "MessageEvent",
     "DragEvent",

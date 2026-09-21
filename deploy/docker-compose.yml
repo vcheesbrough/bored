@@ -17,6 +17,12 @@ services:
       # Optional runtime override; when unset the backend reports the RELEASE_TAG
       # burned into the image at build time (shared::app_version). Deliberately
       # NOT part of the BORED__* layered config — see backend/src/config.rs.
+      #
+      # Leave it unset unless you mean it: the browser compares this value
+      # against the RELEASE_TAG compiled into the wasm bundle it is running and
+      # reloads when they differ (frontend/src/connection.rs). Setting it to
+      # anything other than the image's own tag is a permanent mismatch — every
+      # tab reloads once, then logs that it is refusing to loop.
       - APP_VERSION=${APP_VERSION:-}
       # OIDC, session, and the rest of observability now come from sovereign-config
       # (see backend/src/config.rs) via this one access URL, materialised as a file

@@ -329,20 +329,33 @@ test.describe('card links', () => {
     await expect(rows.getByRole('button', { name: 'Restore' })).toHaveCount(0);
   });
 
-  // ── Deleting a linked card with the SSE stream down — card #313 ──────────
+  // ── Deleting a linked card that receives no broadcast — card #313 ───────
   //
   // The board prunes its link index locally now instead of waiting for the
   // server's `CardLinkDeleted` events. These tests hold the browser to that by
-  // taking the stream away entirely: `/api/events` is aborted before the board
-  // loads, so nothing the server broadcasts can reach the page and every
-  // assertion below is about what the tab did for itself. That also stands in
-  // for the subtler real-world case — a receiver lagging out of the backend's
-  // 128-slot broadcast channel — which drops events the same way but is not
-  // reproducible on demand.
-  test.describe('deleting a linked card with SSE down', () => {
-    /** Abort `/api/events` so the page never receives a single broadcast. */
-    async function killSse(page: import('@playwright/test').Page) {
-      await page.route('**/api/events*', route => route.abort());
+  // subscribing the page to a board that does not exist: the stream is open and
+  // healthy, the keepalives arrive, and not one event for *this* board ever
+  // does — so every assertion below is about what the tab did for itself. That
+  // is the real-world case this stands in for: a receiver lagging out of the
+  // backend's 128-slot broadcast channel loses events with the connection still
+  // up.
+  //
+  // It used to abort `/api/events` outright. Since iteration 58 a dead stream
+  // means the tab is disconnected, and a disconnected tab refuses every
+  // mutation (frontend/src/connection.rs) — so an aborted stream can no longer
+  // reach the delete these tests are about, and would test the refusal instead.
+  test.describe('deleting a linked card with no broadcast', () => {
+    /**
+     * Point the event stream at a board id nothing will ever publish to. The
+     * backend filters by that id and validates nothing, so the response is a
+     * perfectly ordinary, perfectly silent SSE stream.
+     */
+    async function silenceSse(page: import('@playwright/test').Page) {
+      await page.route('**/api/events*', route => {
+        const url = new URL(route.request().url());
+        url.searchParams.set('board_id', 'no-such-board');
+        return route.continue({ url: url.toString() });
+      });
     }
 
     /**
@@ -375,7 +388,7 @@ test.describe('card links', () => {
       await apiCreateLink(request, partner.id, 'successor', other.id);
 
       const panics = watchForPanics(page);
-      await killSse(page);
+      await silenceSse(page);
       await gotoBoardView(page, board.name);
       await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveText(
         `↑#${doomed.number}`
@@ -385,7 +398,7 @@ test.describe('card links', () => {
       await page.locator('.card-toolbar-close').first().click();
       await page.locator('.btn-danger').click();
 
-      // The card goes, and so does its link — with no reload and no SSE.
+      // The card goes, and so does its link — with no reload and no event.
       await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
       await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(0);
       // The partner's *other* link is untouched: pruning is by card, not a
@@ -425,7 +438,7 @@ test.describe('card links', () => {
       await apiCreateLink(request, doomed.id, 'successor', partner.id);
 
       const panics = watchForPanics(page);
-      await killSse(page);
+      await silenceSse(page);
       await gotoBoardView(page, board.name);
       await cardWith(page, 'Doomed card').click();
       await page.locator('.card-toolbar-btn[title="Maximise"]').click();
@@ -434,8 +447,8 @@ test.describe('card links', () => {
       await page.locator('.modal .card-toolbar-close').first().click();
       await page.locator('.btn-danger').click();
 
-      // `on_modal_delete` used to be a no-op, so with no SSE both the card and
-      // its link survived here.
+      // `on_modal_delete` used to be a no-op, so with no event arriving both
+      // the card and its link survived here.
       await expect(page.locator('.modal')).toHaveCount(0);
       await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
       await expect(cardWith(page, 'Partner card').locator('.link-badge')).toHaveCount(0);

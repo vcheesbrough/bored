@@ -121,7 +121,7 @@ The full set lives in [`deploy/docker-compose.yml`](deploy/docker-compose.yml):
 ```
 APP_ENV                          # "production" or the dev branch name (deploy-script-facing name;
                                   # forwarded into the container as BORED__OBSERVABILITY__ENVIRONMENT)
-APP_VERSION                      # optional override; unset in normal deploys (see below)
+APP_VERSION                      # optional override; leave unset (see "Version and reload" below)
 SOVEREIGN_CONFIG_ACCESS_URL_FILE # sourced from bored_{dev,prod}_sovereign_access_url,
                                   # materialised as a file (not left in the container's process env)
 ```
@@ -133,6 +133,21 @@ path — is resolved at startup from a layered configuration composition root
 
 When `oidc.issuer-url` is unset or blank (local dev / tests) the auth middleware short-circuits and
 injects a synthetic `anonymous` claim, so the API stays usable without an IdP.
+
+### Version and reload
+
+`RELEASE_TAG` is compiled into **both** halves of the image — the backend binary and the wasm bundle
+(`shared::app_version`). An open browser tab polls `/api/info` and, when the version it gets back is
+not the one its own bundle was built from, reloads itself onto the new deploy
+([`frontend/src/connection.rs`](frontend/src/connection.rs)). While that poll is failing, or while a
+board's SSE stream is down, the navbar shows an `offline` badge and
+[`frontend/src/api.rs`](frontend/src/api.rs) refuses every mutation — a stale board must not be
+written to.
+
+So **`APP_VERSION` must either be unset or match the image's own `RELEASE_TAG`.** Any other value is
+a mismatch the tab can never resolve: it reloads once, comes back still mismatched, and then logs
+that it is refusing to reload again rather than looping. The e2e stack sets no override for exactly
+this reason.
 
 ### Runtime configuration
 

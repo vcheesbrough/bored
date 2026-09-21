@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate; // `use_navigate` returns a function you can call to redirect
 
+use crate::components::connection_status::ConnectionStatus;
 use crate::components::user_badge::UserBadge;
 
 #[component]
@@ -68,6 +69,9 @@ pub fn Home() -> impl IntoView {
     view! {
         <nav class="navbar">
             <a href="/" class="navbar-brand">"bored"</a>
+            // Pushed to the right edge by its own `margin-left: auto`; this
+            // navbar has no watermark to sit beside.
+            <ConnectionStatus />
             <UserBadge />
         </nav>
         <div class="page">
