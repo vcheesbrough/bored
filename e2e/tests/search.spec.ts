@@ -253,22 +253,17 @@ test.describe('simple search', () => {
       await expect(textarea).toBeVisible();
       await textarea.fill('abcdef');
 
-      // Two clicks, and the assertion between them and the typing, are
-      // deliberate. Leaving the editor blurs the textarea, and the card answers
-      // by focusing its own rendered body — taking focus back from the search
-      // box that was just clicked. That is a separate defect (card #401), out of
-      // scope for #375; without the second click the keystrokes land on the card
-      // and the search box stays empty, failing this test for a reason that has
-      // nothing to do with the pin. A second click is harmless once that is
-      // fixed, so the test holds either way.
+      // One click. Leaving the editor blurs the textarea, and the card used to
+      // answer by focusing its own rendered body — taking focus back from the
+      // search box that was just clicked, so this needed a second click (card
+      // #401). The editor closing is the card's reaction to the blur having
+      // finished, so waiting for it first means the focus assertion cannot pass
+      // merely by running before the grab. The textarea stays mounted — it
+      // shares a grid cell with the rendered body — and is only hidden, hence
+      // the class rather than a count.
       const search = page.locator('.navbar-search-input');
       await search.click();
-      // The editor closing is the card's reaction to the blur having finished,
-      // so the second click cannot race the focus grab it is there to undo. The
-      // textarea stays mounted — it shares a grid cell with the rendered body —
-      // and is only hidden, hence the class rather than a count.
       await expect(textarea).toHaveClass(/card-body-hidden/);
-      await search.click();
       await expect(search).toBeFocused();
       await page.keyboard.type('abcXXX');
       await expect(search).toHaveValue('abcXXX');
@@ -281,6 +276,53 @@ test.describe('simple search', () => {
       // the card comes back carrying the text that was typed into it.
       await page.locator('.navbar-search-input').fill('');
       await expect(visibleBodies(page)).toHaveText(['abcdef', 'Release notes']);
+      expect(panics).toEqual([]);
+    });
+
+    test('+ during an active search shows the new card in edit mode', async ({ page, request }) => {
+      // Card #402. The new card's body is empty, so it fails any text query;
+      // without the expanded-card pin covering it from its first render it was
+      // filtered out before it could mount — created on the server, invisible
+      // on the board, and another one on every click of `+`.
+      const board = await apiCreateBoard(request, `search-add-card-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      await apiCreateCard(request, col.id, 'Release notes');
+      await apiCreateCard(request, col.id, 'Deploy checklist');
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      const search = page.locator('.navbar-search-input');
+      await search.fill('release');
+      await expect(visibleBodies(page)).toHaveText(['Release notes']);
+
+      const created = page.waitForResponse(
+        response =>
+          response.request().method() === 'POST' &&
+          response.url().includes(`/api/columns/${col.id}/cards`) &&
+          response.ok()
+      );
+      await page.locator('.add-card-btn').click();
+      const newCard = (await (await created).json()) as { id: string };
+
+      // Shown, expanded and editing, above the card that matched.
+      const textarea = page.locator('.card-item.card-expanded textarea');
+      await expect(textarea).toBeVisible();
+      await expect(textarea).toBeFocused();
+      await expect(page.locator('.card-item')).toHaveCount(2);
+      await page.keyboard.type('Brand new');
+      await expect.poll(async () => (await apiGetCard(request, newCard.id)).body).toBe('Brand new');
+
+      // Collapsing releases the pin, and a card that does not match the
+      // standing query then leaves it — the intended behaviour, not a loss.
+      await textarea.press('Escape');
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.card-item.card-expanded')).toHaveCount(0);
+      await expect(visibleBodies(page)).toHaveText(['Release notes']);
+      expect(panics).toEqual([]);
+
+      // Liveness: the board still re-filters, and the new card is really there.
+      await search.fill('');
+      await expect(visibleBodies(page)).toHaveText(['Brand new', 'Deploy checklist', 'Release notes']);
       expect(panics).toEqual([]);
     });
   });

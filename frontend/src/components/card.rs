@@ -145,10 +145,30 @@ pub fn CardItem(
         }
     });
 
+    // Set by the textarea's blur handler when focus is leaving the editor *for
+    // another element* (the navbar search box, a tag input, any button…). The
+    // focus effect below consumes it, so that one Editing → Expanded transition
+    // leaves focus where the user put it. A `StoredValue` rather than a signal:
+    // nothing should re-run when it changes, it is only read by that effect.
+    let keep_focus_elsewhere = StoredValue::new(false);
+
     // Focus the rendered body div when entering Expanded so keyboard Esc works
     // without the user needing to click first.
+    //
+    // Except when the editor was left by focusing something else (card #401):
+    // this effect runs *after* the blur, so grabbing focus here would snatch it
+    // back from the control the user just clicked. Expanding by click and
+    // leaving the editor with Escape never set the flag, so they still focus.
     Effect::new(move |_| {
-        if card_state.get() == CardState::Expanded
+        let state = card_state.get();
+        // Consumed on *every* state change, not only on entering Expanded, so a
+        // flag set by a blur that did not lead here can never linger and
+        // suppress some later, unrelated expand. `try_*`: this effect can run
+        // once more as the card is disposed.
+        let focus_moved_on = keep_focus_elsewhere.try_get_value().unwrap_or(false);
+        let _ = keep_focus_elsewhere.try_set_value(false);
+        if state == CardState::Expanded
+            && !focus_moved_on
             && let Some(el) = body_rendered_ref.get()
         {
             let _ = el.focus();
@@ -190,9 +210,10 @@ pub fn CardItem(
     // Deliberately **not** converted, because no reproduction reached them:
     // `card_state` in `is_collapsed`/`is_expanded` and the `class:` closures,
     // `context_menu_position`, `show_move_submenu`, `move_submenu_opens_left`,
-    // and `card` in the move-submenu — plus `LinkPicker`'s signals in
-    // `link_editor.rs`. If a new trap appears, that is where to look first, and
-    // the way to find it is the debug-build loop above, not inspection.
+    // and `card` in the move-submenu. (`LinkPicker` in `link_editor.rs` was on
+    // this list until card #369 reproduced its traps and converted those
+    // reads.) If a new trap appears, that is where to look first, and the way
+    // to find it is the debug-build loop above, not inspection.
     let number = Signal::derive(move || card.try_get().map_or(0, |c| c.number));
     let body_signal = Signal::derive(move || body.try_get().unwrap_or_default());
 
@@ -675,7 +696,33 @@ pub fn CardItem(
                         class:card-body-hidden=is_expanded
                         prop:value=move || body.try_get().unwrap_or_default()
                         on:input=on_body_input
-                        on:blur=move |_| exit_editing()
+                        on:blur=move |ev: web_sys::FocusEvent| {
+                            // `relatedTarget` is the element gaining focus, or
+                            // `None` when focus is going nowhere in particular
+                            // (a click on the board background, the window
+                            // losing focus). Only the first case means the user
+                            // chose somewhere else to type — see
+                            // `keep_focus_elsewhere`.
+                            //
+                            // This card's own rendered body is excluded: leaving
+                            // the editor with Escape focuses it, which blurs the
+                            // textarea *with* that div as the related target.
+                            //
+                            // `try_get_untracked`: a focused textarea whose card
+                            // is being removed can blur after disposal, and the
+                            // `NodeRef` is a signal like any other. `None` then
+                            // just counts every target as "elsewhere", which
+                            // is moot on a card that is going away.
+                            use wasm_bindgen::JsCast;
+                            let own_body = body_rendered_ref
+                                .try_get_untracked()
+                                .flatten()
+                                .map(|el| el.unchecked_into::<web_sys::EventTarget>());
+                            let target = ev.related_target();
+                            keep_focus_elsewhere
+                                .set_value(target.is_some() && target != own_body);
+                            exit_editing();
+                        }
                         on:keydown=move |ev: web_sys::KeyboardEvent| {
                             if ev.key() == "Escape" {
                                 // Stop propagation so the card-item keydown

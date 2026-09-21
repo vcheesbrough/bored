@@ -543,6 +543,15 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                             wasm_bindgen_futures::spawn_local(async move {
                                 match crate::api::create_card(&col_id, String::new()).await {
                                     Ok(card) => {
+                                        // Claim the board's expanded-card lock
+                                        // *before* the card is in the list, so the
+                                        // pin in `card_is_visible` covers it from
+                                        // the first filter. Otherwise a search in
+                                        // progress hides the new, empty card before
+                                        // `CardItem` ever mounts to claim the lock
+                                        // itself — an invisible card, and another
+                                        // on every click of `+` (card #402).
+                                        expanded_card_id.set(Some(card.id.clone()));
                                         // Signal the matching CardItem to start in
                                         // editing mode before inserting it into
                                         // the list so the For loop picks it up.

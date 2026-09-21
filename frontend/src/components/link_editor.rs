@@ -591,7 +591,9 @@ fn LinkPicker(
                 type="text"
                 placeholder=placeholder
                 aria-label=aria_label
-                prop:value=move || draft.get()
+                // `try_get`: the same remote-delete disposal as the popup below
+                // reaches this closure too (card #369).
+                prop:value=move || draft.try_get().unwrap_or_default()
                 on:input=move |ev| {
                     draft.set(event_target_value(&ev));
                     active.set(None);
@@ -662,11 +664,22 @@ fn LinkPicker(
                     }
                 }
             />
-            <Show when=move || popup_open.get() fallback=|| ()>
+            // `try_get` at these two call sites (card #369): `popup_open` and
+            // `suggestions` are derives this component owns, so they are
+            // disposed with it — and a remote delete of the card while this
+            // input is focused re-runs both closures after disposal. Reproduced
+            // against a debug build; `unwrap_or_default` renders a closed,
+            // empty popup that is being removed from the DOM anyway.
+            <Show when=move || popup_open.try_get().unwrap_or_default() fallback=|| ()>
                 <ul class="link-suggestions" role="listbox">
                     <For
                         each=move || {
-                            suggestions.get().into_iter().enumerate().collect::<Vec<_>>()
+                            suggestions
+                                .try_get()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .enumerate()
+                                .collect::<Vec<_>>()
                         }
                         // Keyed on position as well as id so a row that moves
                         // does not keep a stale `index` in its closures.
