@@ -32,8 +32,8 @@ fn main() {
 #[component]
 fn App() -> impl IntoView {
     // The heartbeat that notices a redeploy and a dead server. Started here,
-    // at the root, so it covers every route — including home and the boards
-    // list, which have no SSE stream of their own. It is idempotent.
+    // at the root, so it covers every route — including home, which has no SSE
+    // stream of its own. It is idempotent.
     connection::start();
 
     // Mirror the connection state onto `<html data-connection="…">`.
