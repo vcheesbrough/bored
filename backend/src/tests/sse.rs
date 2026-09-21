@@ -180,24 +180,61 @@ async fn mutations_emit_sse_events() {
     assert!(matches!(event, events::BoardEvent::BoardDeleted { .. }));
 }
 
-/// Drain every event already in the channel, keeping the `CardMoved` ones.
+/// Every position change a browser would learn from what is queued in `rx`.
+struct PositionNews {
+    /// `(card id, new position)`, in the order announced.
+    updates: Vec<(String, i32)>,
+    /// How many `CardsRenumbered` events were in there.
+    renumberings: usize,
+    /// How many events of any kind were queued — the burst one request put
+    /// into the shared broadcast channel.
+    events: usize,
+}
+
+/// Drain everything already in the channel. Each request's events are sent
+/// before its response returns, so once a request has completed everything it
+/// announced is already queued.
 ///
-/// Each request's events are sent before its response returns, so once a
-/// request has completed everything it announced is already queued.
-fn drain_card_moves(
+/// Panics on `Lagged`: a receiver that fell behind lost events without being
+/// told which, which is exactly the failure these tests exist to rule out.
+fn drain_positions(
     rx: &mut tokio::sync::broadcast::Receiver<crate::events::BroadcastEvent>,
-) -> Vec<(shared::Card, String)> {
-    let mut moves = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        if let crate::events::BoardEvent::CardMoved {
-            card,
-            from_column_id,
-        } = msg.event
-        {
-            moves.push((card, from_column_id));
+    column_id: &str,
+) -> PositionNews {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut news = PositionNews {
+        updates: Vec::new(),
+        renumberings: 0,
+        events: 0,
+    };
+    loop {
+        let msg = match rx.try_recv() {
+            Ok(msg) => msg,
+            Err(TryRecvError::Empty) => return news,
+            Err(TryRecvError::Lagged(n)) => panic!("receiver lagged; {n} events dropped"),
+            Err(TryRecvError::Closed) => panic!("broadcast channel closed"),
+        };
+        news.events += 1;
+        match msg.event {
+            crate::events::BoardEvent::CardMoved {
+                card,
+                from_column_id,
+            } => {
+                assert_eq!(from_column_id, column_id, "moves stay in this column");
+                news.updates.push((card.id, card.position));
+            }
+            crate::events::BoardEvent::CardsRenumbered {
+                column_id: renumbered,
+                positions,
+            } => {
+                assert_eq!(renumbered, column_id, "a renumbering stays in its column");
+                news.renumberings += 1;
+                news.updates
+                    .extend(positions.into_iter().map(|p| (p.id, p.position)));
+            }
+            _ => {}
         }
     }
-    moves
 }
 
 /// `GET` a column's cards, top first — what a browser fetches on load.
@@ -211,122 +248,162 @@ async fn list_column(server: &TestServer, column_id: &str) -> Vec<shared::Card> 
         .json()
 }
 
-/// Card #393: a column rebalance must announce every card it renumbers.
-///
-/// Repeated moves to the top bisect the gap above the first card until it is
-/// used up (~10 moves), and the server then renumbers the whole column. A
-/// browser holds the other cards' old positions and slots the moved card by
-/// comparing against them, so a silent renumber puts "Move to top" somewhere
-/// else until a reload.
-///
-/// This plays the part of that browser: it starts from the list it would have
-/// fetched and applies nothing but the broadcast `CardMoved` events. After
-/// every move its positions must be the server's own, as `GET` reports them —
-/// an oracle independent of the rebalance arithmetic.
-#[tokio::test]
-async fn a_rebalance_announces_every_renumbered_card() {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
-    let state = AppState::new(db);
-    let mut rx = state.events.subscribe();
-    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
-    let (_, column) = setup_board_and_column(&server).await;
-
-    for body in ["one", "two", "three"] {
-        server
-            .post(&format!("/api/columns/{}/cards", column.id))
-            .json(&shared::CreateCardRequest {
-                body: body.to_string(),
-                ..Default::default()
-            })
-            .await
-            .assert_status(StatusCode::CREATED);
-    }
-
-    // The "browser": card id → position, seeded from a fetch.
-    let mut client: std::collections::HashMap<String, i32> = list_column(&server, &column.id)
+/// A column's cards as `id → position`, as the server has them.
+async fn server_positions(
+    server: &TestServer,
+    column_id: &str,
+) -> std::collections::HashMap<String, i32> {
+    list_column(server, column_id)
         .await
         .into_iter()
         .map(|c| (c.id, c.position))
-        .collect();
-    let _ = drain_card_moves(&mut rx);
-
-    // Enough top moves to force at least one rebalance; see
-    // `position::tests::bisecting_the_same_slot_survives_about_ten_inserts`.
-    let mut renumbered_any = false;
-    for _ in 0..24 {
-        // Always move the current bottom card, so every move changes the order.
-        let bottom = list_column(&server, &column.id)
-            .await
-            .pop()
-            .expect("column has cards");
-        server
-            .post(&format!("/api/cards/{}/move", bottom.id))
-            .json(&shared::MoveCardRequest {
-                column_id: column.id.clone(),
-                position: 0,
-            })
-            .await
-            .assert_status_ok();
-
-        let moves = drain_card_moves(&mut rx);
-        // A move that announces a card other than the moved one is a rebalance.
-        renumbered_any |= moves.iter().any(|(card, _)| card.id != bottom.id);
-        for (card, from_column_id) in moves {
-            assert_eq!(from_column_id, column.id, "a rebalance stays in its column");
-            client.insert(card.id, card.position);
-        }
-
-        let server_view: std::collections::HashMap<String, i32> = list_column(&server, &column.id)
-            .await
-            .into_iter()
-            .map(|c| (c.id, c.position))
-            .collect();
-        assert_eq!(client, server_view, "SSE-only view drifted from the server");
-    }
-    assert!(renumbered_any, "the loop never forced a rebalance");
+        .collect()
 }
 
-/// Card #393, create path: a new card at the top can force the rebalance too.
-#[tokio::test]
-async fn a_rebalance_on_create_announces_the_renumbered_cards() {
+/// Build a server on a fresh in-memory database, keeping a handle on its event
+/// channel so receivers can subscribe at any point.
+async fn server_with_events() -> (
+    TestServer,
+    tokio::sync::broadcast::Sender<crate::events::BroadcastEvent>,
+) {
     let db = db::connect_mem().await.expect("failed to connect mem db");
     let state = AppState::new(db);
-    let mut rx = state.events.subscribe();
+    // `Sender` is a cheap handle onto the same channel; the router takes
+    // ownership of `state`, so keep our own copy of the sender first.
+    let events = state.events.clone();
     let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
-    let (_, column) = setup_board_and_column(&server).await;
-    let url = format!("/api/columns/{}/cards", column.id);
+    (server, events)
+}
 
-    let mut renumbered_any = false;
-    for i in 0..16 {
-        let before: Vec<shared::Card> = server.get(&url).await.json();
+async fn create_cards(server: &TestServer, column_id: &str, count: usize) {
+    for i in 0..count {
         server
-            .post(&url)
+            .post(&format!("/api/columns/{column_id}/cards"))
             .json(&shared::CreateCardRequest {
                 body: format!("card {i}"),
                 ..Default::default()
             })
             .await
             .assert_status(StatusCode::CREATED);
+    }
+}
 
-        // Every existing card whose position the create changed must have been
-        // announced, and with its new value.
-        let after: Vec<shared::Card> = server.get(&url).await.json();
-        let announced: std::collections::HashMap<String, i32> = drain_card_moves(&mut rx)
-            .into_iter()
-            .map(|(card, _)| (card.id, card.position))
-            .collect();
-        for old in &before {
-            let new = after
-                .iter()
-                .find(|c| c.id == old.id)
-                .expect("card survives");
-            if new.position != old.position {
+/// Move the column's bottom card to the top, `times` times, playing the part
+/// of a browser throughout: it starts from the list it would have fetched and
+/// learns of changes only from the broadcast events. After every move its
+/// positions must be the server's own, as `GET` reports them — an oracle
+/// independent of the rebalance arithmetic. Returns how many renumberings were
+/// announced, and the largest burst any one move put into the channel.
+async fn move_bottom_to_top(
+    server: &TestServer,
+    events: &tokio::sync::broadcast::Sender<crate::events::BroadcastEvent>,
+    column_id: &str,
+    times: usize,
+) -> (usize, usize) {
+    let mut rx = events.subscribe();
+    let mut client = server_positions(server, column_id).await;
+    let mut renumberings = 0;
+    let mut largest_burst = 0;
+    for _ in 0..times {
+        // Always the current bottom card, so every move changes the order.
+        let bottom = list_column(server, column_id)
+            .await
+            .pop()
+            .expect("column has cards");
+        server
+            .post(&format!("/api/cards/{}/move", bottom.id))
+            .json(&shared::MoveCardRequest {
+                column_id: column_id.to_string(),
+                position: 0,
+            })
+            .await
+            .assert_status_ok();
+
+        let news = drain_positions(&mut rx, column_id);
+        renumberings += news.renumberings;
+        largest_burst = largest_burst.max(news.events);
+        client.extend(news.updates);
+        assert_eq!(
+            client,
+            server_positions(server, column_id).await,
+            "SSE-only view drifted from the server"
+        );
+    }
+    (renumberings, largest_burst)
+}
+
+/// Card #393: a column rebalance must announce the positions it rewrites.
+///
+/// Repeated moves to the top bisect the gap above the first card until it is
+/// used up (~10 moves), and the server then renumbers the whole column. A
+/// browser holds the other cards' old positions and slots the moved card by
+/// comparing against them, so a silent renumber puts "Move to top" somewhere
+/// else until a reload.
+#[tokio::test]
+async fn a_rebalance_announces_every_renumbered_card() {
+    let (server, events) = server_with_events().await;
+    let (_, column) = setup_board_and_column(&server).await;
+    create_cards(&server, &column.id, 3).await;
+
+    // Enough top moves to force at least one rebalance; see
+    // `position::tests::bisecting_the_same_slot_survives_about_ten_inserts`.
+    let (renumberings, _) = move_bottom_to_top(&server, &events, &column.id, 24).await;
+    assert!(renumberings > 0, "the loop never forced a rebalance");
+}
+
+/// The renumbering of a large column is one event, not one per card.
+///
+/// The broadcast channel holds `BROADCAST_CAPACITY` events and is shared by
+/// every board. Announcing a big column card by card overflowed it, and a
+/// lagging receiver drops the oldest events without a trace — the very
+/// renumbers this fix exists to deliver. `drain_positions` panics on `Lagged`,
+/// and the burst from any one move is bounded well below the capacity.
+#[tokio::test]
+async fn a_large_column_rebalance_fits_in_the_broadcast_channel() {
+    let (server, events) = server_with_events().await;
+    let (_, column) = setup_board_and_column(&server).await;
+    // Comfortably more cards than the channel has slots.
+    let cards = crate::events::BROADCAST_CAPACITY + 72;
+    create_cards(&server, &column.id, cards).await;
+
+    let (renumberings, largest_burst) = move_bottom_to_top(&server, &events, &column.id, 24).await;
+    assert!(renumberings > 0, "the loop never forced a rebalance");
+    // Audit row, renumbering, the move itself — and nothing that grows with
+    // the column.
+    assert!(
+        largest_burst <= 4,
+        "one move put {largest_burst} events into the channel"
+    );
+}
+
+/// Card #393, create path: a new card at the top can force the rebalance too,
+/// and every existing card whose position it changed must be announced with
+/// its new value.
+#[tokio::test]
+async fn a_rebalance_on_create_announces_the_renumbered_cards() {
+    let (server, events) = server_with_events().await;
+    let (_, column) = setup_board_and_column(&server).await;
+    let mut rx = events.subscribe();
+
+    let mut renumbered_any = false;
+    for _ in 0..16 {
+        let before = server_positions(&server, &column.id).await;
+        create_cards(&server, &column.id, 1).await;
+        let after = server_positions(&server, &column.id).await;
+
+        let announced: std::collections::HashMap<String, i32> =
+            drain_positions(&mut rx, &column.id)
+                .updates
+                .into_iter()
+                .collect();
+        for (id, old) in &before {
+            let new = after[id];
+            if new != *old {
                 renumbered_any = true;
                 assert_eq!(
-                    announced.get(&new.id),
-                    Some(&new.position),
-                    "renumbered card {} was not announced",
-                    new.id
+                    announced.get(id),
+                    Some(&new),
+                    "renumbered card {id} was not announced"
                 );
             }
         }

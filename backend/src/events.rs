@@ -46,6 +46,19 @@ pub enum BoardEvent {
         card: shared::Card,
         from_column_id: String,
     },
+    /// A column was renumbered back onto the sparse position grid, because the
+    /// gap at some slot was used up. The visible order is unchanged; only the
+    /// stored `position` values are new. Receivers must adopt them, because
+    /// they place every later `CardMoved` by comparing positions (card #393).
+    ///
+    /// One event for the whole column rather than a `CardMoved` per card: a
+    /// renumbering touches nearly every card, and a large column's worth of
+    /// individual events would overflow `BROADCAST_CAPACITY` — the channel is
+    /// shared by every board — and be dropped, oldest first, without a trace.
+    CardsRenumbered {
+        column_id: String,
+        positions: Vec<shared::CardPosition>,
+    },
 
     // ── Card link events ─────────────────────────────────────────────────
     /// A predecessor/successor link was created between two cards. The full

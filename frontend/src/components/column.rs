@@ -221,6 +221,16 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                     });
                 }
             }
+            BoardSseEvent::CardsRenumbered {
+                column_id,
+                positions,
+            } if column_id == col_id_sse => {
+                // Adopt the server's new positions (card #393). Every later
+                // `CardMoved` above is slotted by comparing positions, so a
+                // renumbering left unapplied puts the next moved card in the
+                // wrong place until a reload.
+                apply_renumbering(cards, &positions);
+            }
             _ => {}
         }
     });
@@ -809,6 +819,71 @@ where
     Ok(ordered.into_iter().map(str::to_string).collect())
 }
 
+/// The column's order after a renumbering: indices into `current`, each with
+/// the position that card should now hold.
+///
+/// `current` is the column as this browser holds it, as `(id, position)` top to
+/// bottom; `renumbered` is what the server announced. Cards it names take their
+/// new position; cards it does not name keep theirs. The result is sorted by
+/// position, with ties keeping their current relative order (a stable sort),
+/// so a renumbering that agrees with the order on screen moves nothing.
+///
+/// Split out from [`apply_renumbering`] so the ordering is testable without a
+/// reactive runtime, like [`server_order`].
+fn renumbered_order(
+    current: &[(String, i32)],
+    renumbered: &[shared::CardPosition],
+) -> Vec<(usize, i32)> {
+    let new_positions: std::collections::HashMap<&str, i32> = renumbered
+        .iter()
+        .map(|p| (p.id.as_str(), p.position))
+        .collect();
+    let mut order: Vec<(usize, i32)> = current
+        .iter()
+        .enumerate()
+        .map(|(i, (id, position))| {
+            (
+                i,
+                new_positions.get(id.as_str()).copied().unwrap_or(*position),
+            )
+        })
+        .collect();
+    // `sort_by_key` is stable: equal positions keep their current order.
+    order.sort_by_key(|&(_, position)| position);
+    order
+}
+
+/// Apply a `CardsRenumbered` event to `cards`: every named card takes its new
+/// position, and the column is re-sorted to match — all in one update.
+///
+/// The existing signals are reused, for the same reason as in
+/// [`apply_server_order`]: a keyed `<For>` would remount fresh ones, losing
+/// focus and collapsing anything expanded.
+fn apply_renumbering(
+    cards: RwSignal<Vec<RwSignal<shared::Card>>>,
+    renumbered: &[shared::CardPosition],
+) {
+    cards.update(|cs| {
+        let current: Vec<(String, i32)> = cs
+            .iter()
+            .map(|s| s.with_untracked(|c| (c.id.clone(), c.position)))
+            .collect();
+        let order = renumbered_order(&current, renumbered);
+
+        let mut slots: Vec<Option<RwSignal<shared::Card>>> = cs.drain(..).map(Some).collect();
+        for (i, position) in order {
+            if let Some(sig) = slots[i].take() {
+                // Only write a card whose position really changed, so the
+                // others do not re-render for nothing.
+                if sig.with_untracked(|c| c.position != position) {
+                    sig.update(|c| c.position = position);
+                }
+                cs.push(sig);
+            }
+        }
+    });
+}
+
 /// Indices into `current_ids`, reordered to follow `server_ids`.
 ///
 /// Splitting this out from [`apply_server_order`] keeps the interesting part —
@@ -1004,6 +1079,75 @@ mod tests {
         assert_eq!(
             SortNotice::Cycle(3).text(),
             "Can't sort: the links between 3 cards form a loop."
+        );
+    }
+
+    // ── renumbered_order (card #393) ──────────────────────────────────────
+    use super::renumbered_order;
+
+    fn held(entries: &[(&str, i32)]) -> Vec<(String, i32)> {
+        entries
+            .iter()
+            .map(|(id, p)| ((*id).to_string(), *p))
+            .collect()
+    }
+
+    fn announced(entries: &[(&str, i32)]) -> Vec<shared::CardPosition> {
+        entries
+            .iter()
+            .map(|(id, p)| shared::CardPosition {
+                id: (*id).to_string(),
+                position: *p,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_renumbering_adopts_the_new_positions_in_place() {
+        // The usual case: same order, new values.
+        assert_eq!(
+            renumbered_order(
+                &held(&[("a", 1), ("b", 2), ("c", 4)]),
+                &announced(&[("a", 1024), ("b", 2048), ("c", 3072)])
+            ),
+            vec![(0, 1024), (1, 2048), (2, 3072)]
+        );
+    }
+
+    #[test]
+    fn a_renumbering_reorders_when_this_tab_had_the_order_wrong() {
+        // This tab had missed a move: it holds a, b, c; the server's order is
+        // c, a, b.
+        assert_eq!(
+            renumbered_order(
+                &held(&[("a", 1), ("b", 2), ("c", 4)]),
+                &announced(&[("c", 1024), ("a", 2048), ("b", 3072)])
+            ),
+            vec![(2, 1024), (0, 2048), (1, 3072)]
+        );
+    }
+
+    #[test]
+    fn cards_the_renumbering_does_not_name_keep_their_position() {
+        // `b` was already on its grid slot, so the server did not announce it.
+        assert_eq!(
+            renumbered_order(
+                &held(&[("a", 1), ("b", 2048), ("c", 4)]),
+                &announced(&[("a", 1024), ("c", 3072)])
+            ),
+            vec![(0, 1024), (1, 2048), (2, 3072)]
+        );
+    }
+
+    #[test]
+    fn a_renumbering_naming_a_card_this_tab_lacks_is_ignored() {
+        // `z` was created in another tab and has not arrived here yet.
+        assert_eq!(
+            renumbered_order(
+                &held(&[("a", 1), ("b", 2)]),
+                &announced(&[("z", 1024), ("a", 2048), ("b", 3072)])
+            ),
+            vec![(0, 2048), (1, 3072)]
         );
     }
 }

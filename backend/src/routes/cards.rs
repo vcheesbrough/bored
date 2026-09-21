@@ -136,28 +136,38 @@ struct CardMutation<'a> {
     event: BoardEvent,
 }
 
-/// Announce cards a column rebalance renumbered, as within-column `CardMoved`
-/// events, so every open tab re-slots them before it sees the event for the
-/// card that caused the rebalance.
+/// Announce cards a column rebalance renumbered, as a single
+/// `CardsRenumbered` event, so every open tab adopts their new positions before
+/// it sees the event for the card that caused the rebalance.
 ///
 /// Browsers place a moved card by comparing its new position with the
 /// positions they hold for its siblings, so those must never go stale — see
-/// `position::rebalance_column` (card #393). Called as soon as the positions
-/// are computed, before the handler's own write: the renumbering is already
-/// committed at that point, and a later failure must not leave it unannounced.
+/// `position::rebalance_column` (card #393). One event, not one per card, so a
+/// large column cannot overflow the shared broadcast channel (see the variant's
+/// docs). Called as soon as the positions are computed, before the handler's
+/// own write: the renumbering is already committed at that point, and a later
+/// failure must not leave it unannounced.
 fn announce_renumbered(state: &AppState, board_id: &str, col_id: &str, renumbered: Vec<DbCard>) {
-    for card in renumbered {
-        // Ignored for the same reason as in `audit_and_emit`: `send` only fails
-        // when no tab is listening.
-        let _ = state.events.send(BroadcastEvent {
-            board_id: board_id.to_string(),
-            event: BoardEvent::CardMoved {
-                card: card.into_api(),
-                // Same column in and out: the browser treats it as a reorder.
-                from_column_id: col_id.to_string(),
-            },
-        });
+    // The happy path: no rebalance, nothing to say.
+    if renumbered.is_empty() {
+        return;
     }
+    let positions = renumbered
+        .into_iter()
+        .map(|card| shared::CardPosition {
+            id: card.id.id.to_raw(),
+            position: card.position,
+        })
+        .collect();
+    // Ignored for the same reason as in `audit_and_emit`: `send` only fails
+    // when no tab is listening.
+    let _ = state.events.send(BroadcastEvent {
+        board_id: board_id.to_string(),
+        event: BoardEvent::CardsRenumbered {
+            column_id: col_id.to_string(),
+            positions,
+        },
+    });
 }
 
 /// Record a card mutation in the audit log, then announce it to subscribers.

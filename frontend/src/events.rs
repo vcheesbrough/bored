@@ -35,6 +35,13 @@ pub enum BoardSseEvent {
         card: shared::Card,
         from_column_id: String,
     },
+    /// A column was renumbered back onto the sparse position grid: same
+    /// visible order, new stored positions. One event for the whole column —
+    /// see the backend's `BoardEvent::CardsRenumbered` for why (card #393).
+    CardsRenumbered {
+        column_id: String,
+        positions: Vec<shared::CardPosition>,
+    },
 
     // ── Card link events ─────────────────────────────────────────────────
     CardLinkCreated {
