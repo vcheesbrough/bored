@@ -381,12 +381,22 @@ test.describe('Disconnected UI', () => {
     await accepted;
     await expect(page.locator('.column-name')).toHaveText(['B', 'C', 'A']);
 
-    // Now the first request fails, late.
+    // Now the first request fails, late. The rollback answers the failure by
+    // asking the server for its order: wait for *that* response, so the check
+    // below runs after the rollback has acted rather than before it. The board
+    // already shows the right order at this point, so asserting any earlier
+    // would pass whether or not the rollback ever ran.
     const failed = page.waitForResponse(
       (res) => res.url().includes('/columns/reorder') && res.status() === 500,
     );
+    const refetched = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'GET' &&
+        new URL(res.url()).pathname === `/api/boards/${board.name}/columns`,
+    );
     release();
     await failed;
+    await refetched;
 
     // Settle on what the server holds, which is drag 2's order — asserted
     // against the server itself, not a hardcoded expectation.
@@ -394,9 +404,8 @@ test.describe('Disconnected UI', () => {
       ((await (await request.get(`/api/boards/${board.name}/columns`)).json()) as { name: string }[])
         .map((c) => c.name);
     expect(await serverNames()).toEqual(['B', 'C', 'A']);
-    // Give the rollback its refetch, then require the board to match. A
-    // snapshot restore would have put it back to [A, B, C].
-    await page.waitForTimeout(1500);
+    // The rollback has its answer; the board must match it. A snapshot restore
+    // would have put it back to [A, B, C].
     await expect(page.locator('.column-name')).toHaveText(await serverNames());
   });
 
