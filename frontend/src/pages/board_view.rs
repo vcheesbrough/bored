@@ -585,6 +585,11 @@ pub fn BoardView() -> AnyView {
             // an ordinary switch this counts as connected only while no board
             // is loaded, when there is nothing to write to.
             crate::connection::stream_reset();
+            // And forget which board last streamed. Every slug change passes
+            // through here, so the next board to load — even the same one
+            // again, fetched from scratch — starts with no "lost" record and a
+            // fresh backoff, rather than inheriting them across the detour.
+            sse_board.set_value(String::new());
             return;
         }
         // A different board than the stream last served: its data was just

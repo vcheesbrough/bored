@@ -507,6 +507,47 @@ test.describe('Disconnected UI', () => {
     expect(loads).toBe(0);
   });
 
+  test('coming back to a board through one that never loaded does not reload', async ({ page, request }) => {
+    // Board A's stream fails, the user detours through a board that never
+    // loads, and comes back to A. A is fetched from scratch on the way back,
+    // so its new stream is not resuming after a gap — it must not inherit the
+    // "lost" record from before the detour and reload the tab for nothing.
+    const boardA = await apiCreateBoard(request, `detour-a-${Date.now()}`);
+    const boardB = await apiCreateBoard(request, `detour-b-${Date.now()}`);
+    await page.route('**/api/events*', (route) =>
+      route.fulfill({ status: 502, contentType: 'text/html', body: '<html>bad gateway</html>' }),
+    );
+    await gotoBoardView(page, boardA.name);
+    await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+
+    await openChooser(page);
+    await expect(page.locator('.chooser-board-row').filter({ hasText: boardB.name })).toBeVisible();
+    expect((await request.delete(`/api/boards/${boardB.name}`)).ok()).toBe(true);
+
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+    await page.locator('.chooser-board-row').filter({ hasText: boardB.name }).click();
+    await expect(page).toHaveURL(new RegExp(`/boards/${boardB.name}`));
+
+    // The server is healthy again by the time the user heads back.
+    await page.unroute('**/api/events*');
+    const streamOpened = page.waitForResponse(
+      (res) =>
+        new URL(res.url()).pathname === '/api/events' &&
+        new URL(res.url()).searchParams.get('board_id') === boardA.id &&
+        res.status() === 200,
+    );
+    await openChooser(page);
+    await page.locator('.chooser-board-row').filter({ hasText: boardA.name }).click();
+    await expect(page).toHaveURL(new RegExp(`/boards/${boardA.name}`));
+    await streamOpened;
+
+    // A's stream opened on a board fetched moments ago. Connected, in place.
+    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 5000 });
+    await page.waitForTimeout(2000);
+    expect(loads).toBe(0);
+  });
+
   test('catches up after a gap the browser recovers from by itself', async ({ page, request }) => {
     // The common real-world gap — a network blip, a laptop waking — is not a
     // CLOSED stream. It is a transport failure the browser retries on its own
