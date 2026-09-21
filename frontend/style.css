@@ -2079,3 +2079,68 @@ mark.search-hit {
   color: var(--danger);
   font-size: 11px;
 }
+
+/* Outcome of a column's "Sort by links" click (card #315): a quiet note for
+   "already in link order", the danger colour for a loop or a failed save. */
+.column-sort-notice {
+  margin: 0;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.column-sort-notice.column-sort-error {
+  color: var(--danger);
+}
+
+/* Card #368: shown by the panic hook (`panic_banner.rs`) when the WASM module
+   has panicked and the page has stopped working. Built with plain DOM calls
+   outside the Leptos tree, so it depends on nothing but these rules. */
+.panic-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 16px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 14px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.panic-banner-text {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.panic-banner-detail {
+  order: 3;
+  flex-basis: 100%;
+  margin: 0;
+  max-height: 30vh;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.panic-banner-reload {
+  padding: 6px 14px;
+  border: 1px solid #fff;
+  border-radius: 4px;
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.panic-banner-reload:hover,
+.panic-banner-reload:focus-visible {
+  background: rgba(255, 255, 255, 0.15);
+}

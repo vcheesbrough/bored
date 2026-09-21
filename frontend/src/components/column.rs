@@ -350,6 +350,18 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     // second would be computed from a card order the server has already
     // replaced.
     let sorting = RwSignal::new(false);
+    // What the last click has to say, if anything — see `SortNotice`.
+    let sort_notice: RwSignal<Option<SortNotice>> = RwSignal::new(None);
+    // "Already in link order" is a claim about the column as it was at the
+    // click. Once the column changes — a move, a new card, an edit from another
+    // tab — the claim may no longer hold, so drop it. Errors stay until the
+    // next click: they describe an attempt, not the column.
+    Effect::new(move |_| {
+        cards.track();
+        if sort_notice.with_untracked(|n| *n == Some(SortNotice::AlreadySorted)) {
+            sort_notice.set(None);
+        }
+    });
     let on_sort_by_links = move |_: web_sys::MouseEvent| {
         if sorting.get_untracked() {
             return;
@@ -364,6 +376,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
             .map(|sig| sig.get_untracked())
             .collect();
         let current_ids: Vec<&str> = current.iter().map(|c| c.id.as_str()).collect();
+        // A fresh click starts from a clean slate, so a notice can never
+        // outlive the attempt it describes.
+        sort_notice.set(None);
 
         // Every link on the board; `order_by_dependency` drops the ones that
         // reach outside this column.
@@ -372,28 +387,14 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
             .iter()
             .map(|link| (link.predecessor_id.as_str(), link.successor_id.as_str()));
 
-        let ordered = match shared::links::order_by_dependency(&current_ids, edges) {
-            Ok(ordered) => ordered,
-            Err(err) => {
-                // Only reachable from link rows that predate the cycle check.
-                leptos::logging::error!("cannot sort column by links: {err}");
+        let order = match plan_sort(&current_ids, edges) {
+            Ok(order) => order,
+            Err(notice) => {
+                sort_notice.set(Some(notice));
                 return;
             }
         };
-        if ordered == current_ids {
-            // Already satisfies its links — do not spend a request, an audit
-            // row, or an SSE burst saying so.
-            //
-            // This does mean the server's duplicate-position repair is out of
-            // reach here: a column whose stored positions collide but whose
-            // displayed order already satisfies its links is left alone. That
-            // repair is a side effect of applying an order, not a feature of
-            // this button, and paying a request on every click to maybe fix a
-            // rare state is the worse trade.
-            return;
-        }
 
-        let order: Vec<String> = ordered.into_iter().map(str::to_string).collect();
         let col_id = col_id_sort.clone();
         sorting.set(true);
         // No optimistic update: the column does not move until the server has
@@ -410,9 +411,16 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                 // with no reconciliation short of a reload; and the sort now
                 // works whether or not SSE is connected at all.
                 Ok(server_cards) => apply_server_order(cards, server_cards),
-                Err(err) => leptos::logging::error!("reorder_cards failed: {err}"),
+                Err(err) => {
+                    leptos::logging::error!("reorder_cards failed: {err}");
+                    // `try_set`: this runs after an `await`, and the column
+                    // may have been deleted (its signals disposed) meanwhile.
+                    // A plain `set` on a disposed signal is a panic that
+                    // wedges the whole tab.
+                    let _ = sort_notice.try_set(Some(SortNotice::SaveFailed));
+                }
             }
-            sorting.set(false);
+            let _ = sorting.try_set(false);
         });
     };
 
@@ -565,6 +573,26 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                     >"+"</button>
                 </div>
 
+                // The outcome of the last "Sort by links" click, when there is
+                // something to say (card #315). Inline under the header, the
+                // same idiom as `.link-editor-error` — no toast machinery.
+                {move || {
+                    sort_notice.get().map(|notice| {
+                        let is_error = notice.is_error();
+                        view! {
+                            <p
+                                class="column-sort-notice"
+                                class:column-sort-error=is_error
+                                // `alert` interrupts a screen reader, which a
+                                // failure warrants; `status` waits its turn.
+                                role=if is_error { "alert" } else { "status" }
+                            >
+                                {notice.text()}
+                            </p>
+                        }
+                    })
+                }}
+
                 <div
                     class="card-list"
                     class:drag-over=move || {
@@ -704,6 +732,83 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     .into_any()
 }
 
+/// What the column header says after a "Sort by links" click that did not
+/// visibly move anything (card #315).
+///
+/// Without it all three of these looked identical — the column simply stayed
+/// as it was — and the natural reading of a failed save was "the links are
+/// already satisfied", which is exactly wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SortNotice {
+    /// The column's links form a loop, so no order satisfies them. Carries how
+    /// many cards could not be placed. Only reachable from link rows written
+    /// before the server started refusing loops.
+    Cycle(usize),
+    /// The order was worked out but the server did not save it: a 500, a
+    /// dropped connection, an expired session.
+    SaveFailed,
+    /// The column already satisfies its links; nothing needed to move.
+    AlreadySorted,
+}
+
+impl SortNotice {
+    /// The sentence shown under the column header.
+    fn text(&self) -> String {
+        match self {
+            // `1 card` vs `N cards` — a notice this visible should read right.
+            SortNotice::Cycle(1) => "Can't sort: 1 card's links form a loop.".to_string(),
+            SortNotice::Cycle(n) => {
+                format!("Can't sort: the links between {n} cards form a loop.")
+            }
+            SortNotice::SaveFailed => {
+                "Couldn't save the new order. Nothing was changed; try again.".to_string()
+            }
+            SortNotice::AlreadySorted => "Already in link order.".to_string(),
+        }
+    }
+
+    /// Errors are announced (`role="alert"`) and styled as such; the no-op is
+    /// a quiet `role="status"` — it is information, not a problem.
+    fn is_error(&self) -> bool {
+        !matches!(self, SortNotice::AlreadySorted)
+    }
+}
+
+/// Decide what a "Sort by links" click should do, without doing it.
+///
+/// `current_ids` is the whole column top to bottom; `edges` is every
+/// `(predecessor, successor)` pair on the board. Returns the order to send to
+/// the server, or the notice to show instead of sending anything.
+///
+/// Split out from the click handler so the decision — the part that used to
+/// fail silently — is testable without a browser or a reactive runtime.
+fn plan_sort<'a, I>(current_ids: &[&'a str], edges: I) -> Result<Vec<String>, SortNotice>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let ordered = shared::links::order_by_dependency(current_ids, edges).map_err(|err| {
+        // Keep the ids in the console for whoever investigates; the user gets
+        // the count.
+        leptos::logging::error!("cannot sort column by links: {err}");
+        match err {
+            shared::links::OrderError::Cycle(ids) => SortNotice::Cycle(ids.len()),
+        }
+    })?;
+    if ordered == current_ids {
+        // Already satisfies its links — do not spend a request, an audit
+        // row, or an SSE burst saying so.
+        //
+        // This does mean the server's duplicate-position repair is out of
+        // reach here: a column whose stored positions collide but whose
+        // displayed order already satisfies its links is left alone. That
+        // repair is a side effect of applying an order, not a feature of
+        // this button, and paying a request on every click to maybe fix a
+        // rare state is the worse trade.
+        return Err(SortNotice::AlreadySorted);
+    }
+    Ok(ordered.into_iter().map(str::to_string).collect())
+}
+
 /// Indices into `current_ids`, reordered to follow `server_ids`.
 ///
 /// Splitting this out from [`apply_server_order`] keeps the interesting part —
@@ -778,7 +883,7 @@ fn apply_server_order(
 
 #[cfg(test)]
 mod tests {
-    use super::server_order;
+    use super::{SortNotice, plan_sort, server_order};
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
@@ -832,5 +937,73 @@ mod tests {
         assert_eq!(server_order(&[], &[]), Vec::<usize>::new());
         assert_eq!(server_order(&ids(&["a"]), &[]), vec![0]);
         assert_eq!(server_order(&[], &ids(&["a"])), Vec::<usize>::new());
+    }
+
+    // ── plan_sort / SortNotice (card #315) ────────────────────────────────
+    // Expected values are worked out by hand from the edges, not by calling
+    // `order_by_dependency`: the test must not share the code it checks.
+
+    #[test]
+    fn a_column_out_of_link_order_gets_an_order_to_send() {
+        // b → a, but a is on top: the two must swap.
+        assert_eq!(plan_sort(&["a", "b"], [("b", "a")]), Ok(ids(&["b", "a"])));
+    }
+
+    #[test]
+    fn a_column_already_in_link_order_says_so_instead_of_sending() {
+        assert_eq!(
+            plan_sort(&["a", "b"], [("a", "b")]),
+            Err(SortNotice::AlreadySorted)
+        );
+    }
+
+    #[test]
+    fn a_column_with_no_links_is_already_sorted() {
+        assert_eq!(
+            plan_sort(&["a", "b", "c"], std::iter::empty()),
+            Err(SortNotice::AlreadySorted)
+        );
+    }
+
+    #[test]
+    fn a_loop_is_reported_with_the_number_of_cards_caught_in_it() {
+        // a ⇄ b is a loop; c is unlinked and orders fine, so two cards are
+        // stuck.
+        assert_eq!(
+            plan_sort(&["a", "b", "c"], [("a", "b"), ("b", "a")]),
+            Err(SortNotice::Cycle(2))
+        );
+    }
+
+    #[test]
+    fn failures_are_errors_and_the_no_op_is_not() {
+        assert!(SortNotice::Cycle(2).is_error());
+        assert!(SortNotice::SaveFailed.is_error());
+        assert!(!SortNotice::AlreadySorted.is_error());
+    }
+
+    #[test]
+    fn each_notice_reads_differently() {
+        // The whole point of the card: the three outcomes must not look alike.
+        let texts = [
+            SortNotice::Cycle(2).text(),
+            SortNotice::SaveFailed.text(),
+            SortNotice::AlreadySorted.text(),
+        ];
+        assert_ne!(texts[0], texts[1]);
+        assert_ne!(texts[1], texts[2]);
+        assert_ne!(texts[0], texts[2]);
+    }
+
+    #[test]
+    fn a_loop_count_reads_as_english() {
+        assert_eq!(
+            SortNotice::Cycle(1).text(),
+            "Can't sort: 1 card's links form a loop."
+        );
+        assert_eq!(
+            SortNotice::Cycle(3).text(),
+            "Can't sort: the links between 3 cards form a loop."
+        );
     }
 }

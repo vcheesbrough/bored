@@ -136,6 +136,30 @@ struct CardMutation<'a> {
     event: BoardEvent,
 }
 
+/// Announce cards a column rebalance renumbered, as within-column `CardMoved`
+/// events, so every open tab re-slots them before it sees the event for the
+/// card that caused the rebalance.
+///
+/// Browsers place a moved card by comparing its new position with the
+/// positions they hold for its siblings, so those must never go stale — see
+/// `position::rebalance_column` (card #393). Called as soon as the positions
+/// are computed, before the handler's own write: the renumbering is already
+/// committed at that point, and a later failure must not leave it unannounced.
+fn announce_renumbered(state: &AppState, board_id: &str, col_id: &str, renumbered: Vec<DbCard>) {
+    for card in renumbered {
+        // Ignored for the same reason as in `audit_and_emit`: `send` only fails
+        // when no tab is listening.
+        let _ = state.events.send(BroadcastEvent {
+            board_id: board_id.to_string(),
+            event: BoardEvent::CardMoved {
+                card: card.into_api(),
+                // Same column in and out: the browser treats it as a reorder.
+                from_column_id: col_id.to_string(),
+            },
+        });
+    }
+}
+
 /// Record a card mutation in the audit log, then announce it to subscribers.
 ///
 /// The order is deliberate and matches every other handler in this file: the
@@ -264,7 +288,9 @@ pub async fn create_card(
     // This is done before the CREATE so the position is known up front;
     // the two-step approach is safe because card IDs are ULIDs and the
     // counter increment above already serialises concurrent creates.
-    let top_pos = compute_top_position(&state.db, &col_id).await?;
+    let placement = compute_top_position(&state.db, &col_id).await?;
+    announce_renumbered(&state, &board_id, &col_id, placement.renumbered);
+    let top_pos = placement.position;
 
     let card: Option<DbCard> = state
         .db
@@ -511,8 +537,10 @@ pub async fn move_card(
     // Compute a sparse position so only this one card needs to be written.
     // Other cards in the column are unchanged in the happy path; a rebalance
     // is triggered automatically when the gap between neighbours is exhausted.
-    let new_pos =
+    let placement =
         compute_sparse_position(&state.db, &card_id, &payload.column_id, payload.position).await?;
+    announce_renumbered(&state, &board_id, &payload.column_id, placement.renumbered);
+    let new_pos = placement.position;
 
     let api_card = persist_move(
         &state.db,
