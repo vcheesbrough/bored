@@ -263,6 +263,39 @@ test.describe('Cards', () => {
     await expect(page.locator('.card-item.card-expanded')).not.toBeVisible();
   });
 
+  test('expanding a card, and leaving its editor with Esc, focus the card so Esc collapses it', async ({
+    page,
+    request,
+  }) => {
+    // The test above presses Escape *on* the card, which focuses it first, so
+    // it would pass even if the card never took focus itself. Here every Esc
+    // goes to whatever has focus, as a real keyboard's does. Guards the other
+    // side of card #401: the card must still grab focus on these paths.
+    const board = await apiCreateBoard(request, `card-esc-focus-board-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(request, col.id, 'Esc focus test');
+    await gotoBoardView(page, board.name);
+    const rendered = page.locator('.card-body-rendered').first();
+    const textarea = page.locator('.card-body-textarea').first();
+
+    // Expand by click → the rendered body takes focus → Esc collapses.
+    await page.locator('.card-item').first().click();
+    await expect(rendered).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.card-item.card-expanded')).toHaveCount(0);
+
+    // Expand, edit, Esc out of the editor → focus lands on the rendered body,
+    // so a second Esc collapses.
+    await page.locator('.card-item').first().click();
+    await rendered.click();
+    await expect(textarea).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(textarea).not.toBeVisible();
+    await expect(rendered).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.card-item.card-expanded')).toHaveCount(0);
+  });
+
   test('Esc closes full-screen modal', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `card-modal-esc-board-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');

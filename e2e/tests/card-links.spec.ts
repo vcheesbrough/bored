@@ -623,4 +623,78 @@ test.describe('card links', () => {
     );
     expect(panics).toEqual([]);
   });
+
+  // Card #369. `LinkPicker` sits beside the link components iteration 54
+  // hardened, but no reproduction then had its input focused and its popup
+  // open — so its closures were never subscribed at the moment the card was
+  // unmounted. These open it first, then take the card away.
+  test.describe('an open link picker survives its card being unmounted', () => {
+    function watchForPanics(page: import('@playwright/test').Page) {
+      const panics: string[] = [];
+      page.on('console', msg => {
+        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+      });
+      page.on('pageerror', err => panics.push(String(err)));
+      return panics;
+    }
+
+    /** Expand `text`'s card and type into its "after" picker until `match` is offered. */
+    async function openPicker(page: import('@playwright/test').Page, text: string, match: string) {
+      await cardWith(page, text).click();
+      const input = page.locator('.card-item.card-expanded .link-group[data-side="after"] .link-picker-input');
+      await input.fill(match);
+      await expect(input).toBeFocused();
+      await expect(page.locator('.link-suggestions .link-suggestion')).toHaveCount(1);
+    }
+
+    test('deleted elsewhere while the picker is focused', async ({ page, request }) => {
+      // The one path that keeps the input focused, and so the popup subscribed,
+      // right up to the unmount: the delete arrives over SSE, not from a click.
+      const board = await apiCreateBoard(request, `links-picker-del-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      const doomed = await apiCreateCard(request, col.id, '# Doomed card');
+      await apiCreateCard(request, col.id, '# Target card');
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await openPicker(page, 'Doomed card', 'target');
+
+      await apiDeleteCard(request, doomed.id);
+      await expect(cardWith(page, 'Doomed card')).toHaveCount(0);
+      await expect(page.locator('.link-suggestions')).toHaveCount(0);
+
+      // Liveness: a wedged executor would leave this click inert.
+      await cardWith(page, 'Target card').click();
+      await expect(page.locator('.card-item.card-expanded')).toHaveCount(1);
+      await apiCreateCard(request, col.id, '# Arrived later');
+      await expect(cardWith(page, 'Arrived later')).toHaveCount(1);
+      expect(panics).toEqual([]);
+    });
+
+    test('unmounted by a search typed past it', async ({ page, request }) => {
+      // A query change releases the expanded-card pin when the card fails the
+      // new query (#375), so the search filter unmounts the picker's card.
+      const board = await apiCreateBoard(request, `links-picker-lock-${Date.now()}`);
+      const col = await apiCreateColumn(request, board.name, 'Todo');
+      await apiCreateCard(request, col.id, '# Pinned card');
+      await apiCreateCard(request, col.id, '# Target card');
+      await apiCreateCard(request, col.id, '# Other match');
+
+      const panics = watchForPanics(page);
+      await gotoBoardView(page, board.name);
+      await openPicker(page, 'Pinned card', 'target');
+      // Search for something the pinned card does not contain; it stays only
+      // because it is expanded. Filling the box also blurs the picker input.
+      await page.locator('.navbar-search-input').fill('other');
+      await expect(cardWith(page, 'Pinned card')).toHaveCount(0);
+      await expect(cardWith(page, 'Other match')).toHaveCount(1);
+
+      // Liveness.
+      await cardWith(page, 'Other match').click();
+      await expect(page.locator('.card-item.card-expanded')).toHaveCount(1);
+      await page.locator('.navbar-search-input').fill('');
+      await expect(page.locator('.card-item')).toHaveCount(3);
+      expect(panics).toEqual([]);
+    });
+  });
 });
