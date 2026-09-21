@@ -176,8 +176,9 @@ layering model and subtree layout.
   Woodpecker secret (`bored_{dev,prod}_sovereign_access_url`, itself stored in
   sovereign-config) + redeploy. No app change, no image rebuild.
 - **Bumping the sovereign-config server:** the provider dependency in
-  `backend/Cargo.toml` is pinned to the server's running version and fails closed on
-  protocol mismatch — bump the `tag` and rebuild when the server upgrades.
+  `backend/Cargo.toml` negotiates a protocol version on connect, so a server upgrade
+  needs no bored rebuild. Bump the `tag` to pick up client fixes, and before the
+  server retires the protocol version the pinned provider speaks.
 
 ---
 

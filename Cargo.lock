@@ -5287,17 +5287,18 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-client"
-version = "2.17.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.17.6#83566500ca23e3e54b9a33e294ccccf649c7c840"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "async-trait",
  "sovereign-config-core",
+ "tracing",
 ]
 
 [[package]]
 name = "sovereign-config-core"
-version = "2.17.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.17.6#83566500ca23e3e54b9a33e294ccccf649c7c840"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -5308,8 +5309,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-native"
-version = "2.17.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.17.6#83566500ca23e3e54b9a33e294ccccf649c7c840"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "async-trait",
  "http 1.4.0",
@@ -5328,8 +5329,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-proto"
-version = "2.17.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.17.6#83566500ca23e3e54b9a33e294ccccf649c7c840"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "prost",
  "prost-types",
@@ -5340,8 +5341,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-provider"
-version = "2.17.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.17.6#83566500ca23e3e54b9a33e294ccccf649c7c840"
+version = "2.30.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
 dependencies = [
  "async-trait",
  "config",

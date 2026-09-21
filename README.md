@@ -172,9 +172,10 @@ sovereign-config itself** — `/woodpecker/repos/vcheesbrough/bored/bored_{dev,p
 — alongside bored's other Woodpecker secrets (the mini-config broker cutover). Rotation is
 `rotate_connection` + rewrite that Woodpecker secret + redeploy; no app change, no image rebuild.
 
-**Version pin.** `backend/Cargo.toml` pins `sovereign-config-provider` to the sovereign-config
-**server's** running version (currently `2.17.6`) — the provider negotiates a protocol version on
-connect and fails closed on mismatch, so a server upgrade means bumping this tag and rebuilding.
+**Version pin.** `backend/Cargo.toml` pins `sovereign-config-provider` to a sovereign-config
+release tag (currently `2.30.2`, matching the deployed server). The provider negotiates a protocol
+version on connect, so a server upgrade does not require rebuilding bored; it fails closed only
+once the server has retired every protocol version the provider speaks.
 `sovereign-config-provider` is a private git dependency; the Docker build fetches it via
 `scripts/docker-git-credential.sh`, which needs the `github_token` secret (`--secret
 id=github_token,env=GITHUB_TOKEN` on `docker build`). An ordinary `gh` login supplies a token
