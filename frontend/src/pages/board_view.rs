@@ -539,6 +539,15 @@ pub fn BoardView() -> AnyView {
     // Consecutive failed connects, which sets how long to wait before the next
     // attempt. Reset the moment a stream opens.
     let sse_failures = RwSignal::new(0u32);
+    // Whether this board's stream has failed since the board was loaded. Once
+    // it has, the board is stale for good: the backend keeps no event history
+    // (`backend/src/events.rs` has no `Last-Event-ID` replay), so whatever was
+    // broadcast during the gap will never arrive. A stream that comes back
+    // after that is *not* a board that is current again — see `onopen`.
+    let sse_lost = RwSignal::new(false);
+    // The board the stream belongs to, so switching boards starts that record
+    // afresh: a different board is loaded from scratch and is not stale.
+    let sse_board = StoredValue::new(String::new());
     // Leaving the board must not leave the app looking offline: the next page
     // has no stream of its own, so its health is the heartbeat's alone.
     on_cleanup(crate::connection::stream_reset);
@@ -549,6 +558,13 @@ pub fn BoardView() -> AnyView {
         let _ = sse_reconnect.get();
         if ulid.is_empty() {
             return;
+        }
+        // A different board than the stream last served: its data was just
+        // fetched, so nothing is missing from it yet.
+        if sse_board.get_value() != ulid {
+            sse_board.set_value(ulid.clone());
+            sse_lost.set(false);
+            sse_failures.set(0);
         }
         let url = format!("/api/events?board_id={ulid}");
         let Ok(es) = web_sys::EventSource::new(&url) else {
@@ -569,11 +585,26 @@ pub fn BoardView() -> AnyView {
             });
         es.set_onmessage(Some(cb.as_ref().unchecked_ref()));
 
-        // The stream is live: the board is receiving other tabs' changes
-        // again, so mutations are allowed and the offline badge goes away.
-        // The version check is *not* here — it belongs to the heartbeat, which
-        // runs whether or not this stream ever comes back.
+        // The stream is live. On the first open that makes the board current,
+        // so mutations are allowed and the offline badge goes away. The version
+        // check is *not* here — it belongs to the heartbeat, which runs whether
+        // or not this stream ever comes back.
         let onopen_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
+            // A stream that comes back after failing is live, but the board it
+            // feeds is not current: every event broadcast during the gap is
+            // lost. Marking the tab connected here would lift the offline guard
+            // at the moment the board is most likely to be stale, and invite
+            // edits on top of changes this tab never saw. So reload instead
+            // (same URL) and let the page load the board afresh — the tab never
+            // reports itself connected on stale data. The cost is the page's UI
+            // state, the same trade-off the deploy reload makes; an in-place
+            // resync that kept it would need a board-wide reconciler this view
+            // does not have.
+            if sse_lost.try_get_untracked().unwrap_or(false) {
+                leptos::logging::log!("event stream resumed after a gap — reloading to catch up");
+                let _ = window().location().reload();
+                return;
+            }
             let _ = sse_failures.try_set(0);
             crate::connection::stream_up();
         });
@@ -586,6 +617,9 @@ pub fn BoardView() -> AnyView {
             // heartbeat probe immediately, since a redeploy is one reason a
             // stream dies.
             crate::connection::stream_down();
+            // From here the board has missed events it can never recover, so
+            // the next `onopen` must reload rather than resume.
+            let _ = sse_lost.try_set(true);
 
             // `CONNECTING` means the browser is retrying by itself and a fresh
             // `onopen` is on its way; reopening on top of that would leave two

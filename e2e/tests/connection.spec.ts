@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from './helpers';
+import { apiCreateBoard, apiCreateColumn, apiCreateCard, apiUpdateCard, gotoBoardView } from './helpers';
 
 // ── #405 Deploy reload + disconnected UI ──────────────────────────────────
 //
@@ -334,7 +334,7 @@ test.describe('Disconnected UI', () => {
     await expect(page.locator('.column-name')).toHaveText(['Beta', 'Alpha']);
   });
 
-  test('clears the badge and accepts saves once the server comes back', async ({ page, request }) => {
+  test('catches up on what it missed before accepting saves again', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `offline-recovery-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
     const card = await apiCreateCard(request, col.id, 'Original body');
@@ -349,21 +349,39 @@ test.describe('Disconnected UI', () => {
     await page.route('**/api/info', (route) => route.abort());
     await gotoBoardView(page, board.name);
     await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('.card-item').first()).toContainText('Original body');
 
-    // Server's back. The heartbeat must recover on its own, and the stream
-    // must be reopened by the client's own supervisor — the browser will not
-    // do it after a CLOSED stream.
+    // Someone else changes the card while this tab cannot hear about it. The
+    // backend keeps no event history, so this `CardUpdated` is lost to the tab
+    // for good — the one way to learn of it is to load the board again.
+    await apiUpdateCard(request, card.id, { body: 'Changed while you were away' });
+
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+    const resumed = page.waitForEvent('load', { timeout: 30000 });
+
+    // Server's back. The stream must be reopened by the client's own supervisor
+    // — the browser will not do it after a CLOSED stream — and a stream that
+    // comes back after a gap reloads the tab rather than resuming on a board
+    // that is missing the change above.
     await page.unroute('**/api/info');
     await page.unroute('**/api/events*');
+    await resumed;
 
-    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 30000 });
+    // The oracle: the change made during the gap is on screen *before* the tab
+    // is writable. Resuming without reloading would clear the badge on a board
+    // that still reads "Original body".
+    await expect(page.locator('.card-item').first()).toContainText('Changed while you were away');
+    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 15000 });
 
-    // A save works again, end to end.
+    // A save works again, end to end — on top of the current body, not the
+    // stale one.
     await page.locator('.card-item').first().click();
     await expect(page.locator('.card-item.card-expanded')).toBeVisible();
     await page.locator('.card-body-rendered').first().click();
     const textarea = page.locator('.card-body-textarea').first();
     await expect(textarea).toBeVisible();
+    await expect(textarea).toHaveValue('Changed while you were away');
     await textarea.fill('Edited after reconnecting');
     await textarea.press('Escape');
     await expect(page.locator('.card-markdown').first()).toContainText('Edited after reconnecting');
@@ -372,5 +390,9 @@ test.describe('Disconnected UI', () => {
       const res = await request.get(`/api/cards/${card.id}`);
       return (await res.json()).body;
     }, { timeout: 10000 }).toBe('Edited after reconnecting');
+
+    // One reload to catch up, not one per heartbeat: the fresh page's stream
+    // opened cleanly, so it resumed normally.
+    expect(loads).toBe(1);
   });
 });
