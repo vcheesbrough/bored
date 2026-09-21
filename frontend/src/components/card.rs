@@ -707,9 +707,16 @@ pub fn CardItem(
                             // This card's own rendered body is excluded: leaving
                             // the editor with Escape focuses it, which blurs the
                             // textarea *with* that div as the related target.
+                            //
+                            // `try_get_untracked`: a focused textarea whose card
+                            // is being removed can blur after disposal, and the
+                            // `NodeRef` is a signal like any other. `None` then
+                            // just counts every target as "elsewhere", which
+                            // is moot on a card that is going away.
                             use wasm_bindgen::JsCast;
                             let own_body = body_rendered_ref
-                                .get_untracked()
+                                .try_get_untracked()
+                                .flatten()
                                 .map(|el| el.unchecked_into::<web_sys::EventTarget>());
                             let target = ev.related_target();
                             keep_focus_elsewhere

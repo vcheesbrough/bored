@@ -671,9 +671,16 @@ test.describe('card links', () => {
       expect(panics).toEqual([]);
     });
 
-    test('unmounted by a search typed past it', async ({ page, request }) => {
+    test('unmounted by a search typed past it (liveness only)', async ({ page, request }) => {
       // A query change releases the expanded-card pin when the card fails the
       // new query (#375), so the search filter unmounts the picker's card.
+      //
+      // **Not a #369 regression guard.** Filling the search box blurs the
+      // picker input first, which closes the popup, so the converted
+      // `popup_open`/`suggestions` closures are not subscribed when the card
+      // goes — this passes with those conversions reverted. It is kept as a
+      // liveness check on this unmount path; the remote-delete test above is
+      // the only one here that reaches the fix.
       const board = await apiCreateBoard(request, `links-picker-lock-${Date.now()}`);
       const col = await apiCreateColumn(request, board.name, 'Todo');
       await apiCreateCard(request, col.id, '# Pinned card');
