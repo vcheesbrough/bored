@@ -7,6 +7,7 @@ mod connection;
 mod events;
 mod links;
 mod pages;
+mod panic_banner;
 mod recent;
 mod search;
 
@@ -21,11 +22,10 @@ fn main() {
     // Without a hook, a panic in the WASM module aborts with a bare
     // `unreachable` trap: no message, no location, and — because the panic
     // takes out the reactive runtime — a board that silently stops responding
-    // to its own events. Log the panic so that failure mode is diagnosable
-    // from the browser console instead of looking like a rendering bug.
-    std::panic::set_hook(Box::new(|info| {
-        leptos::logging::error!("wasm panic: {info}");
-    }));
+    // to its own events. The hook logs the panic to the console and puts up a
+    // "reload to continue" banner outside the Leptos tree — see `panic_banner`.
+    panic_banner::install();
+    panic_banner::install_test_trigger();
     mount_to_body(App);
 }
 

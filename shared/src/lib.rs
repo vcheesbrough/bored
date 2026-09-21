@@ -38,6 +38,16 @@ pub struct Column {
     pub updated_at: String,
 }
 
+/// One card's new position, as announced by a column renumbering (the
+/// `cards_renumbered` SSE event). Just the id and the value — a renumbering
+/// changes nothing else about a card, and a large column's worth of full cards
+/// would be a needlessly heavy event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardPosition {
+    pub id: String,
+    pub position: i32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBoardRequest {
     pub name: String,

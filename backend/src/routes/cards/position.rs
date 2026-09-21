@@ -63,10 +63,36 @@ fn needs_rebalance(col_cards: &[DbCard], idx: usize, new_pos: i32) -> bool {
     new_pos <= left || new_pos >= right
 }
 
-/// Reassign every card in `col_id` to evenly-spaced positions (GAP, 2*GAP, …).
+/// Where a new or moved card goes, and what had to change to make room for it.
+pub(super) struct Placement {
+    /// The sparse position to write for the card being placed.
+    pub position: i32,
+    /// Cards a rebalance renumbered on the way (empty in the happy path), as
+    /// they are *after* the renumbering.
+    ///
+    /// These writes are already committed when the caller sees them, and they
+    /// are not the caller's to undo. The caller must announce them over SSE —
+    /// see [`rebalance_column`] for why a silent renumber is a bug.
+    pub renumbered: Vec<DbCard>,
+}
+
+/// Reassign every card in `col_id` to evenly-spaced positions (GAP, 2*GAP, …)
+/// and return the cards whose position actually changed.
+///
 /// Called only when the gap between two neighbouring cards drops to zero,
 /// which happens after ~10 consecutive insertions at the same slot.
-async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<(), surrealdb::Error> {
+///
+/// The returned cards must be broadcast. Browsers slot a moved card into a
+/// column by comparing its new `position` against the positions they already
+/// hold for its siblings; if a rebalance rewrites those siblings silently, the
+/// next move is compared against stale numbers and lands in the wrong place
+/// until a reload (card #393). Returning only the changed rows keeps that
+/// broadcast as small as the renumbering really was.
+///
+/// Not audited: a renumber is storage housekeeping that preserves the order
+/// the user sees, not an action anyone took, and one audit row per card in the
+/// column would bury the move that caused it.
+async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<Vec<DbCard>, surrealdb::Error> {
     let cards: Vec<DbCard> = db
         .query(
             "SELECT * FROM cards \
@@ -77,15 +103,28 @@ async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<(), surreald
         .await?
         .take(0)?;
 
+    let mut renumbered = Vec::new();
     for (i, card) in cards.iter().enumerate() {
         // Start at GAP (not 0) so there is always room above the first card
         // for a top insert without immediately triggering another rebalance.
-        db.query("UPDATE type::thing('cards', $id) SET position = $pos")
+        let pos = (i as i32 + 1) * POSITION_GAP;
+        // A card already on its grid slot needs no write and no event.
+        if card.position == pos {
+            continue;
+        }
+        // `RETURN AFTER` hands back the row as stored, so what gets announced
+        // is exactly what was written.
+        let updated: Option<DbCard> = db
+            .query("UPDATE type::thing('cards', $id) SET position = $pos RETURN AFTER")
             .bind(("id", card.id.id.to_raw()))
-            .bind(("pos", (i as i32 + 1) * POSITION_GAP))
-            .await?;
+            .bind(("pos", pos))
+            .await?
+            .take(0)?;
+        // `None` means the card was deleted between the SELECT and this
+        // UPDATE: nothing was written, so there is nothing to announce.
+        renumbered.extend(updated);
     }
-    Ok(())
+    Ok(renumbered)
 }
 
 /// Compute a sparse position for inserting a brand-new card at the TOP of
@@ -95,7 +134,7 @@ async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<(), surreald
 pub(super) async fn compute_top_position(
     db: &Surreal<Db>,
     col_id: &str,
-) -> Result<i32, surrealdb::Error> {
+) -> Result<Placement, surrealdb::Error> {
     let col_cards: Vec<DbCard> = db
         .query(
             "SELECT * FROM cards \
@@ -111,7 +150,7 @@ pub(super) async fn compute_top_position(
     // If the gap between the sentinel (0) and the current first card has been
     // exhausted, rebalance the whole column before computing the new position.
     if !col_cards.is_empty() && needs_rebalance(&col_cards, 0, new_pos) {
-        rebalance_column(db, col_id).await?;
+        let renumbered = rebalance_column(db, col_id).await?;
 
         let col_cards: Vec<DbCard> = db
             .query(
@@ -123,10 +162,16 @@ pub(super) async fn compute_top_position(
             .await?
             .take(0)?;
 
-        return Ok(midpoint_position(&col_cards, 0));
+        return Ok(Placement {
+            position: midpoint_position(&col_cards, 0),
+            renumbered,
+        });
     }
 
-    Ok(new_pos)
+    Ok(Placement {
+        position: new_pos,
+        renumbered: Vec::new(),
+    })
 }
 
 /// Compute a single sparse position value for moving `card_id` to index
@@ -137,7 +182,7 @@ pub(super) async fn compute_sparse_position(
     card_id: &str,
     col_id: &str,
     target_index: i32,
-) -> Result<i32, surrealdb::Error> {
+) -> Result<Placement, surrealdb::Error> {
     // Fetch sibling cards (the moving card excluded) so we see the column
     // as it will look after the move.
     let col_cards: Vec<DbCard> = db
@@ -159,7 +204,11 @@ pub(super) async fn compute_sparse_position(
         // Gap exhausted — renumber the column then recompute.  After a
         // rebalance every gap is exactly POSITION_GAP, so the second
         // midpoint_position call is guaranteed to succeed.
-        rebalance_column(db, col_id).await?;
+        //
+        // The renumbering includes the moving card itself when it is already in
+        // this column. Announcing that intermediate position is harmless: the
+        // caller's own `CardMoved` for the card follows and supersedes it.
+        let renumbered = rebalance_column(db, col_id).await?;
 
         let col_cards: Vec<DbCard> = db
             .query(
@@ -174,10 +223,16 @@ pub(super) async fn compute_sparse_position(
             .take(0)?;
 
         let idx = (target_index as usize).min(col_cards.len());
-        return Ok(midpoint_position(&col_cards, idx));
+        return Ok(Placement {
+            position: midpoint_position(&col_cards, idx),
+            renumbered,
+        });
     }
 
-    Ok(new_pos)
+    Ok(Placement {
+        position: new_pos,
+        renumbered: Vec::new(),
+    })
 }
 
 #[cfg(test)]

@@ -122,4 +122,105 @@ test.describe('sort a column by card links', () => {
     const history = await apiBoardHistory(request, board.name);
     expect(history.filter((e) => e.entity_type === 'card' && e.action === 'move')).toEqual([]);
   });
+
+  // ── Card #315: say what happened when nothing visibly did ─────────────────
+  // All three of these used to leave the column untouched with only a console
+  // line, so a failed save read as "already sorted".
+
+  test('says so when the column is already in link order', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `sort-links-noop-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const beta = await apiCreateCard(request, col.id, '# Beta');
+    const alpha = await apiCreateCard(request, col.id, '# Alpha');
+    await apiCreateLink(request, alpha.id, 'successor', beta.id);
+
+    await gotoBoardView(page, board.name);
+    const column = columnNamed(page, 'Todo');
+    await expectCardOrder(column, ['Alpha', 'Beta']);
+
+    await (await sortButton(column)).click();
+
+    // A status, not an alert: nothing went wrong.
+    await expect(column.getByRole('status')).toHaveText('Already in link order.');
+    await expect(column.getByRole('alert')).toHaveCount(0);
+
+    // The claim is about the column as it was; once the column changes, it goes.
+    await apiCreateCard(request, col.id, '# Gamma');
+    await expectCardOrder(column, ['Gamma', 'Alpha', 'Beta']);
+    await expect(column.getByRole('status')).toHaveCount(0);
+  });
+
+  test('shows an error when the new order cannot be saved, and clears it on the next click', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `sort-links-fail-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const alpha = await apiCreateCard(request, col.id, '# Alpha');
+    const beta = await apiCreateCard(request, col.id, '# Beta');
+    await apiCreateLink(request, alpha.id, 'successor', beta.id);
+
+    // The server refuses the reorder once, then behaves.
+    let refuse = true;
+    await page.route('**/api/columns/*/cards/reorder', async (route) => {
+      if (refuse) {
+        refuse = false;
+        await route.fulfill({ status: 500, body: 'boom' });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await gotoBoardView(page, board.name);
+    const column = columnNamed(page, 'Todo');
+    await expectCardOrder(column, ['Beta', 'Alpha']);
+
+    await (await sortButton(column)).click();
+    await expect(column.getByRole('alert')).toContainText("Couldn't save the new order");
+    await expectCardOrder(column, ['Beta', 'Alpha']);
+
+    // The retry succeeds, and the stale error does not outlive it.
+    await (await sortButton(column)).click();
+    await expectCardOrder(column, ['Alpha', 'Beta']);
+    await expect(column.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('shows a distinct error when the links form a loop', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `sort-links-loop-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Todo');
+    const alpha = await apiCreateCard(request, col.id, '# Alpha');
+    const beta = await apiCreateCard(request, col.id, '# Beta');
+    await apiCreateLink(request, alpha.id, 'successor', beta.id);
+
+    // The API refuses to close a loop, so one can only come from rows written
+    // before that check existed. Stand one in by adding the reverse of the
+    // real link to what the board's link fetch returns.
+    await page.route(`**/api/boards/${board.name}/links`, async (route) => {
+      const response = await route.fetch();
+      const links = await response.json();
+      const [link] = links;
+      links.push({
+        ...link,
+        id: `${link.id}-reversed`,
+        predecessor_id: link.successor_id,
+        successor_id: link.predecessor_id,
+        predecessor_number: link.successor_number,
+        successor_number: link.predecessor_number,
+      });
+      await route.fulfill({ response, json: links });
+    });
+
+    await gotoBoardView(page, board.name);
+    const column = columnNamed(page, 'Todo');
+    await expectCardOrder(column, ['Beta', 'Alpha']);
+
+    await (await sortButton(column)).click();
+    await expect(column.getByRole('alert')).toHaveText(
+      "Can't sort: the links between 2 cards form a loop."
+    );
+    // Nothing was sent, so nothing moved and nothing was recorded.
+    await expectCardOrder(column, ['Beta', 'Alpha']);
+    const history = await apiBoardHistory(request, board.name);
+    expect(history.filter((e) => e.entity_type === 'card' && e.action === 'move')).toEqual([]);
+  });
 });
