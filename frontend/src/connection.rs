@@ -28,18 +28,29 @@
 //! `cargo test -p frontend` can exercise it on the host target where there is
 //! no DOM.
 //!
-//! ## The reload does not ask, and can discard an unsaved edit
+//! ## Two reloads that do not ask, and can discard an unsaved edit
 //!
-//! (1) and (2) meet in one window: a deploy lands while the user is typing.
-//! The stream dies, the tab goes `Disconnected`, the save is refused by
-//! [`crate::api`], so the new text exists only in this tab's signals — and
-//! within one heartbeat the reload takes it, with no prompt and nothing
-//! written anywhere. Nothing here defers the reload for an edit in progress,
-//! and that is the deliberate choice: a deploy reload that stops to ask, or
-//! that waits for a tab to go idle, is a tab still running code the server has
-//! moved past — which is the failure this module exists to end. The exposure
-//! is the seconds between a refused save and the next heartbeat, and it is the
-//! one case where this feature destroys user input.
+//! Both are deliberate, and both were decided in review on PR #73.
+//!
+//! **The deploy reload** (here). (1) and (2) meet in one window: a deploy
+//! lands while the user is typing. The stream dies, the tab goes
+//! `Disconnected`, the save is refused by [`crate::api`], so the new text
+//! exists only in this tab's signals — and within one heartbeat the reload
+//! takes it, with no prompt and nothing written anywhere. Nothing defers it
+//! for an edit in progress: a deploy reload that stops to ask, or that waits
+//! for a tab to go idle, is a tab still running code the server has moved
+//! past — which is the failure this module exists to end.
+//!
+//! **The resume reload** (`board_view`'s SSE `onopen`). A board whose stream
+//! has failed reloads when the stream comes back, because the backend keeps no
+//! event history and the board has missed events for good. This is the *more
+//! common* of the two: it follows any gap in the stream, not only a deploy — a
+//! laptop waking, a network switch, a proxy recycling the connection, a native
+//! `EventSource` retry — and each costs the page's UI state and any edit the
+//! offline guard refused during the gap. It is not rate-limited, so something
+//! in front of the app that closes streams on a fixed schedule would reload the
+//! tab on that schedule. Accepted in exchange for never reporting a stale board
+//! as connected; card #370 would replace it with an in-place resync.
 
 use leptos::prelude::*;
 use std::cell::Cell;
@@ -57,10 +68,18 @@ const HEALTHY_INTERVAL_MS: u32 = 10_000;
 /// at the browser's own network timeout, which is minutes.
 const HEARTBEAT_TIMEOUT_MS: u32 = 5_000;
 
-// A heartbeat must be over — answered or aborted — before the next one is due,
-// or a slow server would have two in flight and the older one's verdict could
-// land last. Checked at compile time, so retuning either constant cannot
-// quietly break the ordering.
+// A *scheduled* heartbeat must be over — answered or aborted — before the next
+// one is due, or a slow server would have two in flight and the older one's
+// verdict could land last. Checked at compile time, so retuning either constant
+// cannot quietly break that ordering.
+//
+// It orders the scheduled loop against itself only. An out-of-band probe
+// (`probe_now`, on an SSE error) runs alongside the loop, and nothing makes its
+// verdict lose to a newer one: a probe that hangs to its deadline can land
+// *after* a scheduled probe that succeeded, and mark a healthy tab offline
+// until the next heartbeat — at most `HEALTHY_INTERVAL_MS`, refusing saves
+// meanwhile, with no data at risk. Accepted in review on PR #73 over
+// sequence-numbering the probes.
 const _: () = assert!(HEARTBEAT_TIMEOUT_MS < HEALTHY_INTERVAL_MS);
 
 /// Ceiling for the backoff while the server is unreachable. Deliberately the

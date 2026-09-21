@@ -597,9 +597,10 @@ pub fn BoardView() -> AnyView {
             // edits on top of changes this tab never saw. So reload instead
             // (same URL) and let the page load the board afresh — the tab never
             // reports itself connected on stale data. The cost is the page's UI
-            // state, the same trade-off the deploy reload makes; an in-place
-            // resync that kept it would need a board-wide reconciler this view
-            // does not have.
+            // state and any edit refused during the gap, after *every* gap —
+            // including the ones the browser recovers from by itself — with no
+            // rate limit. A decided trade-off, set out in `crate::connection`'s
+            // module doc; card #370 would replace it with an in-place resync.
             if sse_lost.try_get_untracked().unwrap_or(false) {
                 leptos::logging::log!("event stream resumed after a gap — reloading to catch up");
                 let _ = window().location().reload();

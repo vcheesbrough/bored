@@ -334,6 +334,36 @@ test.describe('Disconnected UI', () => {
     await expect(page.locator('.column-name')).toHaveText(['Beta', 'Alpha']);
   });
 
+  test('catches up after a gap the browser recovers from by itself', async ({ page, request }) => {
+    // The common real-world gap — a network blip, a laptop waking — is not a
+    // CLOSED stream. It is a transport failure the browser retries on its own
+    // (`readyState` CONNECTING), so the reopen comes from the browser, not the
+    // client's supervisor. The board has missed events all the same, and must
+    // reload rather than resume.
+    const board = await apiCreateBoard(request, `native-retry-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, 'Original body');
+
+    // Aborted rather than 502'd: a failed connection is exactly what the
+    // browser retries by itself.
+    await page.route('**/api/events*', (route) => route.abort());
+    await gotoBoardView(page, board.name);
+    await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+
+    await apiUpdateCard(request, card.id, { body: 'Changed during the blip' });
+
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+    const resumed = page.waitForEvent('load', { timeout: 30000 });
+    await page.unroute('**/api/events*');
+    await resumed;
+
+    await expect(page.locator('.card-item').first()).toContainText('Changed during the blip');
+    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 15000 });
+    await page.waitForTimeout(3000);
+    expect(loads).toBe(1);
+  });
+
   test('catches up on what it missed before accepting saves again', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `offline-recovery-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
