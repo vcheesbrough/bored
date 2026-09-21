@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
-import { apiCreateBoard, apiCreateColumn, apiCreateCard, apiUpdateCard, gotoBoardView } from './helpers';
+import {
+  apiCreateBoard,
+  apiCreateColumn,
+  apiCreateCard,
+  apiUpdateCard,
+  gotoBoardView,
+  openChooser,
+} from './helpers';
 
 // ── #405 Deploy reload + disconnected UI ──────────────────────────────────
 //
@@ -407,6 +414,97 @@ test.describe('Disconnected UI', () => {
     // The rollback has its answer; the board must match it. A snapshot restore
     // would have put it back to [A, B, C].
     await expect(page.locator('.column-name')).toHaveText(await serverNames());
+  });
+
+  test("a reconnect timer from one board does not touch the next board's stream", async ({ page, request }) => {
+    // `BoardView` is reused across /boards/:slug, so a reconnect timer armed
+    // for board A's dead stream can still be pending after the user moves to
+    // board B. If it fired regardless, it would close B's healthy stream and
+    // open another — and since `close()` fires no error, the gap in between
+    // would not count as lost, so B would resume without catching up.
+    const boardA = await apiCreateBoard(request, `timer-a-${Date.now()}`);
+    const boardB = await apiCreateBoard(request, `timer-b-${Date.now()}`);
+
+    // Only A's stream fails; B's is untouched.
+    const streamsFor = { a: 0, b: 0 };
+    let aFailedThrice!: () => void;
+    const thirdFailure = new Promise<void>((resolve) => { aFailedThrice = resolve; });
+    page.on('request', (req) => {
+      const url = new URL(req.url());
+      if (url.pathname !== '/api/events') return;
+      if (url.searchParams.get('board_id') === boardA.id) streamsFor.a += 1;
+      if (url.searchParams.get('board_id') === boardB.id) streamsFor.b += 1;
+    });
+    let aFailures = 0;
+    page.on('response', (res) => {
+      const url = new URL(res.url());
+      if (url.pathname === '/api/events' && url.searchParams.get('board_id') === boardA.id) {
+        aFailures += 1;
+        if (aFailures === 3) aFailedThrice();
+      }
+    });
+    await page.route(`**/api/events?board_id=${boardA.id}`, (route) =>
+      route.fulfill({ status: 502, contentType: 'text/html', body: '<html>bad gateway</html>' }),
+    );
+
+    await gotoBoardView(page, boardA.name);
+    // Three failed connects: the reconnect delays so far are 1s and 2s, and
+    // the third failure arms a 4s timer — long enough to switch boards under.
+    // Anchored on the third 502 *response*, plus a beat for the browser to
+    // dispatch the error that arms the timer: switching before then would
+    // close A's stream with no timer pending, and the spec would pass vacuously.
+    await thirdFailure;
+    await page.waitForTimeout(300);
+
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+    await openChooser(page);
+    await page.locator('.chooser-board-row').filter({ hasText: boardB.name }).click();
+    await expect(page.locator('.navbar-board-btn')).toContainText(boardB.name);
+    // Wait for B's own stream, not for the badge: the badge already clears in
+    // the moment between boards, when no board is loaded, before B's stream
+    // has been opened at all.
+    await expect.poll(() => streamsFor.b, { timeout: 10000 }).toBe(1);
+    await expect(page.locator('.navbar-connection')).toHaveCount(0);
+
+    // Well past A's pending timer. B's stream must be the one it opened with.
+    await page.waitForTimeout(6000);
+    expect(streamsFor.b).toBe(1);
+    // A client-side switch throughout — a full load would reset everything
+    // and make the count meaningless.
+    expect(loads).toBe(0);
+    await expect(page.locator('.navbar-connection')).toHaveCount(0);
+  });
+
+  test('moving from a dead-stream board to one that does not load clears the badge', async ({ page, request }) => {
+    // `BoardView` is reused across /boards/:slug, so the unmount cleanup that
+    // forgets a dead stream never runs on a board-to-board move. A board that
+    // then fails to load opens no stream of its own to set things right.
+    const boardA = await apiCreateBoard(request, `dead-then-missing-a-${Date.now()}`);
+    const boardB = await apiCreateBoard(request, `dead-then-missing-b-${Date.now()}`);
+    await page.route('**/api/events*', (route) =>
+      route.fulfill({ status: 502, contentType: 'text/html', body: '<html>bad gateway</html>' }),
+    );
+    await gotoBoardView(page, boardA.name);
+    // Offline because of the stream alone: the heartbeat is healthy.
+    await expect(page.locator('.navbar-connection')).toBeVisible({ timeout: 15000 });
+
+    // The chooser lists B; delete B behind its back, then pick it. That is a
+    // client-side move to a board whose fetch now fails — the "deleted or
+    // mistyped board" case, reached the way a user reaches it.
+    await openChooser(page);
+    await expect(page.locator('.chooser-board-row').filter({ hasText: boardB.name })).toBeVisible();
+    const del = await request.delete(`/api/boards/${boardB.name}`);
+    expect(del.ok()).toBe(true);
+
+    let loads = 0;
+    page.on('load', () => { loads += 1; });
+    await page.locator('.chooser-board-row').filter({ hasText: boardB.name }).click();
+    await expect(page).toHaveURL(new RegExp(`/boards/${boardB.name}`));
+
+    // No board, no stream to be down: the badge follows the heartbeat alone.
+    await expect(page.locator('.navbar-connection')).toHaveCount(0, { timeout: 5000 });
+    expect(loads).toBe(0);
   });
 
   test('catches up after a gap the browser recovers from by itself', async ({ page, request }) => {

@@ -572,9 +572,19 @@ pub fn BoardView() -> AnyView {
 
     Effect::new(move |_| {
         let ulid = board_ulid.get();
-        // Subscribe to the reconnect counter so a bump re-runs this effect.
-        let _ = sse_reconnect.get();
+        // Subscribe to the reconnect counter so a bump re-runs this effect. Its
+        // value is this stream's generation: a reconnect timer records it, so a
+        // timer that outlives its stream cannot reopen the stream after it.
+        let generation = sse_reconnect.get();
         if ulid.is_empty() {
+            // No board, so no stream — and no stream cannot be a *dead* stream.
+            // Without this, moving from a board whose stream is down to one
+            // that never loads (deleted, mistyped) would keep the tab offline
+            // for as long as it stays there: `BoardView` is reused across
+            // `/boards/:slug`, so the unmount `stream_reset` never runs. During
+            // an ordinary switch this counts as connected only while no board
+            // is loaded, when there is nothing to write to.
+            crate::connection::stream_reset();
             return;
         }
         // A different board than the stream last served: its data was just
@@ -630,6 +640,8 @@ pub fn BoardView() -> AnyView {
         es.set_onopen(Some(onopen_cb.as_ref().unchecked_ref()));
 
         let es_for_error = es.clone();
+        // The board this stream serves, for the reconnect timer's check below.
+        let armed_board = ulid.clone();
         let onerror_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
             // Whatever kind of failure this is, the board is now stale: mark
             // the tab disconnected (which blocks mutations) and let the
@@ -657,11 +669,28 @@ pub fn BoardView() -> AnyView {
                 })
                 .unwrap_or(1);
             let delay = crate::connection::next_delay_ms(failures);
+            let armed_board = armed_board.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(delay).await;
-                // Bumping re-runs the effect: its cleanup closes this dead
-                // stream and its body opens a new one.
-                let _ = sse_reconnect.try_update(|n| *n = n.wrapping_add(1));
+                // Only reopen the stream this timer was armed for. `BoardView`
+                // is reused across `/boards/:slug`, so by the time the timer
+                // fires the user may be on another board with a healthy
+                // stream of its own — and bumping would close that one. A
+                // `close()` fires no `onerror`, so the gap would not count as
+                // lost, the reopened stream would resume without reloading,
+                // and whatever was broadcast in between would be missed on a
+                // tab reporting itself current. The generation check also
+                // stops a second timer on the same board reopening a stream a
+                // first timer already replaced.
+                let same_board = board_ulid
+                    .try_get_untracked()
+                    .is_some_and(|current| current == armed_board);
+                let same_stream = sse_reconnect.try_get_untracked() == Some(generation);
+                if same_board && same_stream {
+                    // Bumping re-runs the effect: its cleanup closes this dead
+                    // stream and its body opens a new one.
+                    let _ = sse_reconnect.try_update(|n| *n = n.wrapping_add(1));
+                }
             });
         });
         es.set_onerror(Some(onerror_cb.as_ref().unchecked_ref()));
