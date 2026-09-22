@@ -1,72 +1,45 @@
-use tracing_subscriber::{
-    EnvFilter, Layer, Registry, layer::SubscriberExt, util::SubscriberInitExt,
-};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::ObservabilityConfig;
 
-pub struct ObservabilityGuard {
-    _loki_task: Option<tokio::task::JoinHandle<()>>,
-}
+/// Initialise structured logging. Call once as the first statement in main().
+///
+/// Logs go to stdout and nowhere else. The homelab's Alloy collects the
+/// container's Docker log stream and ships it to Loki, attaching the labels
+/// from `deploy/docker-compose.yml` (`observability.service.name` →
+/// `service_name`, `observability.deployment.environment` →
+/// `deployment_environment`) plus `log_source="docker"`, and the image's OCI
+/// `version`/`revision` labels as per-line structured metadata. That is the one
+/// path in — the process used to *also* push straight to Loki's API via
+/// `tracing-loki`, which stored every line a second time under a differently
+/// labelled stream (card #412).
+///
+/// One consequence worth knowing: an event reaches Loki as soon as it is
+/// written to stdout, so there is no buffered backlog to lose at exit and no
+/// background task to keep alive — hence nothing to return. The old
+/// `ObservabilityGuard` existed only to own the `tracing-loki` push task.
+pub fn init(config: &ObservabilityConfig) {
+    // JSON in every environment, deployed or local. Alloy ships one Loki entry
+    // per physical line, and `pretty` spreads a single event over several of
+    // them; nothing reads this stream raw any more, so the old
+    // `environment == "production"` switch to `pretty` is deleted rather than
+    // re-pointed at the new `"prod"` value.
+    //
+    // `flatten_event` lifts the event's own fields to the top level of the JSON
+    // object instead of nesting them under `"fields"`, which is what makes them
+    // addressable as `| json | field="…"` in a Loki query.
+    let fmt = tracing_subscriber::fmt::layer().json().flatten_event(true);
 
-/// Initialise structured logging. Call once as the first statement in main(),
-/// with the already-loaded, already-validated `ObservabilityConfig`. The
-/// returned guard must be kept alive for the process lifetime — dropping it
-/// detaches the Loki background task (the task continues running). Shutdown
-/// ordering is not guaranteed, so buffered log events may be lost at process exit.
-pub fn init(config: &ObservabilityConfig) -> ObservabilityGuard {
-    // Burned-in release tag (see shared::app_version); APP_VERSION can override.
-    let version =
-        crate::config::app_version_override().unwrap_or_else(|| shared::app_version().to_string());
+    // `try_new` rather than `new`: an unparseable filter directive is a config
+    // typo, not a reason to refuse to start, so fall back to `info`. (Only a
+    // malformed `observability.log-level` reaches here — the leaf itself is
+    // required, and validated as non-empty at load time.)
+    let filter = EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // Each layer gets its own EnvFilter via .with_filter() so that
-    // register_callsite interest is correctly computed per-layer. A shared
-    // EnvFilter pushed into the Vec doesn't work: Vec<Layer> takes the most
-    // permissive register_callsite interest across all sub-layers, so the fmt
-    // layer's Interest::always() would bypass the filter entirely.
-    let make_filter =
-        || EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
-
-    // Console layer: JSON in production, pretty otherwise
-    let fmt: Box<dyn Layer<Registry> + Send + Sync> = if config.environment == "production" {
-        Box::new(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .flatten_event(true)
-                .with_filter(make_filter()),
-        )
-    } else {
-        Box::new(
-            tracing_subscriber::fmt::layer()
-                .pretty()
-                .with_filter(make_filter()),
-        )
-    };
-    layers.push(fmt);
-
-    // Loki layer. `config.loki_url` is already a validated `url::Url` — a
-    // malformed value is rejected at config load time (fail-closed startup
-    // error), not here.
-    let loki_task = if let Some(url) = config.loki_url.clone() {
-        let (loki_layer, controller) = tracing_loki::builder()
-            .label("app", &config.service_name)
-            .expect("observability.service-name contains characters invalid in a Loki label value")
-            .label("env", &config.environment)
-            .expect("observability.environment contains characters invalid in a Loki label value")
-            .label("version", version)
-            .unwrap()
-            .build_url(url)
-            .expect("failed to build Loki layer");
-        layers.push(Box::new(loki_layer.with_filter(make_filter())));
-        Some(tokio::spawn(controller))
-    } else {
-        None
-    };
-
-    tracing_subscriber::registry().with(layers).init();
-
-    ObservabilityGuard {
-        _loki_task: loki_task,
-    }
+    // A single layer, so the filter goes on the subscriber as a whole. (With
+    // several layers it would have to be attached per-layer via `.with_filter()`
+    // instead: a `Vec<Layer>` reports the most permissive `register_callsite`
+    // interest across its members, and the fmt layer's `Interest::always()`
+    // would then bypass a subscriber-level filter entirely.)
+    tracing_subscriber::registry().with(fmt).with(filter).init();
 }

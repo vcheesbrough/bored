@@ -195,6 +195,15 @@ test.describe('auth — public routes', () => {
     const ctx = await request.newContext(unauthOptions);
     const res = await ctx.get('/api/info');
     expect(res.status()).toBe(200);
+    // The shape the SPA depends on, asserted against the real backend rather
+    // than a route mock. `env` is the deployment proper since card #412 — the
+    // compose stack sets BORED__OBSERVABILITY__ENVIRONMENT=test — and `branch`
+    // rides alongside it, absent here because no branch is configured. It is
+    // this absence that makes the watermark render as a bare version.
+    const info = await res.json();
+    expect(info.env).toBe('test');
+    expect(info.branch ?? null).toBeNull();
+    expect(typeof info.version).toBe('string');
     await ctx.dispose();
   });
 

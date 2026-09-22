@@ -37,8 +37,70 @@ async fn info_route_returns_version_and_env() {
     // APP_VERSION unset — which is how the image runs — the two are the same
     // string from the same build, and that is what makes the check quiet.
     assert_eq!(info.version, shared::app_version());
-    // `test_app()` passes "dev" as the environment.
+    // `test_app()` passes "dev" as the environment, with no branch.
     assert_eq!(info.env, "dev");
+    // A deployment with no branch reports none, rather than an empty string the
+    // watermark would then have to special-case (card #412).
+    assert_eq!(info.branch, None);
+}
+
+// The prod shape: environment `prod`, no branch. Pins that `env` carries the
+// environment proper — before card #412 prod reported the string "production"
+// and dev reported its branch name here.
+#[tokio::test]
+#[serial]
+async fn info_route_reports_prod_environment_without_a_branch() {
+    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let state = AppState::new(db);
+    let router = app(state, "./dist", DeploymentInfo::new("prod", None)).await;
+    let server = TestServer::new(router).unwrap();
+    let resp = server.get("/api/info").await;
+    resp.assert_status_ok();
+    let info: shared::AppInfo = resp.json();
+    assert_eq!(info.env, "prod");
+    assert_eq!(info.branch, None);
+}
+
+// The dev shape: the environment stays `dev` across every branch — that is the
+// whole point of the split — while the branch rides alongside it for the board
+// watermark.
+#[tokio::test]
+#[serial]
+async fn info_route_reports_branch_alongside_dev_environment() {
+    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let state = AppState::new(db);
+    let router = app(
+        state,
+        "./dist",
+        DeploymentInfo::new(
+            "dev",
+            Some("feat/iteration-61-loki-stdout-labels".to_string()),
+        ),
+    )
+    .await;
+    let server = TestServer::new(router).unwrap();
+    let resp = server.get("/api/info").await;
+    resp.assert_status_ok();
+    let info: shared::AppInfo = resp.json();
+    assert_eq!(info.env, "dev");
+    // Reported verbatim; trimming the `feat/` prefix is the frontend's job
+    // (`watermark_label`), not the API's.
+    assert_eq!(
+        info.branch.as_deref(),
+        Some("feat/iteration-61-loki-stdout-labels")
+    );
+}
+
+// A bundle built before `branch` existed can be talking to a server built
+// after it, and vice versa — the reload-on-deploy poll is exactly the request
+// that spans the skew window. Deserializing a body with no `branch` key must
+// therefore succeed rather than stall that poll.
+#[test]
+fn app_info_without_a_branch_field_still_deserializes() {
+    let info: shared::AppInfo =
+        serde_json::from_str(r#"{"version":"1.60.0","env":"production"}"#).expect("valid AppInfo");
+    assert_eq!(info.version, "1.60.0");
+    assert_eq!(info.branch, None);
 }
 
 #[tokio::test]
@@ -51,9 +113,9 @@ async fn info_route_uses_app_version_env_and_configured_environment() {
     unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
     let db = db::connect_mem().await.expect("failed to connect mem db");
     let state = AppState::new(db);
-    // `environment` is threaded through `app()` directly (from
+    // The deployment identity is threaded through `app()` directly (from
     // `ObservabilityConfig` in production) rather than a raw env var.
-    let router = app(state, "./dist", "production").await;
+    let router = app(state, "./dist", DeploymentInfo::new("prod", None)).await;
     let server = TestServer::new(router).unwrap();
     let resp = server.get("/api/info").await;
     resp.assert_status_ok();
@@ -66,7 +128,7 @@ async fn info_route_uses_app_version_env_and_configured_environment() {
     unsafe { std::env::remove_var("APP_VERSION") };
     let info: shared::AppInfo = serde_json::from_str(&body).expect("valid AppInfo JSON");
     assert_eq!(info.version, "1.2.3");
-    assert_eq!(info.env, "production");
+    assert_eq!(info.env, "prod");
 }
 
 // Verifies that a deep-link path (e.g. /boards/abc) returns 200 with index.html
@@ -79,7 +141,12 @@ async fn spa_deep_link_returns_index_html() {
     let state = AppState::new(db);
     // `static_dir` is threaded through `app()` directly (from
     // `ServerConfig` in production) rather than a raw env var.
-    let router = app(state, dir.path().to_str().unwrap(), "dev").await;
+    let router = app(
+        state,
+        dir.path().to_str().unwrap(),
+        DeploymentInfo::new("dev", None),
+    )
+    .await;
     let server = TestServer::new(router).unwrap();
     let resp = server.get("/boards/some-deep-link").await;
     resp.assert_status(StatusCode::OK);
@@ -102,7 +169,12 @@ async fn spa_document_is_served_with_cache_control_no_cache() {
     std::fs::write(dir.path().join("app-abc123.js"), b"console.log(1)").unwrap();
     let db = db::connect_mem().await.expect("failed to connect mem db");
     let state = AppState::new(db);
-    let router = app(state, dir.path().to_str().unwrap(), "dev").await;
+    let router = app(
+        state,
+        dir.path().to_str().unwrap(),
+        DeploymentInfo::new("dev", None),
+    )
+    .await;
     let server = TestServer::new(router).unwrap();
 
     // Served by ServeDir itself.

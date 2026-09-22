@@ -12,7 +12,7 @@ A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, SurrealD
 | `surrealdb` (embedded, `kv-surrealkv`) | Database — no separate container |
 | `jsonwebtoken` + `reqwest` | OIDC ID-token / access-token validation against cached JWKS |
 | `axum-extra` (cookies) | httpOnly auth cookie handling |
-| `tracing` + `tracing-loki` | Structured logs, shipped to Loki in prod |
+| `tracing` + `tracing-subscriber` | Structured JSON logs to stdout, collected into Loki |
 | `rmcp` | MCP server SDK (used by `mcp/`) |
 
 ## Workspace layout
@@ -112,21 +112,25 @@ Two environments share the same compose file:
 | dev | `https://bored-dev.desync.link` | `bored-dev` | `bored-dev-db` | `bored:dev:access` |
 | prod | `https://bored.desync.link` | `bored` | `bored-prod-db` | `bored:prod:access` |
 
-The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Docker probes `GET /health` on the internal listener every 10 seconds, allowing only that loopback probe to accept the self-signed certificate. After a 15-second startup grace period, three consecutive 3-second failures mark the container unhealthy. Logs are shipped to Loki at `monitor-loki:3100`.
+The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Docker probes `GET /health` on the internal listener every 10 seconds, allowing only that loopback probe to accept the self-signed certificate. After a 15-second startup grace period, three consecutive 3-second failures mark the container unhealthy. Logs go to stdout as JSON; the homelab's Alloy collects the container's Docker log stream into Loki, labelling it from the `observability.service.name` / `observability.deployment.environment` labels in `deploy/docker-compose.yml`.
 
 ### Environment variables
 
 The full set lives in [`deploy/docker-compose.yml`](deploy/docker-compose.yml):
 
 ```
-APP_ENV                          # "production" or the dev branch name (deploy-script-facing name;
-                                  # forwarded into the container as BORED__OBSERVABILITY__ENVIRONMENT)
+APP_ENV                          # "dev" or "prod" (deploy-script-facing name; forwarded into the
+                                  # container as BORED__OBSERVABILITY__ENVIRONMENT, and set on it as
+                                  # the observability.deployment.environment label Alloy reads)
+APP_BRANCH                       # dev only: the branch this deploy was built from. Reported by
+                                  # /api/info for the board watermark; kept out of APP_ENV so it
+                                  # does not start a new Loki stream set per push
 APP_VERSION                      # optional override; leave unset (see "Version and reload" below)
 SOVEREIGN_CONFIG_ACCESS_URL_FILE # sourced from bored_{dev,prod}_sovereign_access_url,
                                   # materialised as a file (not left in the container's process env)
 ```
 
-Everything else — OIDC settings, the session cookie key, log level, the Loki endpoint, the database
+Everything else — OIDC settings, the session cookie key, log level, the database
 path — is resolved at startup from a layered configuration composition root
 (`backend/src/config.rs`), **not** individual compose env vars. See
 [Runtime configuration](#runtime-configuration) below.
@@ -169,7 +173,7 @@ Each config group is written to its own sub-branch:
                                           # redirect-uri, required-scope, end-session-url,
                                           # mcp/issuer-url, mcp/client-id
 /bored/{dev,prod}/server/session         # cookie-key (secret) — required whenever oidc is configured
-/bored/{dev,prod}/server/observability   # environment, log-level, loki-url, service-name
+/bored/{dev,prod}/server/observability   # environment, log-level
 ```
 
 `server/*` (`http-port`, `tls-cert`, `tls-key`, `static-dir`, `database-path`) is **never** stored in

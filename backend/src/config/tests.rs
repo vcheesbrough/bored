@@ -267,40 +267,51 @@ fn observability_defaults_apply_when_only_environment_is_set() {
 
     assert_eq!(observability.environment, "dev");
     assert_eq!(observability.log_level, "info");
-    assert_eq!(observability.service_name, "bored");
-    assert!(observability.loki_url.is_none());
+    // No branch unless a deploy supplies one — a local run and prod both leave
+    // it unset.
+    assert_eq!(observability.branch, None);
 }
 
 #[test]
 fn observability_environment_overrides_defaults() {
     let config = cfg(&[
-        ("BORED__OBSERVABILITY__ENVIRONMENT", "production"),
+        ("BORED__OBSERVABILITY__ENVIRONMENT", "prod"),
         ("BORED__OBSERVABILITY__LOG-LEVEL", "warn"),
-        ("BORED__OBSERVABILITY__SERVICE-NAME", "bored-prod"),
-        ("BORED__OBSERVABILITY__LOKI-URL", "http://monitor-loki:3100"),
     ]);
     let observability: ObservabilityConfig =
         load_group(&config, "observability").expect("should load");
 
-    assert_eq!(observability.environment, "production");
+    assert_eq!(observability.environment, "prod");
     assert_eq!(observability.log_level, "warn");
-    assert_eq!(observability.service_name, "bored-prod");
-    assert!(observability.loki_url.is_some());
 }
 
 #[test]
-fn observability_blank_loki_url_disables_export() {
-    let config = cfg(&[("BORED__OBSERVABILITY__LOKI-URL", "")]);
+fn observability_branch_is_read_from_the_env_layer() {
+    // `.woodpecker/build.yml` passes the branch only on a dev deploy, via
+    // `APP_BRANCH` → `BORED__OBSERVABILITY__BRANCH`, so it arrives on this
+    // layer rather than from sovereign-config (where a per-branch value would
+    // have to be rewritten on every push).
+    let config = cfg(&[(
+        "BORED__OBSERVABILITY__BRANCH",
+        "feat/iteration-61-loki-stdout-labels",
+    )]);
     let observability: ObservabilityConfig =
         load_group(&config, "observability").expect("should load");
-    assert!(observability.loki_url.is_none());
+    assert_eq!(
+        observability.branch.as_deref(),
+        Some("feat/iteration-61-loki-stdout-labels")
+    );
 }
 
 #[test]
-fn observability_malformed_loki_url_fails_to_deserialize() {
-    let config = cfg(&[("BORED__OBSERVABILITY__LOKI-URL", "not a url")]);
-    load_group::<ObservabilityConfig>(&config, "observability")
-        .expect_err("malformed URL should be rejected");
+fn observability_blank_branch_is_none() {
+    // Compose passes `${APP_BRANCH:-}`, so a prod deploy — which sets no
+    // branch — delivers the key as an empty string rather than omitting it.
+    // That must read as "no branch", not as a branch named "".
+    let config = cfg(&[("BORED__OBSERVABILITY__BRANCH", "")]);
+    let observability: ObservabilityConfig =
+        load_group(&config, "observability").expect("should load");
+    assert_eq!(observability.branch, None);
 }
 
 #[test]
@@ -495,15 +506,11 @@ fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
         &cfg(&[
             ("BORED__OBSERVABILITY__ENVIRONMENT", "dev"),
             ("BORED__OBSERVABILITY__LOG_LEVEL", "debug"),
-            ("BORED__OBSERVABILITY__SERVICE_NAME", "bored-snake"),
-            ("BORED__OBSERVABILITY__LOKI_URL", "http://alloy:3100/"),
         ]),
         "observability",
     )
     .expect("snake_case observability leaves should load");
     assert_eq!(observability.log_level, "debug");
-    assert_eq!(observability.service_name, "bored-snake");
-    assert!(observability.loki_url.is_some());
 
     let server: ServerConfig = load_group(
         &cfg(&[
@@ -620,11 +627,13 @@ fn env_layer_overrides_the_defaults_layer_on_the_same_kebab_key() {
     // holds if both layers produce the identical kebab-case key.
     let config = cfg(&[
         ("BORED__OBSERVABILITY__ENVIRONMENT", "dev"),
-        ("BORED__OBSERVABILITY__SERVICE-NAME", "overridden"),
+        ("BORED__OBSERVABILITY__LOG-LEVEL", "warn"),
     ]);
     let observability: ObservabilityConfig = load_group(&config, "observability").expect("loads");
 
-    assert_eq!(observability.service_name, "overridden");
+    // `warn` is not the built-in default (`info`), so this can only pass if the
+    // env layer's key landed on the same leaf the defaults layer wrote.
+    assert_eq!(observability.log_level, "warn");
 }
 
 #[test]
@@ -650,17 +659,17 @@ fn sovereign_layer_supplies_leaf_with_no_env_override() {
     let defaults_only: ObservabilityConfig =
         load_group(&cfg(&env), "observability").expect("loads");
     let with_sovereign: ObservabilityConfig = load_group(
-        &cfg_with_sovereign(&[("observability.service-name", "from-sovereign")], &env),
+        &cfg_with_sovereign(&[("observability.log-level", "trace")], &env),
         "observability",
     )
     .expect("loads");
 
     assert_eq!(
-        with_sovereign.service_name, "from-sovereign",
+        with_sovereign.log_level, "trace",
         "the sovereign leaf must beat the built-in default"
     );
     assert_ne!(
-        defaults_only.service_name, with_sovereign.service_name,
+        defaults_only.log_level, with_sovereign.log_level,
         "the fixture must differ from the default, or this proves nothing"
     );
 }
@@ -670,15 +679,15 @@ fn sovereign_layer_supplies_leaf_with_no_env_override() {
 #[test]
 fn env_layer_still_overrides_the_sovereign_leaf() {
     let config = cfg_with_sovereign(
-        &[("observability.service-name", "from-sovereign")],
+        &[("observability.log-level", "trace")],
         &[
             ("BORED__OBSERVABILITY__ENVIRONMENT", "dev"),
-            ("BORED__OBSERVABILITY__SERVICE_NAME", "from-env"),
+            ("BORED__OBSERVABILITY__LOG_LEVEL", "warn"),
         ],
     );
     let observability: ObservabilityConfig = load_group(&config, "observability").expect("loads");
 
-    assert_eq!(observability.service_name, "from-env");
+    assert_eq!(observability.log_level, "warn");
 }
 
 // ---------------------------------------------------------------------------

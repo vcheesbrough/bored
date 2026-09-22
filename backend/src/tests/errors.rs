@@ -231,7 +231,8 @@ async fn a_client_error_is_not_logged() {
 async fn restoring_a_board_whose_name_was_taken_is_a_conflict() {
     let db = db::connect_mem().await.expect("mem db");
     let state = AppState::new(db.clone());
-    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
 
     let board: shared::Board = server
         .post("/api/boards")
@@ -284,7 +285,8 @@ async fn restoring_a_board_whose_name_was_taken_is_a_conflict() {
 async fn a_failing_request_logs_its_method_and_path() {
     let db = db::connect_mem().await.expect("mem db");
     let state = AppState::new(db.clone());
-    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
     let (_board, column) = setup_board_and_column(&server).await;
     server
         .post(&format!("/api/columns/{}/cards", column.id))

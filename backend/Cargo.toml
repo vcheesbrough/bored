@@ -23,7 +23,6 @@ shared.workspace = true
 tracing.workspace = true
 # `json` on top of the workspace features: the backend emits structured logs.
 tracing-subscriber = { workspace = true, features = ["json"] }
-tracing-loki = { version = "0.2", features = ["compat-0-2-1"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "fs"] }
 # BroadcastStream wraps a broadcast::Receiver as a futures Stream so we can

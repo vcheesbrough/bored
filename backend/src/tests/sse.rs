@@ -29,7 +29,8 @@ async fn mutations_emit_sse_events() {
     // Subscribe *before* making requests so we don't miss any events.
     let mut rx = state.events.subscribe();
 
-    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
 
     // CREATE board → BoardCreated
     let board: shared::Board = server
@@ -271,7 +272,8 @@ async fn server_with_events() -> (
     // `Sender` is a cheap handle onto the same channel; the router takes
     // ownership of `state`, so keep our own copy of the sender first.
     let events = state.events.clone();
-    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
     (server, events)
 }
 

@@ -34,7 +34,7 @@ use std::sync::Arc;
 use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rust TLS)
 use routes::boards::AppState;
 
-use crate::app::app;
+use crate::app::{DeploymentInfo, app};
 use crate::auth::{AuthConfig, AuthSessionManager, JwksCache};
 
 // `#[tokio::main]` is a macro that sets up the Tokio async runtime and runs
@@ -64,8 +64,9 @@ async fn main() -> Result<(), config::ConfigError> {
     let server = config::load_group::<config::ServerConfig>(&cfg, "server")?;
     drop(cfg);
 
-    // Initialise structured logging / tracing (returns a guard that flushes on drop).
-    let _obs = observability::init(&observability);
+    // Initialise structured logging. Stdout only — the homelab's Alloy collects
+    // it from Docker, so there is no exporter to keep alive and no guard.
+    observability::init(&observability);
 
     let db = db::connect_persistent(&server.database_path)
         .await
@@ -100,7 +101,12 @@ async fn main() -> Result<(), config::ConfigError> {
         AppState::new(db)
     };
 
-    let app = app(state, &server.static_dir, &observability.environment).await;
+    let app = app(
+        state,
+        &server.static_dir,
+        DeploymentInfo::new(&observability.environment, observability.branch.clone()),
+    )
+    .await;
 
     // TLS pair present ⇒ serve HTTPS on :443. Otherwise plain HTTP on
     // `server.http-port` (dev mode).
