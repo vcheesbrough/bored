@@ -28,7 +28,7 @@ fn cfg(entries: &[(&str, &str)]) -> Config {
 /// As [`cfg`], but with a stand-in for the sovereign-config layer between the
 /// defaults and the env source — the same order, and the same `Trimmed` wrapper,
 /// that `build_config` uses when an access URL is present. Keys are the canonical
-/// dotted paths the real source emits (`observability.service-name`).
+/// dotted paths the real source emits (`observability.log-level`).
 fn cfg_with_sovereign(sovereign: &[(&str, &str)], env: &[(&str, &str)]) -> Config {
     let mut layer = Config::builder();
     for (key, value) in sovereign {
@@ -323,6 +323,54 @@ fn observability_blank_environment_override_is_rejected_by_validate() {
         error.to_string(),
         "invalid config `observability.environment`: must not be empty"
     );
+}
+
+// ---------------------------------------------------------------------------
+// blank_as_none over a fallible type
+// ---------------------------------------------------------------------------
+
+/// A stand-in group for the one thing no live config leaf exercises any more.
+///
+/// `blank_as_none` is generic over `T: FromStr` and maps a parse failure to a
+/// serde error, but since card #412 removed `observability.loki-url` every real
+/// caller is an `Option<String>` — and `String: FromStr` has `Err = Infallible`,
+/// so none of them can reach that arm. The bound is kept deliberately (#415
+/// brings typed optional leaves back for the OTLP endpoint), so the coercion
+/// path is kept covered here rather than left to rot until then.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct TypedOptionalLeaf {
+    #[serde(default, deserialize_with = "blank_as_none")]
+    endpoint: Option<url::Url>,
+}
+
+#[test]
+fn blank_as_none_coerces_a_fallible_type() {
+    let config = cfg(&[("BORED__TYPED__ENDPOINT", "http://alloy:3100/")]);
+    let group: TypedOptionalLeaf = config.get("typed").expect("should deserialize");
+    assert_eq!(
+        group.endpoint.as_ref().map(url::Url::as_str),
+        Some("http://alloy:3100/")
+    );
+}
+
+#[test]
+fn blank_as_none_treats_a_blank_fallible_leaf_as_absent() {
+    // The blank case short-circuits before `parse`, which is what lets a leaf be
+    // "configured to nothing" without tripping the type's own parser.
+    let config = cfg(&[("BORED__TYPED__ENDPOINT", "   ")]);
+    let group: TypedOptionalLeaf = config.get("typed").expect("should deserialize");
+    assert_eq!(group.endpoint, None);
+}
+
+#[test]
+fn blank_as_none_rejects_a_malformed_fallible_leaf() {
+    // The `map_err` arm: a present but unparseable value is a fail-closed
+    // startup error, not a silent `None`.
+    let config = cfg(&[("BORED__TYPED__ENDPOINT", "not a url")]);
+    config
+        .get::<TypedOptionalLeaf>("typed")
+        .expect_err("a malformed value should be rejected, not dropped");
 }
 
 // ---------------------------------------------------------------------------
