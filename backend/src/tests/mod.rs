@@ -31,7 +31,7 @@ use axum_test::TestServer;
 async fn test_app() -> TestServer {
     let db = db::connect_mem().await.expect("failed to connect mem db");
     let state = AppState::new(db);
-    let router = app(state, "./dist", "dev").await;
+    let router = app(state, "./dist", DeploymentInfo::new("dev", None)).await;
     TestServer::new(router).unwrap()
 }
 

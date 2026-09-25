@@ -236,9 +236,15 @@ steps:
       commands:
         - *docker-login
         - docker volume create bored-dev-db
+        # APP_ENV is the literal `dev`, not the branch it used to be: it becomes
+        # the `deployment_environment` Loki label, and a per-branch value there
+        # started a fresh stream set on every push with no single value meaning
+        # "dev". The branch rides alongside in APP_BRANCH, which only
+        # `/api/info` and the board watermark read. Card #412.
         - |
           BORED_IMAGE_TAG=$(cat .release-tag) \
-          APP_ENV=$$CI_COMMIT_BRANCH BORED_HOST=bored-dev.desync.link \
+          APP_ENV=dev APP_BRANCH=$$CI_COMMIT_BRANCH \
+          BORED_HOST=bored-dev.desync.link \
           BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
           docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
     when:
@@ -271,9 +277,13 @@ steps:
     commands:
       - *docker-login
       - docker volume create bored-prod-db
+      # `prod`, not `production`: the value is the `deployment_environment` Loki
+      # label and matches what the other homelab apps use. No APP_BRANCH — prod
+      # is not built from a branch anyone needs to see, and compose's
+      # `${APP_BRANCH:-}` turns its absence into "no branch". Card #412.
       - |
         BORED_IMAGE_TAG=$(cat .release-tag) \
-        APP_ENV=production BORED_HOST=bored.desync.link \
+        APP_ENV=prod BORED_HOST=bored.desync.link \
         BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db \
         docker compose -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 

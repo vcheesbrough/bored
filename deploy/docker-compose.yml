@@ -13,7 +13,18 @@ services:
       # Container-internal key stays `BORED__OBSERVABILITY__ENVIRONMENT`; the
       # deploy-script-facing variable name stays `APP_ENV` (`.woodpecker/build.yml`
       # sets it per environment, unchanged by card #288).
+      #
+      # Since card #412 this is `dev` or `prod` — the environment proper, not the
+      # branch dev used to pass. The same variable feeds the
+      # `observability.deployment.environment` label below, so what the process
+      # believes it is and what Loki labels its logs cannot disagree.
       - BORED__OBSERVABILITY__ENVIRONMENT=${APP_ENV:?APP_ENV is required}
+      # The branch a dev deploy was built from, kept separate from the
+      # environment above so it does not start a new Loki stream set on every
+      # push. Only `/api/info` reads it, to watermark the board with the branch
+      # it is serving. Empty on prod (and read as "no branch" — see
+      # `blank_as_none` in backend/src/config.rs).
+      - BORED__OBSERVABILITY__BRANCH=${APP_BRANCH:-}
       # Optional runtime override; when unset the backend reports the RELEASE_TAG
       # burned into the image at build time (shared::app_version). Deliberately
       # NOT part of the BORED__* layered config — see backend/src/config.rs.
@@ -36,6 +47,22 @@ services:
     networks:
       - proxy-backend
     labels:
+      # How the homelab's Alloy labels this container's logs in Loki (card #412;
+      # the contract is mini-config/monitoring-stack/OBSERVABILITY.md).
+      #
+      # `service_name` is `bored` in both environments — the deployment is told
+      # apart by `deployment_environment`, not by a different service name, so a
+      # single query or dashboard covers both. Without these two labels Alloy
+      # falls back to the container name, which made dev `bored-dev` and left it
+      # with no environment label at all.
+      #
+      # Build identity is deliberately absent here: Alloy reads the image's OCI
+      # `org.opencontainers.image.version`/`.revision` labels (set in
+      # .woodpecker/build.yml) and attaches them as per-line structured
+      # metadata, so a deploy adds lines to the existing streams instead of
+      # starting a new set. Filter a build with `| image_version="<tag>"`.
+      - observability.service.name=bored
+      - observability.deployment.environment=${APP_ENV:?APP_ENV is required}
       - traefik.enable=true
       - traefik.http.routers.${BORED_CONTAINER_NAME}.entrypoints=websecure
       - traefik.http.routers.${BORED_CONTAINER_NAME}.rule=Host(`${BORED_HOST:?BORED_HOST is required}`)

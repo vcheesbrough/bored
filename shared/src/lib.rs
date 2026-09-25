@@ -190,10 +190,25 @@ pub struct MoveCardRequest {
     pub position: i32,
 }
 
+/// Body of the public `GET /api/info`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInfo {
     pub version: String,
+    /// Which deployment answered: `dev` or `prod` (`test` under e2e). Since
+    /// card #412 this is the environment proper — it used to carry the branch
+    /// name on dev and the string `production` on prod.
     pub env: String,
+    /// Branch a dev deployment was built from; absent in prod and locally.
+    ///
+    /// `#[serde(default)]` covers the version-skew window either way: the
+    /// browser polls `/api/info` to notice a redeploy and reload (see
+    /// `frontend/src/connection.rs`), so a bundle built before this field
+    /// existed can be talking to a server built after it, or the reverse. An
+    /// older bundle ignores the extra key; a newer one reading an older
+    /// server's reply gets `None` rather than a deserialization error that
+    /// would stall the very poll meant to replace it.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// Public-facing user identity returned by `GET /api/me`.

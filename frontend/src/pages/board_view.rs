@@ -47,6 +47,32 @@ fn column_ghost_side(
     }
 }
 
+/// The navbar watermark: the running version, plus the branch on a deployment
+/// that has one.
+///
+/// `branch` comes straight from `/api/info`, which reports it verbatim
+/// (`feat/iteration-61-loki-stdout-labels`). The first `/`-separated segment is
+/// dropped: every branch here carries a `feat/`-style prefix that is the same
+/// across dev deployments and would just crowd the corner of the navbar. Only
+/// that first segment goes, so a slug containing its own slash keeps the rest.
+///
+/// Prod and local runs report no branch and get the bare version. Before card
+/// #412 this was decided by comparing `/api/info`'s `env` against the literal
+/// `"production"`; `env` now carries `dev`/`prod`, and the presence of a branch
+/// is what distinguishes them here.
+fn watermark_label(version: &str, branch: Option<&str>) -> String {
+    match branch.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(branch) => {
+            // `SplitN` is not double-ended, so this is `last()` rather than
+            // `next_back()`. It yields the whole string when there is no
+            // separator, so an unprefixed branch name survives intact.
+            let short = branch.splitn(2, '/').last().unwrap_or(branch);
+            format!("v{version} {short}")
+        }
+        None => format!("v{version}"),
+    }
+}
+
 #[component]
 fn ColumnGhost(
     columns: RwSignal<Vec<RwSignal<shared::Column>>>,
@@ -117,10 +143,10 @@ pub fn BoardView() -> AnyView {
     let loading = RwSignal::new(true);
     let search_query = RwSignal::new(String::new());
 
-    // Deployment environment from `/api/info` ("production", or a branch name
-    // on dev). Fetched once: it cannot change without a redeploy, and a
-    // redeploy reloads the tab (see `crate::connection`).
-    let environment = RwSignal::new(String::new());
+    // Branch this deployment was built from, from `/api/info` — `None` in prod
+    // and locally, `Some` on dev. Fetched once: it cannot change without a
+    // redeploy, and a redeploy reloads the tab (see `crate::connection`).
+    let branch: RwSignal<Option<String>> = RwSignal::new(None);
     // The version half of the watermark comes from the heartbeat, so it tracks
     // what the server is actually running rather than freezing at whatever was
     // true when this tab mounted.
@@ -129,15 +155,7 @@ pub fn BoardView() -> AnyView {
         let version = server_version
             .get()
             .unwrap_or_else(|| shared::app_version().to_string());
-        let env = environment.get();
-        if env.is_empty() || env == "production" {
-            format!("v{version}")
-        } else {
-            // Dev environments are named after the branch they were built
-            // from, sometimes with a `refs/heads/`-style prefix.
-            let branch = env.splitn(2, '/').last().unwrap_or(&env).to_string();
-            format!("v{version} {branch}")
-        }
+        watermark_label(&version, branch.get().as_deref())
     });
 
     // ── Context signals ────────────────────────────────────────────────────
@@ -520,13 +538,15 @@ pub fn BoardView() -> AnyView {
         link_index.remove_touching(&card_id);
     });
 
-    // ── Watermark environment fetch ────────────────────────────────────────
-    // Only the environment: the version half of the label is fed by the
-    // connection heartbeat, which re-reads `/api/info` on a timer.
+    // ── Watermark branch fetch ─────────────────────────────────────────────
+    // Only the branch: the version half of the label is fed by the connection
+    // heartbeat, which re-reads `/api/info` on a timer. `info.env` is the
+    // deployment (`dev`/`prod`) and the watermark no longer keys off it — a
+    // prod deployment is simply the one that reports no branch.
     Effect::new(move |_| {
         wasm_bindgen_futures::spawn_local(async move {
             if let Ok(info) = crate::api::fetch_app_info().await {
-                environment.set(info.env);
+                branch.set(info.branch);
             }
         });
     });
@@ -1009,4 +1029,50 @@ pub fn BoardView() -> AnyView {
         <HistoryPanel board_slug=board_name board_ulid=board_ulid sse_event=sse_event />
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::watermark_label;
+
+    // Prod and local runs report no branch at all (card #412): the watermark is
+    // then just the version, with no trailing space to give it away.
+    #[test]
+    fn no_branch_renders_version_only() {
+        assert_eq!(watermark_label("1.61.0", None), "v1.61.0");
+    }
+
+    // The dev case the split exists for. `env` is "dev" on every branch now, so
+    // this string is the only thing that says which branch is deployed.
+    #[test]
+    fn branch_is_appended_without_its_prefix() {
+        assert_eq!(
+            watermark_label("1.61.0", Some("feat/iteration-61-loki-stdout-labels")),
+            "v1.61.0 iteration-61-loki-stdout-labels"
+        );
+    }
+
+    // `main` has no prefix to strip, and must not come out empty.
+    #[test]
+    fn unprefixed_branch_survives_intact() {
+        assert_eq!(watermark_label("1.61.0", Some("main")), "v1.61.0 main");
+    }
+
+    // Only the first segment goes, so a slug containing a slash keeps the rest.
+    #[test]
+    fn only_the_first_segment_is_dropped() {
+        assert_eq!(
+            watermark_label("1.61.0", Some("feat/iteration-61/part-two")),
+            "v1.61.0 iteration-61/part-two"
+        );
+    }
+
+    // Compose passes `${APP_BRANCH:-}`, and the backend maps a blank leaf to
+    // `None` — but a blank string reaching here anyway must render as "no
+    // branch", not as a version with a stray trailing space.
+    #[test]
+    fn blank_branch_is_treated_as_absent() {
+        assert_eq!(watermark_label("1.61.0", Some("")), "v1.61.0");
+        assert_eq!(watermark_label("1.61.0", Some("   ")), "v1.61.0");
+    }
 }

@@ -1,7 +1,7 @@
 //! Runtime configuration loaded from layered sources.
 //!
 //! Config is assembled from three layers (lowest priority first):
-//!   1. in-memory defaults (ports, log level, database path, service name);
+//!   1. in-memory defaults (ports, log level, database path, environment);
 //!   2. the managed [`sovereign-config`] subtree — added **only** when the access
 //!      URL is present (`SOVEREIGN_CONFIG_ACCESS_URL_FILE` / `SOVEREIGN_CONFIG_ACCESS_URL`),
 //!      so local dev, unit tests and e2e (which have no sovereign-config server)
@@ -11,7 +11,7 @@
 //! Each top-level group is its own self-contained DTO deserialized from its own
 //! sub-branch (`oidc`, `session`, `observability`, `server`) — there is no umbrella
 //! config struct. Every leaf in sovereign-config is text; rich field types (`u16`,
-//! `url::Url`, …) fold presence + coercion checks into deserialization, and each DTO
+//! `Option<String>`, …) fold presence + coercion checks into deserialization, and each DTO
 //! additionally implements [`ValidatedConfig`] for the residual checks the type
 //! system can't express. All groups are loaded through the single [`load_group`]
 //! choke point, which validates and redacts uniformly.
@@ -259,7 +259,6 @@ fn apply_defaults(
     let defaults = [
         ("observability.environment", "dev"),
         ("observability.log-level", "info"),
-        ("observability.service-name", "bored"),
         // Plain-HTTP fallback port; TLS (when configured) always binds :443.
         ("server.http-port", "3000"),
         ("server.static-dir", "./dist"),
@@ -443,22 +442,31 @@ impl ValidatedConfig for SessionConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ObservabilityConfig {
-    /// e.g. `dev` | `production` — reported by `/api/info` and attached as the
-    /// Loki `env` label.
+    /// Which deployment this process *is*: `dev` or `prod`.
+    ///
+    /// The same value is set on the container as the
+    /// `observability.deployment.environment` Docker label, which the homelab's
+    /// Alloy turns into the `deployment_environment` Loki label — so the two
+    /// come from one `APP_ENV` at deploy time and cannot drift. Deliberately
+    /// *not* the branch name it used to hold: see `branch` below, and card #412.
+    ///
+    /// Left a plain `String` rather than an enum because non-deployed runs use
+    /// other values — e2e passes `test`, and the default below is `dev`.
     pub environment: String,
     pub log_level: String,
-    /// Loki push endpoint; log export to Loki is disabled when absent or blank.
+    /// Branch this deployment was built from, on dev only — `None` in prod and
+    /// for a local run. Reported by `/api/info` so the board can watermark a dev
+    /// deployment with the branch it is serving; it is deliberately kept out of
+    /// `environment` because a per-branch value there would start a new Loki
+    /// stream set on every push.
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub loki_url: Option<url::Url>,
-    /// Loki `app` label. Defaults to `bored`.
-    pub service_name: String,
+    pub branch: Option<String>,
 }
 
 impl ValidatedConfig for ObservabilityConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         require_non_empty("observability.environment", &self.environment)?;
         require_non_empty("observability.log-level", &self.log_level)?;
-        require_non_empty("observability.service-name", &self.service_name)?;
         Ok(())
     }
 }

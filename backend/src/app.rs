@@ -12,9 +12,31 @@ use crate::routes::boards::AppState;
 use crate::spa::SpaSvc;
 use crate::{config, events, routes};
 
+/// What `/api/info` reports about the running deployment.
+///
+/// A struct rather than two `&str` parameters on [`app`]: `environment` and
+/// `branch` are both short lowercase strings, so a swapped pair would compile
+/// and only show up as a wrong Grafana label.
+#[derive(Debug, Clone)]
+pub struct DeploymentInfo {
+    /// `dev` | `prod` (`test` under e2e) — see `config::ObservabilityConfig`.
+    pub environment: String,
+    /// Branch a dev deployment was built from; `None` in prod and locally.
+    pub branch: Option<String>,
+}
+
+impl DeploymentInfo {
+    pub fn new(environment: impl Into<String>, branch: Option<String>) -> Self {
+        Self {
+            environment: environment.into(),
+            branch,
+        }
+    }
+}
+
 // `app` is extracted from `main` so integration tests can call it directly
 // without spinning up a real TCP listener. Tests construct `AppState` with an
-// in-memory DB, call `app(state, static_dir, environment).await`, and pass the
+// in-memory DB, call `app(state, static_dir, deployment).await`, and pass the
 // router to `TestServer`.
 //
 // Routing layout:
@@ -26,7 +48,7 @@ use crate::{config, events, routes};
 // When the server is started without `oidc.issuer-url` configured (i.e. local
 // dev or tests), the middleware short-circuits and injects a synthetic
 // `anonymous` claim so existing flows keep working unchanged.
-pub async fn app(state: AppState, static_dir: &str, environment: &str) -> Router {
+pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) -> Router {
     // Build the protected `/api/*` sub-router. Every route here gets the auth
     // middleware applied below; handlers can extract `Extension<Claims>` to
     // get the validated identity. The middleware needs access to AppState
@@ -96,17 +118,16 @@ pub async fn app(state: AppState, static_dir: &str, environment: &str) -> Router
         .route("/logout", get(routes::auth::logout))
         .with_state(state);
 
-    // `environment` is captured into the `/api/info` closure below rather than
-    // read per-request, since it now comes from `ObservabilityConfig` (set once
-    // at startup) rather than a live `std::env::var` lookup.
-    let environment = environment.to_string();
+    // `deployment` is captured into the `/api/info` closure below rather than
+    // read per-request, since it comes from `ObservabilityConfig` (set once at
+    // startup) rather than a live `std::env::var` lookup.
 
     Router::new()
         .route("/health", get(health))
         // `/api/info` is intentionally public — the frontend fetches it
         // unauthenticated on every page load to populate the version watermark.
         // It must stay outside any auth-gated sub-router.
-        .route("/api/info", get(move || info(environment.clone())))
+        .route("/api/info", get(move || info(deployment.clone())))
         // Browser-facing OAuth2 flow endpoints.
         .nest("/auth", auth_routes)
         // Protected API — every route under here requires a valid token (or
@@ -135,15 +156,16 @@ pub(crate) async fn health() -> &'static str {
     "ok"
 }
 
-// Returns runtime version and environment.
+// Returns runtime version, environment and (on dev) the branch.
 // Version: the release tag burned into the image at build time (see
 // `shared::app_version`). `APP_VERSION` remains an optional runtime override
 // (used by tests and ad-hoc runs); when unset the burned-in tag is reported.
-// `environment` is captured at startup from `ObservabilityConfig` (see `app`).
-async fn info(environment: String) -> axum::Json<shared::AppInfo> {
+// `deployment` is captured at startup from `ObservabilityConfig` (see `app`).
+async fn info(deployment: DeploymentInfo) -> axum::Json<shared::AppInfo> {
     axum::Json(shared::AppInfo {
         version: config::app_version_override()
             .unwrap_or_else(|| shared::app_version().to_string()),
-        env: environment,
+        env: deployment.environment,
+        branch: deployment.branch,
     })
 }

@@ -381,7 +381,8 @@ async fn audit_restore_prior_card_body_preserves_card_identity_and_layout() {
 async fn audit_body_restore_rejects_invalid_or_current_versions() {
     let db = db::connect_mem().await.expect("failed to connect mem db");
     let state = AppState::new(db.clone());
-    let server = TestServer::new(app(state, "./dist", "dev").await).unwrap();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
     let (board, column) = setup_board_and_column(&server).await;
     let card: shared::Card = server
         .post(&format!("/api/columns/{}/cards", column.id))
