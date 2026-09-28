@@ -446,3 +446,47 @@ async fn the_shared_client_times_out_on_a_silent_provider() {
         "waited {waited:?}; the 10 s timeout did not apply"
     );
 }
+
+/// Card #415: every authentication decision on a protected request is counted
+/// in `bored.auth.outcomes`, labelled by outcome. Driven through the real
+/// router and middleware with auth enabled against the fake provider; the
+/// counters are cumulative and shared by every test in the binary, so the
+/// assertion is on the *increase* each request causes.
+#[tokio::test]
+async fn auth_decisions_are_counted_by_outcome() {
+    use crate::observability::metrics::{AUTH_OUTCOMES, BORED_AUTH_OUTCOME};
+    use crate::observability::test_support::counter_value;
+
+    let idp = start_idp(r#"{"keys":[]}"#, &valid_token_body()).await;
+    let state = state_against(&idp).await;
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("test", None)).await).unwrap();
+    let count = |outcome: &str| counter_value(AUTH_OUTCOMES, BORED_AUTH_OUTCOME, outcome);
+
+    let rejected_before = count("bearer_rejected");
+    let missing_before = count("missing");
+
+    // A bearer token the cache cannot validate…
+    server
+        .get("/api/boards")
+        .add_header(
+            "authorization",
+            format!("Bearer {}", token_with_unknown_kid()),
+        )
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    // …and a browser with no credentials at all.
+    server
+        .get("/api/boards")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+
+    assert!(
+        count("bearer_rejected") > rejected_before,
+        "bearer rejection not counted"
+    );
+    assert!(
+        count("missing") > missing_before,
+        "missing credential not counted"
+    );
+}

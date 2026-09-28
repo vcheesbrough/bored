@@ -232,10 +232,18 @@ weaken them.**
 - **One fact, one signal.** No per-request "request completed" line (the
   server span and the histogram are that record); no `debug!` per query (the db
   span is).
-- **Logs never carry secrets.** Tokens, cookies, client secrets, request
-  bodies and SQL text/values stay out of log fields, span attributes and error
-  messages — telemetry leaves the process and lands somewhere with different
-  access control.
+- **The redaction rule (card #366) covers every signal.** Tokens, cookies,
+  client secrets, request bodies, query strings, SQL text and bound values stay
+  out of log fields, span attributes and error messages — telemetry leaves the
+  process and lands somewhere with different access control. A new log site
+  describes an outbound or database error through `crate::redact`
+  (`http_error`, `url`/`url_parts`, `identifier`, `variant_path`), never with
+  the error's own `Display`. Spans follow the same rule: `url.path` and
+  `url.full` carry no query, database spans carry a query *name*
+  (`DbQuery`), and `error.type` is always an enum label.
+- **New outbound calls and database calls get their spans by construction:**
+  send HTTP through `http_client::send(Outbound::…, request)` and put
+  `.traced(DbQuery::new(..))` before a SurrealDB call's `.await`.
 - **Dashboards and alerts are opt-in** (skill §8) and not yet opted into; card
   #437 is where that decision is made.
 

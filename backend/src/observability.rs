@@ -862,7 +862,6 @@ pub(crate) fn adopt_parent(span: &tracing::Span, headers: &http::HeaderMap) {
 /// Takes the context from the current *tracing* span, not from the SDK's own
 /// "current context", which is empty unless the span layer has activated it —
 /// and an empty context injects nothing, without an error (rust.md).
-#[allow(dead_code)] // TEMP-62
 pub(crate) fn inject_current(headers: &mut http::HeaderMap) {
     let context = tracing::Span::current().context();
     global::get_text_map_propagator(|propagator| {
@@ -873,25 +872,11 @@ pub(crate) fn inject_current(headers: &mut http::HeaderMap) {
 /// Link `span` to `from` — for detached work, which starts its own trace
 /// rather than being a child of the request that queued it (a child would keep
 /// the request's trace open for as long as the work runs).
-#[allow(dead_code)] // TEMP-62
 pub(crate) fn link_to(span: &tracing::Span, from: &tracing::Span) {
     let linked = from.context().span().span_context().clone();
     if linked.is_valid() {
         span.add_link(linked);
     }
-}
-
-/// Record an attribute on a span after it was created, by a key constant from
-/// `opentelemetry-semantic-conventions` (or a `bored.`-prefixed one). The
-/// `tracing` macros only accept literal keys at creation; this is the path for
-/// everything else.
-#[allow(dead_code)] // TEMP-62
-pub(crate) fn set_span_attribute(
-    span: &tracing::Span,
-    key: &'static str,
-    value: impl Into<opentelemetry::Value>,
-) {
-    span.set_attribute(key, value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -997,6 +982,30 @@ pub(crate) mod test_support {
             .expect("in-memory metrics")
             .pop()
             .expect("at least one collection")
+    }
+
+    /// The current cumulative value of a `u64` counter's series whose
+    /// attribute `key` is `value` — for tests outside this module, which must
+    /// not name SDK types themselves.
+    pub(crate) fn counter_value(metric: &str, key: &str, value: &str) -> u64 {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        let collected = collect_metrics();
+        let mut total = 0;
+        for scope in collected.scope_metrics() {
+            for found in scope.metrics().filter(|found| found.name() == metric) {
+                if let AggregatedMetrics::U64(MetricData::Sum(sum)) = found.data() {
+                    for point in sum.data_points() {
+                        if point
+                            .attributes()
+                            .any(|kv| kv.key.as_str() == key && kv.value.to_string() == value)
+                        {
+                            total += point.value();
+                        }
+                    }
+                }
+            }
+        }
+        total
     }
 
     /// Traces and logs into readable exporters, through the production

@@ -13,7 +13,7 @@
 //!   parents it on the `traceparent` Traefik sends, so the request joins the
 //!   trace that starts at the edge.
 //! - [`record_response`] is a middleware *inside* that span. It sees the
-//!   response, records its status (and `error.type` for a 5xx) on the span, and
+//!   response, records its status and `error.type` on the span, and
 //!   records `http.server.request.duration`.
 
 use std::time::Instant;
@@ -24,7 +24,8 @@ use axum::response::Response;
 use tower_http::trace::MakeSpan;
 use tracing::field::Empty;
 
-use crate::observability::metrics::{ErrorType, HttpMethod};
+use crate::error::ErrorType;
+use crate::observability::metrics::{HttpMethod, RequestError};
 use crate::observability::{self, metrics};
 
 /// `TraceLayer`'s span factory: one `server` span per request.
@@ -98,7 +99,10 @@ pub(crate) async fn record_response(request: Request, next: Next) -> Response {
     let response = next.run(request).await;
 
     let status = response.status().as_u16();
-    let error = ErrorType::from_status(status);
+    // The class `ApiError::into_response` attached, if a handler failed with
+    // one (card #366's `ErrorType`); `_OTHER` for an unclassified 5xx.
+    let classified = response.extensions().get::<ErrorType>().copied();
+    let error = RequestError::for_response(status, classified);
     // `Span::current()` is the request span: `TraceLayer` runs this whole
     // middleware inside it.
     let span = tracing::Span::current();
@@ -107,6 +111,11 @@ pub(crate) async fn record_response(request: Request, next: Next) -> Response {
     span.record("http.response.status_code", i64::from(status));
     if let Some(error) = error {
         span.record("error.type", error.label());
+    }
+    // Span status follows semconv's server rule: only a 5xx is an error of
+    // this service. A 404 or 409 keeps its `error.type` (it says *which*
+    // client error) but leaves the span's status unset.
+    if status >= 500 {
         span.record("otel.status_code", "ERROR");
     }
     metrics::http_request(

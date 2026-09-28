@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{AUTH_COOKIE, AuthConfig, Claims, ID_COOKIE, JwksCache, REFRESH_COOKIE, validate_jwt};
+use crate::http_client::{self, Outbound};
 use crate::redact;
 
 const ACCESS_COOKIE_DEFAULT_AGE_SECS: i64 = 15 * 60;
@@ -233,17 +234,14 @@ impl AuthSessionManager {
         let mut form = grant.to_vec();
         form.push(("client_id", auth.client_id.as_str()));
         form.push(("client_secret", auth.client_secret.as_str()));
-        let response = self
-            .http
-            .post(auth.token_url())
-            .form(&form)
-            .send()
-            .await
-            // `redact::http_error`, not `{error}`: reqwest's own message
-            // embeds the full URL (card #366).
-            .map_err(|error| {
-                format!("token endpoint unreachable: {}", redact::http_error(&error))
-            })?;
+        let response = http_client::send(
+            Outbound::TokenExchange,
+            self.http.post(auth.token_url()).form(&form),
+        )
+        .await
+        // `redact::http_error`, not `{error}`: reqwest's own message
+        // embeds the full URL (card #366).
+        .map_err(|error| format!("token endpoint unreachable: {}", redact::http_error(&error)))?;
         if !response.status().is_success() {
             return Err(format!("token endpoint returned {}", response.status()));
         }
@@ -441,23 +439,22 @@ impl AuthSessionManager {
         let Some(url) = auth.revoke_url() else {
             return Ok(());
         };
-        let response = self
-            .http
-            .post(url)
-            .form(&[
+        let response = http_client::send(
+            Outbound::Revocation,
+            self.http.post(url).form(&[
                 ("token", refresh_token),
                 ("token_type_hint", "refresh_token"),
                 ("client_id", auth.client_id.as_str()),
                 ("client_secret", auth.client_secret.as_str()),
-            ])
-            .send()
-            .await
-            .map_err(|error| {
-                format!(
-                    "revocation endpoint unreachable: {}",
-                    redact::http_error(&error)
-                )
-            })?;
+            ]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "revocation endpoint unreachable: {}",
+                redact::http_error(&error)
+            )
+        })?;
         if response.status().is_success() {
             Ok(())
         } else {

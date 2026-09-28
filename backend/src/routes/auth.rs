@@ -35,6 +35,7 @@ use serde::Deserialize;
 use crate::auth::{Claims, STATE_COOKIE};
 use crate::redact;
 use crate::routes::boards::AppState;
+use tracing::Instrument as _;
 
 /// Cookie max-age (seconds) for the auth state nonce. Five minutes is more
 /// than enough time for a user to complete the redirect to Authentik, log in,
@@ -78,6 +79,7 @@ fn state_return_to(state: &str) -> String {
 /// `GET /auth/login` — start the OIDC authorization-code flow.
 /// Generates a random state nonce, stores it in a short-lived httpOnly
 /// cookie, and redirects the browser to Authentik's authorize endpoint.
+#[tracing::instrument(skip_all)]
 pub async fn login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -162,6 +164,7 @@ pub struct CallbackQuery {
 
 /// `GET /auth/callback` — receive Authentik's redirect with the auth code,
 /// verify state, exchange code for tokens, and set the session cookie.
+#[tracing::instrument(skip_all)]
 pub async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -229,6 +232,10 @@ pub async fn callback(
     // Store the complete token set in independently encrypted private cookies
     // and clear the one-use state nonce.
     let private_jar = sessions.write_session(sessions.cookie_jar(&headers), &token_set);
+    // A state change worth a line of its own (card #415 §4). No identity on
+    // it: the user's `sub` would be an identifier in a log field, which the
+    // span already scopes, and #366's policy keeps tokens out entirely.
+    tracing::info!("browser session created");
     let clear_state = Cookie::build((STATE_COOKIE, ""))
         .path("/auth")
         .http_only(true)
@@ -244,6 +251,7 @@ pub async fn callback(
 
 /// `GET /auth/logout` — clear the session cookie and (optionally) bounce to
 /// Authentik's RP-initiated logout endpoint to terminate the upstream session.
+#[tracing::instrument(skip_all)]
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: CookieJar) -> Response {
     let clear_state = Cookie::build((STATE_COOKIE, ""))
         .path("/auth")
@@ -265,19 +273,37 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: Cook
     let refresh_token = sessions.read_refresh_token(&private_jar);
     let id_token = sessions.read_id_token(&private_jar);
     let private_jar = sessions.clear_session(private_jar);
+    tracing::info!("browser session ended by logout");
 
     if let Some(refresh_token) = refresh_token.as_deref() {
         let refresh_chain = sessions.invalidate_refresh_chain(refresh_token).await;
         let sessions = std::sync::Arc::clone(sessions);
         let auth = std::sync::Arc::clone(auth);
-        let _revocation_task = tokio::spawn(async move {
-            for refresh_token in refresh_chain {
-                if let Err(error) = sessions.revoke_refresh_token(&auth, &refresh_token).await {
-                    // Local logout must not be held hostage by provider availability.
-                    tracing::warn!(error = %error, "refresh-token revocation failed during logout");
+        // The revocation outlives the logout request, so it is detached work:
+        // its own trace (`parent: None`), *linked* to the request that queued
+        // it rather than a child of it — a child would hold the request's
+        // trace open for as long as the identity provider takes to answer.
+        // `Instrument` carries the span into the spawned task; without it the
+        // task would run outside any span and its revocation calls would each
+        // start an orphaned trace (skill §5, rust.md "Spawned tasks").
+        let revocation_span = tracing::info_span!(
+            parent: None,
+            "logout revocation",
+            bored.revocations = refresh_chain.len(),
+        );
+        crate::observability::link_to(&revocation_span, &tracing::Span::current());
+        let _revocation_task = tokio::spawn(
+            async move {
+                for refresh_token in refresh_chain {
+                    if let Err(error) = sessions.revoke_refresh_token(&auth, &refresh_token).await
+                    {
+                        // Local logout must not be held hostage by provider availability.
+                        tracing::warn!(error = %error, "refresh-token revocation failed during logout");
+                    }
                 }
             }
-        });
+            .instrument(revocation_span),
+        );
     }
 
     let mut target = auth
@@ -297,6 +323,7 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: Cook
 /// `GET /api/me` — return the public-facing user identity to the SPA.
 /// Lives under `/api` so it's gated by the same auth middleware as the other
 /// data endpoints; the navbar uses it to populate username + avatar.
+#[tracing::instrument(skip_all)]
 pub async fn me(claims: Extension<Claims>) -> Json<shared::UserInfo> {
     Json(claims.to_user_info())
 }

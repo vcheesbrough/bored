@@ -1,5 +1,3 @@
-// TEMP-62: db/auth handles are wired once iteration 62 lands; remove then.
-#![allow(dead_code)]
 //! Every metric bored exports: the instruments, created once, and the typed
 //! handles product code records through.
 //!
@@ -41,6 +39,8 @@ use opentelemetry_semantic_conventions::attribute::{
     ERROR_TYPE, HTTP_REQUEST_METHOD, HTTP_RESPONSE_STATUS_CODE, HTTP_ROUTE,
 };
 use opentelemetry_semantic_conventions::metric::HTTP_SERVER_REQUEST_DURATION;
+
+use crate::error::ErrorType;
 
 /// Product-specific attribute key for [`AuthOutcome`]. `bored.`-prefixed
 /// because semconv has no name for it.
@@ -160,7 +160,7 @@ impl Instruments {
         method: HttpMethod,
         route: Option<&str>,
         status: u16,
-        error: Option<ErrorType>,
+        error: Option<RequestError>,
         seconds: f64,
     ) {
         // A small Vec rather than an array because two attributes are optional.
@@ -225,7 +225,7 @@ pub(crate) fn http_request(
     method: HttpMethod,
     route: Option<&str>,
     status: u16,
-    error: Option<ErrorType>,
+    error: Option<RequestError>,
     seconds: f64,
 ) {
     if let Some(instruments) = instruments() {
@@ -255,12 +255,14 @@ pub(crate) fn sse_lagged(dropped: u64) {
     }
 }
 
-/// A database call failed, classified by [`DbErrorClass`].
-pub(crate) fn db_error(class: DbErrorClass) {
+/// A database call failed, with the class the API gives that failure
+/// (`error::database_error_type`): `conflict` for a unique index the API
+/// translates to a 409, `db_constraint` / `db_engine` / `db_client` otherwise.
+pub(crate) fn db_error(error_type: ErrorType) {
     if let Some(instruments) = instruments() {
         instruments
             .db_errors
-            .add(1, &[KeyValue::new(ERROR_TYPE, class.label())]);
+            .add(1, &[KeyValue::new(ERROR_TYPE, error_type.as_str())]);
     }
 }
 
@@ -378,65 +380,50 @@ impl HttpMethod {
     }
 }
 
-/// `error.type` on a failed request: what went wrong, as a class.
+/// `error.type` on a request: what went wrong, as a bounded class.
 ///
-/// A server-side failure (5xx) is labelled by its status code, which is what
-/// semconv prescribes when nothing more specific is known.
+/// The classes are the API's own [`ErrorType`] (card #366, `error.rs`), which
+/// `ApiError` hands to the response as an extension — so the span, the metric
+/// and the `request failed` log line all name a failure the same way. A 5xx
+/// that no `ApiError` classified (a panic, a layer's own rejection) is
+/// `_OTHER`, semconv's fallback value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ErrorType {
-    /// 500 — an internal failure.
-    InternalServerError,
-    /// 502/503/504 or any other 5xx.
-    OtherServerError,
+pub(crate) enum RequestError {
+    /// A handler failed with an `ApiError` of this class.
+    Api(ErrorType),
+    /// A server error nothing classified.
+    Unclassified,
 }
 
-impl ErrorType {
-    // Test-only: the every-variant test iterates it.
-    #[cfg(test)]
-    pub(crate) const ALL: [ErrorType; 2] =
-        [ErrorType::InternalServerError, ErrorType::OtherServerError];
-
-    /// The error class for a response status, or `None` when the response is
-    /// not a server error. 4xx responses are the client's, not errors of this
-    /// service, and carry no `error.type` on a server span (semconv).
-    pub(crate) fn from_status(status: u16) -> Option<Self> {
-        match status {
-            500 => Some(ErrorType::InternalServerError),
-            501..=599 => Some(ErrorType::OtherServerError),
-            _ => None,
+impl RequestError {
+    /// The class for a response, or `None` when there was no failure: the
+    /// handler's classification when it produced one, otherwise `_OTHER` for a
+    /// 5xx, otherwise nothing (a 2xx/3xx, or a 4xx no `ApiError` produced —
+    /// the auth middleware's 401s, say, which `bored.auth.outcomes` counts).
+    pub(crate) fn for_response(status: u16, classified: Option<ErrorType>) -> Option<Self> {
+        match classified {
+            Some(error_type) => Some(RequestError::Api(error_type)),
+            None if status >= 500 => Some(RequestError::Unclassified),
+            None => None,
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            ErrorType::InternalServerError => "500",
-            ErrorType::OtherServerError => "5xx",
+            RequestError::Api(error_type) => error_type.as_str(),
+            RequestError::Unclassified => "_OTHER",
         }
     }
-}
 
-/// Why a database call failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DbErrorClass {
-    /// A unique index rejected the write — a client conflict (409), counted
-    /// because a spike of them is still worth seeing.
-    UniqueViolation,
-    /// Anything else: a broken query, a deserialisation mismatch, a storage
-    /// failure — a 500.
-    Internal,
-}
-
-impl DbErrorClass {
-    // Test-only: the every-variant test iterates it.
+    /// Every value: each `ErrorType` (walked with strum, so a new variant is
+    /// covered unedited) plus `Unclassified`. Test-only.
     #[cfg(test)]
-    pub(crate) const ALL: [DbErrorClass; 2] =
-        [DbErrorClass::UniqueViolation, DbErrorClass::Internal];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            DbErrorClass::UniqueViolation => "unique_violation",
-            DbErrorClass::Internal => "internal",
-        }
+    pub(crate) fn all() -> Vec<RequestError> {
+        use strum::IntoEnumIterator as _;
+        ErrorType::iter()
+            .map(RequestError::Api)
+            .chain(std::iter::once(RequestError::Unclassified))
+            .collect()
     }
 }
 

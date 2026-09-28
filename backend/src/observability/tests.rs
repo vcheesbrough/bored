@@ -14,7 +14,9 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::sync::{Arc, Mutex};
+
 use std::time::{Duration, Instant};
+use tracing::Instrument as _;
 
 use axum::http::{HeaderMap, HeaderValue};
 use axum_test::TestServer;
@@ -26,13 +28,15 @@ use opentelemetry_semantic_conventions as semconv;
 
 use super::metrics::{
     self, AUTH_OUTCOMES, AuthOutcome, BUILD_INFO, BUILD_INFO_REVISION, BUILD_INFO_VERSION,
-    DB_ERRORS, DbErrorClass, ErrorType, HttpMethod, SSE_EVENTS, SSE_LAGGED, SSE_SUBSCRIBERS,
+    DB_ERRORS, HttpMethod, RequestError, SSE_EVENTS, SSE_LAGGED, SSE_SUBSCRIBERS,
 };
 use super::test_support::{
     Pipeline, TEST_VARIABLES, collect_metrics, has_providers, prepare_for_test,
 };
 use super::{FLUSH_TIMEOUT, TelemetryError, adopt_parent, inject_current};
 use crate::app::{DeploymentInfo, app};
+use crate::db::DbOperation;
+use crate::error::ErrorType;
 use crate::routes::boards::AppState;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -435,10 +439,12 @@ async fn a_request_without_traceparent_starts_its_own_trace() {
 }
 
 #[tokio::test]
-async fn a_client_error_carries_no_error_type_and_a_templated_name() {
-    // A 404 is the client's problem, not a failure of this service, so the
-    // server span must carry no `error.type` (semconv) — and its name must be
-    // the route template even though the path named a concrete board.
+async fn a_client_error_names_its_class_but_is_not_a_span_error() {
+    // A 404 is the client's problem, not a failure of this service: semconv's
+    // server rule leaves the span status unset. It still carries `error.type`
+    // — the API's own class for it (`not_found`) — so *which* client error it
+    // was is queryable. And its name is the route template even though the
+    // path named a concrete board.
     let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
     let _guard = tracing::subscriber::set_default(subscriber);
     let server = TestServer::new(router().await).unwrap();
@@ -452,11 +458,15 @@ async fn a_client_error_carries_no_error_type_and_a_templated_name() {
         .iter()
         .find(|span| span.span_kind == SpanKind::Server)
         .expect("server span");
-    assert!(
-        !server_span
-            .attributes
-            .iter()
-            .any(|kv| kv.key.as_str() == semconv::attribute::ERROR_TYPE),
+    let error_type = server_span
+        .attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == semconv::attribute::ERROR_TYPE)
+        .map(|kv| kv.value.to_string());
+    assert_eq!(error_type.as_deref(), Some("not_found"));
+    assert_eq!(
+        server_span.status,
+        opentelemetry::trace::Status::Unset,
         "a 404 is not an error of this service"
     );
     assert_eq!(
@@ -467,7 +477,8 @@ async fn a_client_error_carries_no_error_type_and_a_templated_name() {
 
 #[tokio::test]
 async fn a_server_error_marks_the_span_and_the_metric_with_error_type() {
-    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let stdout = CapturedWriter::default();
+    let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "info");
     let _guard = tracing::subscriber::set_default(subscriber);
     let db = crate::db::connect_mem().await.expect("mem db");
     let server = TestServer::new(
@@ -518,6 +529,20 @@ async fn a_server_error_marks_the_span_and_the_metric_with_error_type() {
         .await
         .assert_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
+    // The oracle: the class `ApiError` itself logged on the `request failed`
+    // line (error.rs) — a different path from the span attribute under test.
+    let logged = stdout.line("request failed").expect("the 500 is logged")["error.type"]
+        .as_str()
+        .expect("error.type on the log line")
+        .to_string();
+    assert!(logged.starts_with("db_"), "a driver failure: {logged}");
+
+    let attribute = |span: &opentelemetry_sdk::trace::SpanData, key: &str| {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
     let spans = pipeline.finished_spans();
     let failed = spans
         .iter()
@@ -525,29 +550,155 @@ async fn a_server_error_marks_the_span_and_the_metric_with_error_type() {
             span.span_kind == SpanKind::Server && span.name == "GET /api/columns/:id/cards"
         })
         .expect("server span for the failing request");
-    let error_type = failed
-        .attributes
-        .iter()
-        .find(|kv| kv.key.as_str() == semconv::attribute::ERROR_TYPE)
-        .map(|kv| kv.value.to_string());
     assert_eq!(
-        error_type.as_deref(),
-        Some(ErrorType::InternalServerError.label())
+        attribute(failed, semconv::attribute::ERROR_TYPE).as_deref(),
+        Some(logged.as_str())
     );
     assert_eq!(failed.status, opentelemetry::trace::Status::error(""));
 
-    // And the duration metric has a series for it carrying the same class.
+    // And the duration metric has a series carrying that class. (The failure
+    // here is in decoding the rows, after the database call returned, so it
+    // belongs to the request, not to a database span — the next test covers a
+    // failure *inside* a database call.)
     let series = all_series(&collect_metrics());
     assert!(
         series.iter().any(|(name, attributes)| {
             name == semconv::metric::HTTP_SERVER_REQUEST_DURATION
                 && attributes.iter().any(|kv| {
                     kv.key.as_str() == semconv::attribute::ERROR_TYPE
-                        && kv.value.to_string() == ErrorType::InternalServerError.label()
+                        && kv.value.to_string() == logged
                 })
         }),
-        "no duration series with error.type=500"
+        "no duration series with error.type={logged}"
     );
+}
+
+#[tokio::test]
+async fn a_failing_database_call_marks_its_own_span_and_counts_a_db_error() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let server = TestServer::new(router().await).unwrap();
+    let request = shared::CreateBoardRequest {
+        name: "dupe".to_string(),
+    };
+    server.post("/api/boards").json(&request).await;
+    // The second create trips the unique index on the board name, inside the
+    // database call itself.
+    server
+        .post("/api/boards")
+        .json(&request)
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
+
+    let attribute = |span: &opentelemetry_sdk::trace::SpanData, key: &str| {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
+    let spans = pipeline.finished_spans();
+    let failed_call = spans
+        .iter()
+        .find(|span| {
+            span.name == "CREATE boards" && span.status != opentelemetry::trace::Status::Unset
+        })
+        .expect("the failed CREATE boards span");
+    // The class the API gives the failure (the 409's own `conflict`), not a
+    // second classification — the oracle is the response status above plus
+    // the enum's own label.
+    assert_eq!(
+        attribute(failed_call, semconv::attribute::ERROR_TYPE).as_deref(),
+        Some(ErrorType::Conflict.as_str())
+    );
+    assert_eq!(failed_call.status, opentelemetry::trace::Status::error(""));
+    assert_eq!(
+        attribute(failed_call, "bored.db.query.name").as_deref(),
+        Some("boards.create_board")
+    );
+    // It sits under the handler's span, under the request's server span —
+    // which is a client error: `conflict`, status unset.
+    let parent_of = |span: &opentelemetry_sdk::trace::SpanData| {
+        spans
+            .iter()
+            .find(|candidate| candidate.span_context.span_id() == span.parent_span_id)
+            .cloned()
+    };
+    let handler = parent_of(failed_call).expect("handler span");
+    assert_eq!(handler.name, "create_board");
+    let request_span = parent_of(&handler).expect("request span");
+    assert_eq!(request_span.span_kind, SpanKind::Server);
+    assert_eq!(request_span.status, opentelemetry::trace::Status::Unset);
+
+    let series = all_series(&collect_metrics());
+    assert!(
+        series.iter().any(|(name, attributes)| {
+            name == DB_ERRORS
+                && attributes.iter().any(|kv| {
+                    kv.key.as_str() == semconv::attribute::ERROR_TYPE
+                        && kv.value.to_string() == ErrorType::Conflict.as_str()
+                })
+        }),
+        "no bored.db.errors series with error.type=conflict"
+    );
+}
+#[tokio::test]
+async fn a_request_has_a_child_span_per_database_call_and_no_sql() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let server = TestServer::new(router().await).unwrap();
+    server
+        .post("/api/boards")
+        .json(&shared::CreateBoardRequest {
+            name: "children".to_string(),
+        })
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let spans = pipeline.finished_spans();
+    let request = spans
+        .iter()
+        .find(|span| span.span_kind == SpanKind::Server && span.name == "POST /api/boards")
+        .expect("server span");
+    // server span → the handler's `#[instrument]` span → one span per call.
+    let handler = spans
+        .iter()
+        .find(|span| span.parent_span_id == request.span_context.span_id())
+        .expect("handler span under the server span");
+    assert_eq!(handler.name, "create_board");
+    let children: Vec<_> = spans
+        .iter()
+        .filter(|span| span.parent_span_id == handler.span_context.span_id())
+        .collect();
+    let create = children
+        .iter()
+        .find(|span| span.name == "CREATE boards")
+        .unwrap_or_else(|| {
+            panic!(
+                "no `CREATE boards` child among {:?}",
+                children.iter().map(|span| &span.name).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(create.span_kind, SpanKind::Client);
+    assert_eq!(
+        create.span_context.trace_id(),
+        request.span_context.trace_id()
+    );
+    // Never SQL text or a bound value: the board's name appears nowhere.
+    for span in &spans {
+        for kv in &span.attributes {
+            let value = kv.value.to_string();
+            assert!(
+                !value.contains("children"),
+                "`{}` leaks a value: {value}",
+                kv.key
+            );
+            assert!(
+                !value.contains("SELECT *"),
+                "`{}` carries SQL: {value}",
+                kv.key
+            );
+        }
+    }
 }
 
 /// Span attribute keys the span bridge (`tracing-opentelemetry`) adds that
@@ -575,6 +726,9 @@ fn semconv_span_keys() -> BTreeSet<&'static str> {
         DB_SYSTEM_NAME,
         DB_OPERATION_NAME,
         DB_QUERY_SUMMARY,
+        DB_COLLECTION_NAME,
+        HTTP_REQUEST_METHOD_ORIGINAL,
+        SERVER_PORT,
         DB_NAMESPACE,
         SERVER_ADDRESS,
         URL_FULL,
@@ -904,6 +1058,173 @@ fn the_sdks_own_events_stay_at_warn_on_stdout_and_never_reach_the_bridge() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Outbound calls and detached work (skill §1.3, §5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A one-route server on a real loopback port that answers `status` and
+/// records the `traceparent` header of every request it receives.
+async fn traceparent_recorder(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let router = axum::Router::new().route(
+        "/token",
+        axum::routing::post(move |headers: HeaderMap| {
+            let record = Arc::clone(&record);
+            async move {
+                if let Some(value) = headers.get("traceparent") {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push(value.to_str().unwrap().to_string());
+                }
+                axum::http::StatusCode::from_u16(status).unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://{address}"), seen)
+}
+
+#[tokio::test]
+async fn an_outbound_call_gets_a_client_span_and_carries_its_traceparent() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (base, seen) = traceparent_recorder(200).await;
+    let http = crate::http_client::build();
+
+    let parent = tracing::info_span!("login");
+    async {
+        crate::http_client::send(
+            crate::http_client::Outbound::TokenExchange,
+            http.post(format!("{base}/token?code=secret-code"))
+                .form(&[("a", "b")]),
+        )
+        .await
+        .expect("request succeeds");
+    }
+    .instrument(parent)
+    .await;
+
+    let spans = pipeline.finished_spans();
+    let login = spans
+        .iter()
+        .find(|span| span.name == "login")
+        .expect("login span");
+    let client = spans
+        .iter()
+        .find(|span| span.span_kind == SpanKind::Client)
+        .expect("client span");
+    assert_eq!(client.parent_span_id, login.span_context.span_id());
+    assert_eq!(client.name, "POST oidc.token");
+
+    // The oracle is the header the server actually received, parsed here by
+    // hand (`00-<trace>-<parent span>-<flags>`), not by the propagator.
+    let received = seen.lock().unwrap().clone();
+    assert_eq!(received.len(), 1, "one traceparent: {received:?}");
+    let parts: Vec<&str> = received[0].split('-').collect();
+    assert_eq!(parts[1], client.span_context.trace_id().to_string());
+    assert_eq!(
+        parts[2],
+        client.span_context.span_id().to_string(),
+        "the callee's parent is the client span, not the handler's"
+    );
+
+    let attribute = |key: &str| {
+        client
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
+    assert_eq!(
+        attribute(semconv::attribute::HTTP_RESPONSE_STATUS_CODE).as_deref(),
+        Some("200")
+    );
+    assert_eq!(
+        attribute(semconv::attribute::SERVER_ADDRESS).as_deref(),
+        Some("127.0.0.1")
+    );
+    let full = attribute(semconv::attribute::URL_FULL).expect("url.full");
+    assert!(full.ends_with("/token"), "{full}");
+    assert!(
+        !full.contains("secret-code"),
+        "the query must not be exported: {full}"
+    );
+    assert_eq!(attribute(semconv::attribute::ERROR_TYPE), None);
+}
+
+#[tokio::test]
+async fn a_failed_outbound_call_is_an_error_span_with_its_status_as_error_type() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let (base, _seen) = traceparent_recorder(503).await;
+    let http = crate::http_client::build();
+    let response = crate::http_client::send(
+        crate::http_client::Outbound::Revocation,
+        http.post(format!("{base}/token")),
+    )
+    .await
+    .expect("a response, even an error one");
+    assert_eq!(
+        response.status().as_u16(),
+        503,
+        "the caller still sees the response"
+    );
+
+    let spans = pipeline.finished_spans();
+    let client = spans
+        .iter()
+        .find(|span| span.span_kind == SpanKind::Client)
+        .expect("client span");
+    let error_type = client
+        .attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == semconv::attribute::ERROR_TYPE)
+        .map(|kv| kv.value.to_string());
+    assert_eq!(error_type.as_deref(), Some("503"));
+    assert_eq!(client.status, opentelemetry::trace::Status::error(""));
+}
+
+#[tokio::test]
+async fn detached_work_starts_its_own_trace_linked_to_the_request() {
+    // The shape `routes::auth::logout` uses for its revocation task.
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let request = tracing::info_span!("request");
+    let task = request.in_scope(|| {
+        let detached = tracing::info_span!(parent: None, "detached");
+        super::link_to(&detached, &tracing::Span::current());
+        tokio::spawn(async { tracing::info_span!("inside").in_scope(|| {}) }.instrument(detached))
+    });
+    task.await.unwrap();
+    drop(request);
+
+    let spans = pipeline.finished_spans();
+    let find = |name: &str| spans.iter().find(|span| span.name == name).expect(name);
+    let (request, detached, inside) = (find("request"), find("detached"), find("inside"));
+    assert_ne!(
+        detached.span_context.trace_id(),
+        request.span_context.trace_id(),
+        "detached work is its own trace"
+    );
+    assert_eq!(
+        detached.parent_span_id,
+        opentelemetry::trace::SpanId::INVALID
+    );
+    let links: Vec<_> = detached.links.iter().collect();
+    assert_eq!(links.len(), 1, "one link, to the request");
+    assert_eq!(
+        links[0].span_context.span_id(),
+        request.span_context.span_id()
+    );
+    // …and the spawned task ran inside it, not in an orphaned trace.
+    assert_eq!(inside.parent_span_id, detached.span_context.span_id());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Propagation with telemetry off (skill §2: off never touches propagation)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -994,8 +1315,11 @@ async fn no_exported_metric_series_carries_a_forbidden_label() {
     drop(metrics::SseSubscription::new());
     metrics::sse_event_delivered();
     metrics::sse_lagged(3);
-    for class in DbErrorClass::ALL {
-        metrics::db_error(class);
+    {
+        use strum::IntoEnumIterator as _;
+        for error_type in ErrorType::iter() {
+            metrics::db_error(error_type);
+        }
     }
     for outcome in AuthOutcome::ALL {
         metrics::auth_outcome(outcome);
@@ -1085,8 +1409,10 @@ fn every_label_enum_has_a_distinct_label_for_every_variant() {
         }
     }
     check(&HttpMethod::ALL, HttpMethod::label);
-    check(&ErrorType::ALL, ErrorType::label);
-    check(&DbErrorClass::ALL, DbErrorClass::label);
+    // `RequestError::all()` walks card #366's `ErrorType` with strum, plus the
+    // `_OTHER` fallback — so a new `ErrorType` variant is covered here too.
+    check(&RequestError::all(), RequestError::label);
+    check(&DbOperation::ALL, DbOperation::label);
     check(&AuthOutcome::ALL, AuthOutcome::label);
 
     // The method fold: every known method maps to itself, anything else to
@@ -1101,16 +1427,17 @@ fn every_label_enum_has_a_distinct_label_for_every_variant() {
     let invented = axum::http::Method::from_bytes(b"BREW").unwrap();
     assert_eq!(HttpMethod::from_method(&invented).label(), "_OTHER");
 
-    // error.type: only server errors carry one.
-    assert_eq!(ErrorType::from_status(200), None);
-    assert_eq!(ErrorType::from_status(404), None);
+    // error.type: the handler's class when there is one; `_OTHER` for an
+    // unclassified 5xx; nothing for an unclassified success or client error.
+    assert_eq!(RequestError::for_response(200, None), None);
+    assert_eq!(RequestError::for_response(401, None), None);
     assert_eq!(
-        ErrorType::from_status(500),
-        Some(ErrorType::InternalServerError)
+        RequestError::for_response(404, Some(ErrorType::NotFound)),
+        Some(RequestError::Api(ErrorType::NotFound))
     );
     assert_eq!(
-        ErrorType::from_status(503),
-        Some(ErrorType::OtherServerError)
+        RequestError::for_response(503, None).map(RequestError::label),
+        Some("_OTHER")
     );
 }
 

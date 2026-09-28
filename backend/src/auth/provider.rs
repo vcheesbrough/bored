@@ -3,6 +3,7 @@
 
 use serde::Deserialize;
 
+use crate::http_client::Outbound;
 use crate::redact;
 
 /// Configuration sourced from environment variables at startup.
@@ -174,7 +175,7 @@ impl AuthConfig {
             // `http.get(..).send()` rather than `reqwest::get(..)`: the free
             // function builds a brand-new client — and connection pool — on
             // every call, with no timeout.
-            match http.get(&url).send().await {
+            match crate::http_client::send(Outbound::OidcDiscovery, http.get(&url)).await {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => match resp.json::<DiscoveryDoc>().await {
                         Ok(doc) => return Ok(doc),

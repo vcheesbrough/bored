@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::AuthConfig;
+use crate::http_client::{self, Outbound};
 use crate::redact;
 
 /// In-memory cache of OIDC public keys keyed by `kid`.
@@ -67,10 +68,7 @@ impl JwksCache {
     /// but not reqwest's verbatim message (that embeds the full URL, and a
     /// decode failure quotes the response body) — card #366.
     async fn refresh(&self) -> Result<(), String> {
-        let jwks: Jwks = self
-            .http
-            .get(&self.jwks_url)
-            .send()
+        let jwks: Jwks = http_client::send(Outbound::Jwks, self.http.get(&self.jwks_url))
             .await
             .map_err(|e| format!("fetching JWKS: {}", redact::http_error(&e)))?
             .error_for_status()

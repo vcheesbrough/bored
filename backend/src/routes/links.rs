@@ -19,6 +19,7 @@ use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardLink, DbColumn};
@@ -54,6 +55,11 @@ async fn load_link(
         "SELECT {LINK_FIELDS} FROM card_links WHERE id = type::thing('card_links', $id) LIMIT 1"
     ))
     .bind(("id", link_id.to_string()))
+    .traced(DbQuery::new(
+        "links.load_link",
+        DbOperation::Select,
+        "card_links",
+    ))
     .await?
     .take(0)
 }
@@ -71,6 +77,11 @@ async fn board_links(
          ORDER BY created_at ASC"
     ))
     .bind(("bid", board_ulid.to_string()))
+    .traced(DbQuery::new(
+        "links.board_links",
+        DbOperation::Select,
+        "card_links",
+    ))
     .await?
     .take(0)
 }
@@ -87,6 +98,11 @@ async fn links_touching_card(
          ORDER BY created_at ASC"
     ))
     .bind(("cid", card_id.to_string()))
+    .traced(DbQuery::new(
+        "links.links_touching_card",
+        DbOperation::Select,
+        "card_links",
+    ))
     .await?
     .take(0)
 }
@@ -98,7 +114,14 @@ async fn board_of_card(
     db: &Surreal<Db>,
     card: &DbCard,
 ) -> Result<Option<String>, surrealdb::Error> {
-    let column: Option<DbColumn> = db.select(("columns", card.column.id.to_raw())).await?;
+    let column: Option<DbColumn> = db
+        .select(("columns", card.column.id.to_raw()))
+        .traced(DbQuery::new(
+            "links.board_of_card",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
     Ok(column.map(|c| c.board.id.to_raw()))
 }
 
@@ -110,13 +133,27 @@ async fn board_of_link(
     db: &Surreal<Db>,
     link: &DbCardLink,
 ) -> Result<Option<String>, surrealdb::Error> {
-    let predecessor: Option<DbCard> = db.select(("cards", link.predecessor.id.to_raw())).await?;
+    let predecessor: Option<DbCard> = db
+        .select(("cards", link.predecessor.id.to_raw()))
+        .traced(DbQuery::new(
+            "links.board_of_link",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     if let Some(card) = predecessor
         && let Some(board_id) = board_of_card(db, &card).await?
     {
         return Ok(Some(board_id));
     }
-    let successor: Option<DbCard> = db.select(("cards", link.successor.id.to_raw())).await?;
+    let successor: Option<DbCard> = db
+        .select(("cards", link.successor.id.to_raw()))
+        .traced(DbQuery::new(
+            "links.board_of_link",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     match successor {
         Some(card) => board_of_card(db, &card).await,
         None => Ok(None),
@@ -129,6 +166,7 @@ fn normalize_reason(raw: Option<&str>) -> Result<Option<String>, ApiError> {
 }
 
 /// `GET /api/boards/:slug/links` — every link on the board.
+#[tracing::instrument(skip_all, fields(bored.board.slug = %slug))]
 pub async fn list_board_links(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -148,13 +186,22 @@ pub async fn list_board_links(
 ///
 /// 404 unknown card · 409 already linked · 422 self-link, cross-board, reason
 /// too long, or cycle.
+#[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn create_card_link(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardLinkRequest>,
 ) -> Result<(StatusCode, Json<shared::CardLink>), ApiError> {
-    let card: Option<DbCard> = state.db.select(("cards", &card_id)).await?;
+    let card: Option<DbCard> = state
+        .db
+        .select(("cards", &card_id))
+        .traced(DbQuery::new(
+            "links.create_card_link",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     let card = card.ok_or(ApiError::NotFound)?;
 
     // Checked before the other card is even loaded: a self-link is not a
@@ -163,7 +210,15 @@ pub async fn create_card_link(
         return Err(SELF_LINK);
     }
 
-    let other: Option<DbCard> = state.db.select(("cards", &payload.other_card_id)).await?;
+    let other: Option<DbCard> = state
+        .db
+        .select(("cards", &payload.other_card_id))
+        .traced(DbQuery::new(
+            "links.create_card_link",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     let other = other.ok_or(ApiError::NotFound)?;
 
     let board_id = board_of_card(&state.db, &card)
@@ -214,10 +269,24 @@ pub async fn create_card_link(
         // cascade deletes do not hold `link_lock`. Re-check right before the
         // write so the CREATE below never targets a card that is already
         // gone (an orphan link, invisible or showing as `#0` on the board).
-        let predecessor_still_exists: Option<DbCard> =
-            state.db.select(("cards", predecessor_id.as_str())).await?;
-        let successor_still_exists: Option<DbCard> =
-            state.db.select(("cards", successor_id.as_str())).await?;
+        let predecessor_still_exists: Option<DbCard> = state
+            .db
+            .select(("cards", predecessor_id.as_str()))
+            .traced(DbQuery::new(
+                "links.create_card_link",
+                DbOperation::Select,
+                "cards",
+            ))
+            .await?;
+        let successor_still_exists: Option<DbCard> = state
+            .db
+            .select(("cards", successor_id.as_str()))
+            .traced(DbQuery::new(
+                "links.create_card_link",
+                DbOperation::Select,
+                "cards",
+            ))
+            .await?;
         if predecessor_still_exists.is_none() || successor_still_exists.is_none() {
             return Err(ApiError::NotFound);
         }
@@ -237,6 +306,11 @@ pub async fn create_card_link(
             .bind(("succ", successor_id))
             .bind(("reason", reason))
             .bind(("editor", editor_sub(&claims)))
+            .traced(DbQuery::new(
+                "links.create_card_link",
+                DbOperation::Create,
+                "card_links",
+            ))
             .await?
             // Under the lock the duplicate check above should make the unique
             // index unreachable; if it fires anyway, the right answer is still
@@ -284,6 +358,7 @@ pub async fn create_card_link(
 ///
 /// Sending the reason the link already has is a no-op: the link comes back
 /// unchanged and no history row is written.
+#[tracing::instrument(skip_all, fields(bored.link.id = %link_id))]
 pub async fn update_card_link(
     State(state): State<AppState>,
     Path(link_id): Path<String>,
@@ -313,6 +388,11 @@ pub async fn update_card_link(
         .bind(("id", link_id.clone()))
         .bind(("reason", reason))
         .bind(("editor", editor_sub(&claims)))
+        .traced(DbQuery::new(
+            "links.update_card_link",
+            DbOperation::Update,
+            "card_links",
+        ))
         .await?
         .check()?;
 
@@ -348,6 +428,7 @@ pub async fn update_card_link(
 }
 
 /// `DELETE /api/links/:id` — remove a link.
+#[tracing::instrument(skip_all, fields(bored.link.id = %link_id))]
 pub async fn delete_card_link(
     State(state): State<AppState>,
     Path(link_id): Path<String>,
@@ -394,7 +475,15 @@ async fn delete_one_link(
     )
     .await?;
 
-    let _: Option<DbCardLink> = state.db.delete(("card_links", &link_id)).await?;
+    let _: Option<DbCardLink> = state
+        .db
+        .delete(("card_links", &link_id))
+        .traced(DbQuery::new(
+            "links.delete_one_link",
+            DbOperation::Delete,
+            "card_links",
+        ))
+        .await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id: board_id.to_string(),

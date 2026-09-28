@@ -200,17 +200,37 @@ impl ApiError {
 /// otherwise be able to turn a genuine server fault into a 409, which is a
 /// status this module deliberately does not log.
 fn classify(error: surrealdb::Error) -> ApiError {
-    // `to_string()` borrows the error, so it can still be used afterwards.
-    let text = error.to_string();
+    match unique_index_conflict(&error) {
+        Some(conflict) => conflict,
+        // The verbatim message is never kept. Only the redacted description
+        // built from the error's structure survives.
+        None => ApiError::Internal(describe_database_error(&error)),
+    }
+}
 
+/// The client-facing conflict a unique-index violation stands for, if `error`
+/// is one of the two this API translates; `None` for anything else.
+fn unique_index_conflict(error: &surrealdb::Error) -> Option<ApiError> {
+    // `to_string()` borrows the error; the text is dropped, unlogged, when
+    // this function returns.
+    let text = error.to_string();
     if text.contains(&index_violation(BOARD_NAME_UNIQUE)) {
-        ApiError::CONFLICT
+        Some(ApiError::CONFLICT)
     } else if text.contains(&index_violation(CARD_LINKS_PAIR)) {
-        ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE))
+        Some(ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE)))
     } else {
-        // `text` — the verbatim message — is dropped here, unlogged. Only the
-        // redacted description built from the error's structure survives.
-        ApiError::Internal(describe_database_error(&error))
+        None
+    }
+}
+
+/// The [`ErrorType`] a database error would become as a response — without
+/// consuming it. The database span (`db.rs`) labels itself and the
+/// `bored.db.errors` metric with this, so a failed call and the request it
+/// fails carry the same class, from one classification rather than two.
+pub(crate) fn database_error_type(error: &surrealdb::Error) -> ErrorType {
+    match unique_index_conflict(error) {
+        Some(conflict) => conflict.error_type(),
+        None => describe_database_error(error).error_type,
     }
 }
 
@@ -307,9 +327,9 @@ impl From<serde_json::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Read before `match self` moves `self` apart. Only the internal arm
-        // logs it today; #415 records it on the request span for every arm.
+        // logs it; every arm hands it to the response, below.
         let error_type = self.error_type();
-        match self {
+        let mut response = match self {
             Self::NotFound => StatusCode::NOT_FOUND.into_response(),
             Self::Conflict(message) => client_error(StatusCode::CONFLICT, message),
             Self::Unprocessable(message) => client_error(StatusCode::UNPROCESSABLE_ENTITY, message),
@@ -335,7 +355,13 @@ impl IntoResponse for ApiError {
                 );
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
-        }
+        };
+        // Carry the class to the transport layer: `server_span::record_response`
+        // reads this extension to set `error.type` on the request's server
+        // span and on `http.server.request.duration` (card #415). Extensions
+        // are server-side only; nothing here reaches the wire.
+        response.extensions_mut().insert(error_type);
+        response
     }
 }
 
