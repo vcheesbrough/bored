@@ -7,6 +7,7 @@ use axum::{
 };
 // Middleware: one server span per request, and the levels of tower-http's own
 // per-request events.
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
 use crate::auth::auth_middleware;
@@ -124,7 +125,7 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
     // read per-request, since it comes from `ObservabilityConfig` (set once at
     // startup) rather than a live `std::env::var` lookup.
 
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         // `/api/info` is intentionally public — the frontend fetches it
         // unauthenticated on every page load to populate the version watermark.
@@ -138,24 +139,39 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
         // `SpaSvc` serves static files from the dist directory and falls back to
         // index.html for any path that isn't a real file on disk, enabling
         // Leptos client-side routing to handle deep-links (e.g. /boards/123).
-        .fallback_service(SpaSvc::new(static_dir))
-        // Records the response status on the request span and the
-        // `http.server.request.duration` metric. Added *before* `TraceLayer`
-        // below, which makes it the inner layer — so it runs inside the span.
+        .fallback_service(SpaSvc::new(static_dir));
+    with_request_telemetry(router)
+}
+
+/// Wrap `router` in the per-request telemetry layers, outermost last:
+///
+/// 1. `CatchPanicLayer` turns a handler panic into a 500 *inside* the layers
+///    below, so a panicking request is still recorded — without it the
+///    connection task unwinds straight past `record_response`, and the
+///    request leaves no metric point and no error on its span.
+/// 2. `record_response` records the status on the request span and the
+///    `http.server.request.duration` metric. It sits inside `TraceLayer`, so
+///    it runs within the span.
+/// 3. `TraceLayer` opens one `server` span per request, parented on the
+///    caller's `traceparent` (see `server_span.rs`). `Router::layer` applies
+///    after routing, which is what makes the matched route template
+///    available to the span as `http.route`.
+///
+/// tower-http's own per-request events — "started processing request",
+/// "finished processing request", "response failed" — are pushed down to
+/// TRACE, below anything a deployment runs at (both run `debug`). They would
+/// be a "request completed" log line per request, and that fact already has
+/// two homes: the server span records the request and the histogram counts it
+/// (one fact, one signal — skill §3). An internal error is still logged once,
+/// with its cause, by `ApiError::into_response`, and a panic by
+/// `server_span::panic_response`.
+///
+/// Split out of [`app`] so a test can put the same layers around a router of
+/// its own (a route that panics, say).
+pub(crate) fn with_request_telemetry(router: Router) -> Router {
+    router
+        .layer(CatchPanicLayer::custom(server_span::panic_response))
         .layer(middleware::from_fn(server_span::record_response))
-        // One `server` span per request, parented on the caller's
-        // `traceparent` (see `server_span.rs`). `Router::layer` applies after
-        // routing, which is what makes the matched route template available
-        // to the span as `http.route`.
-        //
-        // tower-http's own per-request events — "started processing request",
-        // "finished processing request", "response failed" — are pushed down
-        // to TRACE, below anything a deployment runs at (both run `debug`).
-        // They would be a "request completed" log line per request, and that
-        // fact already has two homes: the server span records the request and
-        // the histogram counts it (one fact, one signal — skill §3). An
-        // internal error is still logged once, with its cause, by
-        // `ApiError::into_response`.
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(server_span::ServerSpan)

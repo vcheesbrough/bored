@@ -197,8 +197,8 @@ pub(crate) struct Enabled {
     /// Every `OTEL_RESOURCE_ATTRIBUTES` entry, decoded, in a stable order.
     /// `service.version` is removed: the build states it, not the deployment.
     pub(crate) resource_attributes: BTreeMap<String, String>,
-    /// The shared endpoint, when set — only for the startup line; the SDK
-    /// reads the variable itself.
+    /// The shared endpoint, when set, as given — for the startup line only.
+    /// What each exporter is actually handed is [`Enabled::endpoints`].
     pub(crate) endpoint: Option<String>,
     /// Each signal's export timeout, in `Signal::ALL` order: its own
     /// `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT`, else the shared

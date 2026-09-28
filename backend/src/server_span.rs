@@ -84,6 +84,20 @@ impl<B> MakeSpan<B> for ServerSpan {
     }
 }
 
+/// The response for a handler that panicked: a bare 500, and one log line.
+///
+/// Used by `CatchPanicLayer` (app.rs), which calls it with the panic payload.
+/// The payload is deliberately *not* logged: a panic message is built from
+/// whatever the code had in hand (`expect` on a user's value, an index out of
+/// bounds on their data), so under #366's policy only the fact of the panic
+/// is recorded. The request span it is written inside supplies the method and
+/// route, and `record_response` then counts it as an unclassified 5xx
+/// (`error.type=_OTHER`).
+pub(crate) fn panic_response(_payload: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    tracing::error!("request handler panicked");
+    axum::response::IntoResponse::into_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 /// Record the response on the request span and in the duration histogram.
 ///
 /// Measures to the moment the handler produced its response head. For every

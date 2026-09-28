@@ -996,6 +996,88 @@ fn an_event_is_written_as_exactly_one_line_of_json() {
     assert_eq!(entry["level"], "INFO");
 }
 
+/// Raising the level after startup — `info` until config loads, then the
+/// deployments' `debug` — reaches both the stdout and the OTLP layer.
+#[test]
+fn raising_the_log_level_after_startup_reaches_stdout_and_otlp() {
+    let stdout = CapturedWriter::default();
+    // `info` is the level `init` starts at.
+    let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "info");
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::debug!("before the raise");
+        pipeline.telemetry.set_log_level("debug");
+        tracing::debug!("after the raise");
+    });
+    let text = stdout.text();
+    assert!(!text.contains("before the raise"), "{text}");
+    assert!(text.contains("after the raise"), "{text}");
+    let bodies: Vec<String> = pipeline.finished_logs().iter().map(log_body).collect();
+    assert!(
+        !bodies.iter().any(|body| body == "before the raise"),
+        "{bodies:?}"
+    );
+    assert!(
+        bodies.iter().any(|body| body == "after the raise"),
+        "{bodies:?}"
+    );
+}
+
+/// A handler that panics is still a recorded request: a 500 response, an
+/// ERROR server span with `error.type=_OTHER`, a duration-metric point, and
+/// one log line that does not carry the panic's message.
+#[tokio::test]
+async fn a_panicking_handler_is_recorded_as_an_unclassified_server_error() {
+    let stdout = CapturedWriter::default();
+    let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let router = crate::app::with_request_telemetry(axum::Router::new().route(
+        "/explode",
+        axum::routing::get(|| async {
+            panic!("secret-panic-detail");
+            #[allow(unreachable_code)]
+            ""
+        }),
+    ));
+    let server = TestServer::new(router).unwrap();
+    server
+        .get("/explode")
+        .await
+        .assert_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+    let spans = pipeline.finished_spans();
+    let span = spans
+        .iter()
+        .find(|span| span.span_kind == SpanKind::Server)
+        .expect("server span");
+    assert_eq!(span.name, "GET /explode");
+    assert_eq!(span.status, opentelemetry::trace::Status::error(""));
+    let error_type = span
+        .attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == semconv::attribute::ERROR_TYPE)
+        .map(|kv| kv.value.to_string());
+    assert_eq!(error_type.as_deref(), Some("_OTHER"));
+
+    let series = all_series(&collect_metrics());
+    assert!(
+        series.iter().any(|(name, attributes)| {
+            name == semconv::metric::HTTP_SERVER_REQUEST_DURATION
+                && attributes.iter().any(|kv| {
+                    kv.key.as_str() == semconv::attribute::HTTP_ROUTE
+                        && kv.value.to_string() == "/explode"
+                })
+        }),
+        "the panicking request has no duration point"
+    );
+
+    let text = stdout.text();
+    assert!(stdout.line("request handler panicked").is_some(), "{text}");
+    assert!(
+        !text.contains("secret-panic-detail"),
+        "the panic message leaked: {text}"
+    );
+}
+
 #[test]
 fn events_below_the_configured_level_are_suppressed_on_stdout_and_otlp() {
     let stdout = CapturedWriter::default();
