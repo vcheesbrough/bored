@@ -5,12 +5,14 @@ use axum::{
     middleware,
     routing::{delete, get, post, put}, // HTTP method helpers for the router
 };
-use tower_http::trace::{DefaultMakeSpan, TraceLayer}; // Middleware: request tracing
+// Middleware: one server span per request, and the levels of tower-http's own
+// per-request events.
+use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
 use crate::auth::auth_middleware;
 use crate::routes::boards::AppState;
 use crate::spa::SpaSvc;
-use crate::{config, events, routes};
+use crate::{config, events, routes, server_span};
 
 /// What `/api/info` reports about the running deployment.
 ///
@@ -137,18 +139,29 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
         // index.html for any path that isn't a real file on disk, enabling
         // Leptos client-side routing to handle deep-links (e.g. /boards/123).
         .fallback_service(SpaSvc::new(static_dir))
-        // `TraceLayer` logs every request (method, path, status, latency) using
-        // the `tracing` crate — visible as structured JSON in production.
+        // Records the response status on the request span and the
+        // `http.server.request.duration` metric. Added *before* `TraceLayer`
+        // below, which makes it the inner layer — so it runs inside the span.
+        .layer(middleware::from_fn(server_span::record_response))
+        // One `server` span per request, parented on the caller's
+        // `traceparent` (see `server_span.rs`). `Router::layer` applies after
+        // routing, which is what makes the matched route template available
+        // to the span as `http.route`.
         //
-        // The span is made at INFO rather than tower-http's default DEBUG.
-        // Deployments filter at `info`, so at DEBUG the span is never created
-        // and events raised inside the request — notably the `ERROR request
-        // failed` line in `error.rs` — carry no method or path. Opening a span
-        // emits no log line of its own; this only makes the request's fields
-        // available to the events that do.
+        // tower-http's own per-request events — "started processing request",
+        // "finished processing request", "response failed" — are pushed down
+        // to TRACE, below anything a deployment runs at (both run `debug`).
+        // They would be a "request completed" log line per request, and that
+        // fact already has two homes: the server span records the request and
+        // the histogram counts it (one fact, one signal — skill §3). An
+        // internal error is still logged once, with its cause, by
+        // `ApiError::into_response`.
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+                .make_span_with(server_span::ServerSpan)
+                .on_request(DefaultOnRequest::new().level(tracing::Level::TRACE))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::TRACE))
+                .on_failure(DefaultOnFailure::new().level(tracing::Level::TRACE)),
         )
 }
 
