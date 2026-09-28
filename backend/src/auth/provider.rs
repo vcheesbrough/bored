@@ -73,10 +73,20 @@ impl std::fmt::Debug for AuthConfig {
     }
 }
 
+/// How many times startup tries the discovery document before giving up.
+const DISCOVERY_ATTEMPTS: u32 = 10;
+
+/// The pause between discovery attempts. With `DISCOVERY_ATTEMPTS` this
+/// bounds the wait for a slow-starting IdP at about ten seconds.
+const DISCOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Subset of the OIDC discovery document we care about. Fields not listed
 /// (e.g. `userinfo_endpoint`, `response_types_supported`) are ignored.
+///
+/// `pub(crate)` only because `discover_with_retries` returns it to tests;
+/// its fields stay private to this module.
 #[derive(Deserialize)]
-struct DiscoveryDoc {
+pub(crate) struct DiscoveryDoc {
     authorization_endpoint: String,
     token_endpoint: String,
     jwks_uri: String,
@@ -136,12 +146,25 @@ impl AuthConfig {
     /// decode failure, quotes the response body. The same redacted text is
     /// what ends up in the startup panic if every attempt fails.
     async fn discover(issuer_url: &str, http: &reqwest::Client) -> Result<DiscoveryDoc, String> {
+        Self::discover_with_retries(issuer_url, http, DISCOVERY_ATTEMPTS, DISCOVERY_RETRY_DELAY)
+            .await
+    }
+
+    /// [`Self::discover`] with the retry budget as parameters, so a test can
+    /// drive the failure path — and read what it logs and returns — in one
+    /// attempt instead of waiting out ten seconds of backoff.
+    pub(crate) async fn discover_with_retries(
+        issuer_url: &str,
+        http: &reqwest::Client,
+        attempts: u32,
+        delay: std::time::Duration,
+    ) -> Result<DiscoveryDoc, String> {
         let base = issuer_url.trim_end_matches('/');
         let url = format!("{base}/.well-known/openid-configuration");
         // Computed once: the redacted form is all that is ever logged.
         let logged_url = redact::url(&url);
         let mut last_err = String::new();
-        for attempt in 1..=10 {
+        for attempt in 1..=attempts {
             // `http.get(..).send()` rather than `reqwest::get(..)`: the free
             // function builds a brand-new client — and connection pool — on
             // every call, with no timeout.
@@ -156,7 +179,7 @@ impl AuthConfig {
                 Err(e) => last_err = format!("fetch failed: {}", redact::http_error(&e)),
             }
             tracing::warn!(url = %logged_url, attempt, error = %last_err, "OIDC discovery attempt failed; retrying");
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(delay).await;
         }
         Err(format!(
             "OIDC discovery {logged_url} failed after retries: {last_err}"

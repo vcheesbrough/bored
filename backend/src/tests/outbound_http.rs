@@ -304,3 +304,95 @@ async fn a_connect_failure_names_host_and_path_but_not_the_query() {
     assert!(!described.contains(SENSITIVE), "query leaked: {described}");
     assert!(!described.contains('?'), "no query at all: {described}");
 }
+
+/// Card #366, through discovery itself: a failed attempt's WARN line and the
+/// error that becomes the startup panic both name the discovery endpoint's
+/// host and path, and neither carries the query string. An issuer URL with a
+/// query is contrived, but it is the one way a query reaches this call site —
+/// and the fake answers 404, so the status-failure branch runs.
+#[tokio::test]
+async fn a_failed_discovery_logs_host_and_path_but_not_the_query() {
+    let idp = start_idp(r#"{"keys":[]}"#, &valid_token_body()).await;
+    // `discover` appends `/.well-known/openid-configuration` to this, so the
+    // request target's query is `token=SECRET…/.well-known/…` and its path is
+    // `/o`, which the fake does not serve.
+    let issuer = format!("{}/o?token={SENSITIVE}", idp.base);
+    let http = crate::http_client::build();
+
+    let (result, logs) = capture_logs_async(crate::auth::AuthConfig::discover_with_retries(
+        &issuer,
+        &http,
+        1,
+        std::time::Duration::ZERO,
+    ))
+    .await;
+    // `.err()` turns the `Result` into an `Option` of its error; the doc
+    // type is not `Debug`, so `expect_err` is not available.
+    let error = result.err().expect("the fake has no document at /o");
+
+    assert!(
+        logs.contains("OIDC discovery attempt failed"),
+        "the attempt is logged: {logs}"
+    );
+    assert!(logs.contains("status=404"), "the status is kept: {logs}");
+    assert!(
+        logs.contains(&format!("{}/o", idp.base)),
+        "host and path kept: {logs}"
+    );
+    assert!(
+        !logs.contains(SENSITIVE),
+        "query leaked into the log: {logs}"
+    );
+    // The error string is what `AuthConfig::from_config` panics with.
+    assert!(error.contains("status=404"), "the status is kept: {error}");
+    assert!(
+        !error.contains(SENSITIVE),
+        "query leaked into the error: {error}"
+    );
+}
+
+/// Card #366, at the call site: the callback's WARN line carries the IdP's
+/// `error` parameter only when it is shaped like an OAuth error code. The
+/// parameter arrives in a query string anyone can type.
+#[tokio::test]
+async fn the_callback_logs_an_oauth_error_code_but_not_free_text() {
+    let idp = start_idp(r#"{"keys":[]}"#, &valid_token_body()).await;
+    let server = TestServer::new(
+        app(
+            state_against(&idp).await,
+            "./dist",
+            DeploymentInfo::new("dev", None),
+        )
+        .await,
+    )
+    .unwrap();
+
+    // A genuine code is kept — the diagnostic an operator needs.
+    let (response, logs) = capture_logs_async(async {
+        server
+            .get("/auth/callback?state=s&error=access_denied")
+            .await
+    })
+    .await;
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert!(
+        logs.contains("auth callback received error") && logs.contains("access_denied"),
+        "the OAuth error code is logged: {logs}"
+    );
+
+    // Free text is not. `%20` is a space, which no error code contains.
+    let (response, logs) = capture_logs_async(async {
+        server
+            .get(&format!(
+                "/auth/callback?state=s&error=denied%20{SENSITIVE}"
+            ))
+            .await
+    })
+    .await;
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert!(
+        logs.contains("auth callback received error"),
+        "the failure is still logged: {logs}"
+    );
+    assert!(!logs.contains(SENSITIVE), "free text leaked: {logs}");
+}
