@@ -184,24 +184,60 @@ layering model and subtree layout.
 
 ## Observability
 
-The contract is the machine-global **`observability`** skill. Per its §2, a
-product built before the contract is covered only by a written record of where
-it falls short, not by silence. This is that record.
+The contract is the machine-global **`observability`** skill (and its
+`references/rust.md` for the crate set). The backend meets its §1 bar since
+card #415: all three signals over OTLP `http/protobuf`, one resource on every
+signal, a span per request and per call that leaves the process, correlated
+logs, RED + saturation metrics, `bored.build.info`, telemetry optional at
+runtime, health separate from it. How it is wired: README § Telemetry. The
+tests that protect it live in `backend/src/observability/tests.rs` — **do not
+weaken them.**
 
-**Current deviation (card #415 is removing it):**
+**What is still short of the contract, deliberately:**
 
-- **Logs** leave the process only as JSON on stdout. The homelab's Alloy
-  collects the container's Docker log stream and ships it to Loki
-  (`log_source="docker"`), labelled from `deploy/docker-compose.yml`. There is no
-  OTLP log export and log records carry no `trace_id`/`span_id`.
-- **Traces:** none exported. tower-http's `TraceLayer` opens a span per request
-  but nothing exports it, and the `traceparent` Traefik sends is ignored.
-- **Metrics:** none.
-- **Shutdown:** `axum::serve` has no shutdown path, so nothing could flush.
+- **No exemplars.** The Rust SDK does not implement them; metric-to-trace
+  correlation is by time range and labels.
+- **No dropped-batch counter.** The SDK exports nothing about itself. Decision:
+  record the gap rather than wrap the exporter. Export failures are logged by
+  the SDK on its own `opentelemetry*` target at `warn`, rate-limited, on stdout
+  (which Alloy still collects), and never on the OTLP log path.
+- **`code.module.name`** on spans comes from `tracing-opentelemetry`'s location
+  option and is not a semantic-convention name; the span-key test allowlists
+  exactly that one key.
+- **Logs are exported twice** — over OTLP and as stdout JSON, which Alloy
+  still collects (`log_source="docker"`). The stdout copy is crash-safe and is
+  what `docker logs` and e2e read; whether Alloy keeps shipping it is the
+  platform's decision.
+- **Only `http/protobuf`.** `grpc` and `http/json` are valid OTLP protocols but
+  this build carries only the http/protobuf client, so startup rejects them.
+- **The one duplicated fact:** `observability.environment` (for `/api/info`,
+  needed with telemetry off) and `deployment.environment.name` in
+  `OTEL_RESOURCE_ATTRIBUTES`. The deploy states both for one `APP_ENV`, and the
+  backend refuses to start if they disagree.
 
-What it takes to move to OTLP is card #415: the telemetry module in
-`backend/src/observability.rs`, the `OTEL_*` variables rendered from
-sovereign-config at deploy time, and the skill's §7 tests.
+**Rules for every card:**
+
+- **Decide telemetry per card.** Every card that changes behaviour records, on
+  the card, whether it needs new or changed spans, metrics, log fields or
+  correlation — "no change needed" is a decision to write down, not the
+  default (skill §1).
+- **Only `observability.rs` (and `observability/`) may name
+  `opentelemetry_sdk`, `opentelemetry_otlp`, `tracing_opentelemetry` or
+  `opentelemetry_appender_tracing`.** Product code uses `tracing`, the
+  `opentelemetry` API crate and `observability::metrics`.
+- **Metric labels come from enums** in `observability/metrics.rs`; identifiers,
+  raw paths and user input go on span attributes, never labels. Span keys set
+  at creation are literals inside `tracing` macros; they must be semconv names
+  or `bored.`-prefixed.
+- **One fact, one signal.** No per-request "request completed" line (the
+  server span and the histogram are that record); no `debug!` per query (the db
+  span is).
+- **Logs never carry secrets.** Tokens, cookies, client secrets, request
+  bodies and SQL text/values stay out of log fields, span attributes and error
+  messages — telemetry leaves the process and lands somewhere with different
+  access control.
+- **Dashboards and alerts are opt-in** (skill §8) and not yet opted into; card
+  #437 is where that decision is made.
 
 ---
 

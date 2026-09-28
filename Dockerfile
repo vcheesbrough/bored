@@ -136,6 +136,11 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
 # fmt/clippy/test layers so a tag change only recompiles the crates that read it.
 ARG RELEASE_TAG=""
 ENV RELEASE_TAG=${RELEASE_TAG}
+# The git commit, compiled in the same way for the `revision` attribute of the
+# `bored.build.info` metric (backend/src/observability/metrics.rs). Empty for
+# local builds, which then report `unknown`. Card #415.
+ARG GIT_REVISION=""
+ENV GIT_REVISION=${GIT_REVISION}
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \

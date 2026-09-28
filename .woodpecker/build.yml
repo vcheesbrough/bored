@@ -71,10 +71,14 @@ steps:
         RELEASE_TAG=$$(cat .release-tag)
         CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)
         IMAGE=registry.desync.link/bored:$$RELEASE_TAG
+        # GIT_REVISION is compiled into the backend (option_env!) and exported
+        # only as the `revision` attribute of the `bored.build.info` metric —
+        # the OCI label below stays for the registry and Alloy (card #415).
         docker build \
           --progress=plain \
           --secret id=github_token,env=GITHUB_TOKEN \
           --build-arg RELEASE_TAG="$$RELEASE_TAG" \
+          --build-arg GIT_REVISION="$$CI_COMMIT_SHA" \
           --label org.opencontainers.image.version="$$RELEASE_TAG" \
           --label org.opencontainers.image.revision="$$CI_COMMIT_SHA" \
           --label org.opencontainers.image.created="$$CREATED" \
@@ -220,7 +224,13 @@ steps:
     # differ ONLY in when/depends_on and can never drift. (A single merged step
     # would need `optional: true` deps, which this Woodpecker rejects — card #254.)
     <<: &dev-deploy-base
-      image: *docker-image
+      # The docker CLI image with the sovereign-config CLI baked in — the same
+      # pinned image v-note deploys with. It carries docker 27.5.1 with the
+      # compose plugin plus sh, so it replaces `*docker-image` for the steps
+      # that run `sovereign-config render`. The CLI must match the running
+      # sovereign-config server (2.30.2, like the provider in
+      # backend/Cargo.toml): bump tag and digest together, as a commit.
+      image: &deploy-image registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf49099830f99b6dbc421527f13fd3f32e1156ed62c9d26987d26c256d1827
       volumes: *docker-socket
       environment:
         REGISTRY_USER:
@@ -233,6 +243,12 @@ steps:
         # use bored_{dev,prod}_oidc_client_secret directly (unchanged).
         SOVEREIGN_CONFIG_ACCESS_URL_FILE:
           from_secret: bored_dev_sovereign_access_url
+        # The *deploy's* credential, not the app's (that is the one above):
+        # a read-only connection rooted at /bored/devops, used by `render`
+        # below to read the telemetry layer, and stripped by `render` from the
+        # environment it hands to compose. Card #415.
+        SOVEREIGN_CONFIG_URL: &devops-url
+          from_secret: bored_devops_sovereign_access_url
       commands:
         - *docker-login
         - docker volume create bored-dev-db
@@ -241,11 +257,24 @@ steps:
         # started a fresh stream set on every push with no single value meaning
         # "dev". The branch rides alongside in APP_BRANCH, which only
         # `/api/info` and the board watermark read. Card #412.
+        #
+        # `sovereign-config render` overlays the direct children of
+        # /bored/devops/dev/otel — the OTEL_* variables and nothing else — onto
+        # compose's environment, and compose passes them into the container
+        # (deploy/docker-compose.yml). The compose file holds no value, so
+        # telemetry is retargeted by a write to the store, not a commit.
+        # Dropping the layer from this line is how an environment runs with
+        # telemetry off; `render` fails closed on an unreadable or empty
+        # layer, so a broken store stops the deploy rather than silently
+        # deploying without telemetry. The deployment.environment.name inside
+        # the layer must match APP_ENV — the backend refuses to start if the
+        # two disagree (AGENTS.md § Observability).
         - |
           BORED_IMAGE_TAG=$(cat .release-tag) \
           APP_ENV=dev APP_BRANCH=$$CI_COMMIT_BRANCH \
           BORED_HOST=bored-dev.desync.link \
           BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
+          sovereign-config render /bored/devops/dev/otel -- \
           docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
     when:
       - event: deployment
@@ -261,7 +290,7 @@ steps:
     depends_on:
       - verify-image
       - apply-authentik-blueprint
-    image: *docker-image
+    image: *deploy-image
     volumes: *docker-socket
     environment:
       REGISTRY_USER:
@@ -274,6 +303,8 @@ steps:
       # uses bored_prod_oidc_client_secret directly (unchanged).
       SOVEREIGN_CONFIG_ACCESS_URL_FILE:
         from_secret: bored_prod_sovereign_access_url
+      # The deploy's credential for the telemetry layer — see deploy-dev.
+      SOVEREIGN_CONFIG_URL: *devops-url
     commands:
       - *docker-login
       - docker volume create bored-prod-db
@@ -281,10 +312,12 @@ steps:
       # label and matches what the other homelab apps use. No APP_BRANCH — prod
       # is not built from a branch anyone needs to see, and compose's
       # `${APP_BRANCH:-}` turns its absence into "no branch". Card #412.
+      # The telemetry layer is rendered exactly as on dev (see deploy-dev).
       - |
         BORED_IMAGE_TAG=$(cat .release-tag) \
         APP_ENV=prod BORED_HOST=bored.desync.link \
         BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db \
+        sovereign-config render /bored/devops/prod/otel -- \
         docker compose -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
   auto-deploy-dev:
