@@ -182,6 +182,29 @@ layering model and subtree layout.
 
 ---
 
+## Observability
+
+The contract is the machine-global **`observability`** skill. Per its §2, a
+product built before the contract is covered only by a written record of where
+it falls short, not by silence. This is that record.
+
+**Current deviation (card #415 is removing it):**
+
+- **Logs** leave the process only as JSON on stdout. The homelab's Alloy
+  collects the container's Docker log stream and ships it to Loki
+  (`log_source="docker"`), labelled from `deploy/docker-compose.yml`. There is no
+  OTLP log export and log records carry no `trace_id`/`span_id`.
+- **Traces:** none exported. tower-http's `TraceLayer` opens a span per request
+  but nothing exports it, and the `traceparent` Traefik sends is ignored.
+- **Metrics:** none.
+- **Shutdown:** `axum::serve` has no shutdown path, so nothing could flush.
+
+What it takes to move to OTLP is card #415: the telemetry module in
+`backend/src/observability.rs`, the `OTEL_*` variables rendered from
+sovereign-config at deploy time, and the skill's §7 tests.
+
+---
+
 ## 5. PR review — repo hooks
 
 Run the **`pr-review-loop`** skill (baseline §5: self-review every PR you open,
