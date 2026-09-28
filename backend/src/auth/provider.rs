@@ -76,8 +76,14 @@ impl std::fmt::Debug for AuthConfig {
 /// How many times startup tries the discovery document before giving up.
 const DISCOVERY_ATTEMPTS: u32 = 10;
 
-/// The pause between discovery attempts. With `DISCOVERY_ATTEMPTS` this
-/// bounds the wait for a slow-starting IdP at about ten seconds.
+/// The pause between discovery attempts.
+///
+/// How long startup can wait depends on how the IdP fails. One that refuses
+/// connections (not listening yet) fails each attempt at once, so the budget
+/// is about `DISCOVERY_ATTEMPTS` x this delay — ~10 s. One that accepts but
+/// never answers costs each attempt the shared client's 10 s request timeout
+/// (`http_client::REQUEST_TIMEOUT`) as well, so the worst case is ~110 s. Before
+/// card #120 discovery had no timeout, and that case hung startup forever.
 const DISCOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Subset of the OIDC discovery document we care about. Fields not listed
