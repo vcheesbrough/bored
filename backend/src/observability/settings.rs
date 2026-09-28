@@ -425,9 +425,15 @@ where
         .get(DEPLOYMENT_ENVIRONMENT_NAME)
         .cloned()
         .ok_or_else(|| {
+            // Name the keys that *were* there — keys are attribute names, not
+            // values, so this says what arrived without echoing any of it.
+            let found: Vec<&str> = resource_attributes.keys().map(String::as_str).collect();
             SettingsError::new(
                 "OTEL_RESOURCE_ATTRIBUTES",
-                format!("must include `{DEPLOYMENT_ENVIRONMENT_NAME}`"),
+                format!(
+                    "must include `{DEPLOYMENT_ENVIRONMENT_NAME}` (keys present: [{}])",
+                    found.join(", ")
+                ),
             )
         })?;
 

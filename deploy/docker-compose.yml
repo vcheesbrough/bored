@@ -51,23 +51,18 @@ services:
       # rather than left in the container's process env. A blank/absent value
       # disables the sovereign layer cleanly (config.rs falls back to defaults+env).
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
-      # Telemetry: the standard OTEL_* variables, passed through by *name only*
-      # (no `=`), so compose copies each from the deploy step's environment
-      # when it is set and leaves it out of the container when it is not.
-      # `.woodpecker/build.yml` fills them with `sovereign-config render
-      # /bored/devops/<env>/otel`; this file never holds a value. None set —
-      # the layer left off the render, e2e, a local `docker compose up` —
-      # means telemetry off (backend/src/observability.rs). Card #415.
-      - OTEL_SERVICE_NAME
-      - OTEL_RESOURCE_ATTRIBUTES
-      - OTEL_EXPORTER_OTLP_ENDPOINT
-      - OTEL_EXPORTER_OTLP_PROTOCOL
-      - OTEL_SDK_DISABLED
-      - OTEL_TRACES_EXPORTER
-      - OTEL_METRICS_EXPORTER
-      - OTEL_LOGS_EXPORTER
-      - OTEL_TRACES_SAMPLER
-      - OTEL_TRACES_SAMPLER_ARG
+    # Telemetry: the standard OTEL_* variables, from a file the deploy writes
+    # and deletes around `docker compose up` (scripts/compose-up-with-otel.sh,
+    # fed by `sovereign-config render /bored/devops/<env>/otel` in
+    # .woodpecker/build.yml). This compose file never holds a value, and the
+    # variables never pass through docker's own environment — the docker CLI
+    # is OpenTelemetry-instrumented and would both export its own spans under
+    # them and rewrite OTEL_RESOURCE_ATTRIBUTES. No file — the layer left off
+    # the render, e2e, a local `docker compose up` — means telemetry off
+    # (backend/src/observability.rs). Card #415.
+    env_file:
+      - path: otel.env
+        required: false
     secrets:
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE
     volumes:

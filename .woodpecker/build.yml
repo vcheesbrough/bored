@@ -260,8 +260,10 @@ steps:
         #
         # `sovereign-config render` overlays the direct children of
         # /bored/devops/dev/otel — the OTEL_* variables and nothing else — onto
-        # compose's environment, and compose passes them into the container
-        # (deploy/docker-compose.yml). The compose file holds no value, so
+        # the environment of scripts/compose-up-with-otel.sh, which hands them
+        # to the container through compose's `env_file:` and hides them from
+        # docker itself (the docker CLI is OpenTelemetry-instrumented and
+        # rewrites OTEL_RESOURCE_ATTRIBUTES). The compose file holds no value, so
         # telemetry is retargeted by a write to the store, not a commit.
         # Dropping the layer from this line is how an environment runs with
         # telemetry off; `render` fails closed on an unreadable or empty
@@ -275,7 +277,7 @@ steps:
           BORED_HOST=bored-dev.desync.link \
           BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
           sovereign-config render /bored/devops/dev/otel -- \
-          docker compose -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
+          ./scripts/compose-up-with-otel.sh -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
@@ -318,7 +320,7 @@ steps:
         APP_ENV=prod BORED_HOST=bored.desync.link \
         BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db \
         sovereign-config render /bored/devops/prod/otel -- \
-        docker compose -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
+        ./scripts/compose-up-with-otel.sh -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
 
   auto-deploy-dev:
     # Same dev deploy as deploy-dev (via <<: *dev-deploy-base), fired on push.
