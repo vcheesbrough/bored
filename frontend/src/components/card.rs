@@ -265,7 +265,7 @@ pub fn CardItem(
             // well as failure.
             if card.get_untracked().tags != next {
                 if let Err(e) = result {
-                    leptos::logging::error!("superseded tag save failed: {e}");
+                    crate::telemetry::error("superseded tag save failed", &e);
                 }
                 return;
             }
@@ -275,7 +275,7 @@ pub fn CardItem(
                     // Put the optimistic change back the way it was, so the chips
                     // never claim a tag the server rejected.
                     card.update(|c| c.tags = previous);
-                    leptos::logging::error!("tag save failed: {e}");
+                    crate::telemetry::error("tag save failed", &e);
                 }
             }
         });
@@ -310,7 +310,7 @@ pub fn CardItem(
                 }
                 Err(e) => {
                     save_status.set(SaveStatus::Failed);
-                    leptos::logging::error!("card save failed: {e}");
+                    crate::telemetry::error("card save failed", &e);
                 }
             }
         });
@@ -430,7 +430,7 @@ pub fn CardItem(
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::delete_card(&card_id).await {
                 Ok(()) => on_delete.run(card_id_cb),
-                Err(e) => leptos::logging::error!("delete card failed: {e}"),
+                Err(e) => crate::telemetry::error("delete card failed", &e),
             }
         });
     });
@@ -454,7 +454,7 @@ pub fn CardItem(
         show_move_submenu.set(false);
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(err) = crate::api::move_card(&card_id, column_id, position).await {
-                leptos::logging::error!("move_card failed: {err}");
+                crate::telemetry::error("move_card failed", &err);
             }
         });
     };
@@ -515,7 +515,7 @@ pub fn CardItem(
                         if let Err(err) =
                             crate::api::move_card(&dragged_id, col_id, pos).await
                         {
-                            leptos::logging::error!("move_card failed: {err}");
+                            crate::telemetry::error("move_card failed", &err);
                         }
                     });
                     drag_payload.set(DragPayload::None);

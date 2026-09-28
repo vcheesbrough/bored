@@ -209,6 +209,55 @@ pub struct AppInfo {
     /// would stall the very poll meant to replace it.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Where, and whether, the SPA sends its own traces and logs (card #416).
+    ///
+    /// The product hands this to the browser instead of the bundle carrying a
+    /// compiled-in endpoint: a client with no telemetry configuration never
+    /// initialises OTLP at all, and a deployment can move or withdraw its
+    /// ingest without rebuilding the SPA. `None` (the key absent) means "off",
+    /// exactly like `enabled: false`.
+    ///
+    /// `#[serde(default)]` for the same version-skew reason as `branch`: an
+    /// older server's reply has no such key, and it must parse as "off" rather
+    /// than fail the heartbeat that reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<ClientTelemetryConfig>,
+}
+
+/// The SPA's telemetry configuration, as `GET /api/info` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientTelemetryConfig {
+    /// Whether the SPA should export at all. Carried explicitly (rather than
+    /// only by the block's presence) so "switched off for this deployment" is
+    /// something the server can say out loud.
+    pub enabled: bool,
+    /// The ingest's base URL — `https://<bored host>` in production, since the
+    /// ingest is same-origin with the app. The SPA appends OTLP's own paths
+    /// (`/v1/traces`, `/v1/logs`) to it. Empty when `enabled` is false.
+    #[serde(default)]
+    pub endpoint: String,
+}
+
+/// Body of `GET /api/telemetry/token`: the browser session's current access
+/// token, which is what the telemetry ingest accepts as its bearer (card #416,
+/// decision D1).
+///
+/// `expires_in` is relative (seconds from the server's now) rather than an
+/// absolute `exp`, so a browser whose clock is wrong still refreshes on time.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TelemetryToken {
+    pub access_token: String,
+    pub expires_in: u64,
+}
+
+/// Hand-written so a stray `{:?}` can never print the bearer.
+impl std::fmt::Debug for TelemetryToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryToken")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Public-facing user identity returned by `GET /api/me`.

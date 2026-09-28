@@ -44,7 +44,14 @@ pub fn install() {
         // checks look for exactly this console line, and the log must land even
         // if building the banner itself goes wrong.
         leptos::logging::error!("wasm panic: {info}");
-        show(detail(cfg!(debug_assertions), &info.to_string()).as_deref());
+        let message = info.to_string();
+        // Then telemetry (card #416): an `exception.type=panic` record in the
+        // current screen's trace, flushed on a keepalive request *before* the
+        // banner — once the hook returns, the module traps and nothing of ours
+        // runs again. `record_panic` never panics and never blocks: it skips
+        // itself if the panic arrived while its own state was borrowed.
+        crate::telemetry::record_panic(&message);
+        show(detail(cfg!(debug_assertions), &message).as_deref());
     }));
 }
 

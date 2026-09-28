@@ -129,12 +129,17 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     let col_id_sort = col_id.clone();
 
     // ── Initial card fetch ─────────────────────────────────────────────────
+    // The board load this column belongs to, so its card fetch joins that
+    // trace (card #416). Absent outside a board view — the fetch is then a
+    // trace of its own.
+    let board_load = use_context::<crate::pages::board_view::BoardLoadTrace>();
     Effect::new(move |_| {
         let id = col_id_fetch.clone();
+        let parent = board_load.and_then(|load| load.get());
         wasm_bindgen_futures::spawn_local(async move {
-            match crate::api::fetch_cards(&id).await {
+            match crate::api::fetch_cards(&id, parent).await {
                 Ok(fetched) => cards.set(fetched.into_iter().map(RwSignal::new).collect()),
-                Err(e) => leptos::logging::error!("failed to fetch cards: {e}"),
+                Err(e) => crate::telemetry::error("failed to fetch cards", &e),
             }
         });
     });
@@ -347,7 +352,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                 });
                 wasm_bindgen_futures::spawn_local(async move {
                     if let Err(err) = crate::api::move_card(&card_id, target_col, position).await {
-                        leptos::logging::error!("move_card failed: {err}");
+                        crate::telemetry::error("move_card failed", &err);
                     }
                 });
                 drag_payload.set(DragPayload::None);
@@ -422,7 +427,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                 // works whether or not SSE is connected at all.
                 Ok(server_cards) => apply_server_order(cards, server_cards),
                 Err(err) => {
-                    leptos::logging::error!("reorder_cards failed: {err}");
+                    crate::telemetry::error("reorder_cards failed", &err);
                     // `try_set`: this runs after an `await`, and the column
                     // may have been deleted (its signals disposed) meanwhile.
                     // A plain `set` on a disposed signal is a panic that
@@ -488,7 +493,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
             let position = cards.with_untracked(|cs| cs.len() as i32);
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(err) = crate::api::move_card(&card_id, target_col, position).await {
-                    leptos::logging::error!("move_card failed: {err}");
+                    crate::telemetry::error("move_card failed", &err);
                 }
             });
             drag_payload.set(DragPayload::None);
@@ -576,7 +581,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                                         new_card_id.set(Some(card.id.clone()));
                                         on_card_created.run(card);
                                     }
-                                    Err(e) => leptos::logging::error!("create card failed: {e}"),
+                                    Err(e) => crate::telemetry::error("create card failed", &e),
                                 }
                             });
                         }
@@ -799,7 +804,7 @@ where
     let ordered = shared::links::order_by_dependency(current_ids, edges).map_err(|err| {
         // Keep the ids in the console for whoever investigates; the user gets
         // the count.
-        leptos::logging::error!("cannot sort column by links: {err}");
+        crate::telemetry::error_detail("cannot sort column by links", &err, "link_cycle");
         match err {
             shared::links::OrderError::Cycle(ids) => SortNotice::Cycle(ids.len()),
         }

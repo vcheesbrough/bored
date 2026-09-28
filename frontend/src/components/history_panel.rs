@@ -88,7 +88,7 @@ pub fn HistoryPanel(
             };
             match result {
                 Ok(rows) => entries.set(rows),
-                Err(e) => leptos::logging::error!("history fetch: {e}"),
+                Err(e) => crate::telemetry::error("history fetch", &e),
             }
             loading.set(false);
         });
@@ -272,7 +272,7 @@ pub fn HistoryPanel(
                                                         wasm_bindgen_futures::spawn_local(async move {
                                                             match crate::api::restore_audit_entry(&id).await {
                                                                 Ok(_) => reload.run(()),
-                                                                Err(err) => leptos::logging::error!("restore failed: {err}"),
+                                                                Err(err) => crate::telemetry::error("restore failed", &err),
                                                             }
                                                         });
                                                     }
@@ -416,7 +416,7 @@ fn CardVersionActions(
                         match crate::api::restore_audit_entry(&id).await {
                             Ok(_) => reload.run(()),
                             Err(err) => {
-                                leptos::logging::error!("content restore failed: {err}");
+                                crate::telemetry::error("content restore failed", &err);
                                 restore_error.set(Some(
                                     "Could not restore this version. Refresh and try again."
                                         .to_string(),

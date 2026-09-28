@@ -55,6 +55,11 @@ pub const REFRESH_COOKIE: &str = "auth_refresh";
 /// Encrypted OIDC ID token retained solely as an RP-initiated logout hint.
 pub const ID_COOKIE: &str = "auth_id";
 
+/// The scope bored's telemetry ingest requires on the bearer the SPA presents
+/// (card #416). Requested at login; `/api/telemetry/token` hands out only a
+/// session token that carries it.
+pub const TELEMETRY_SCOPE: &str = "telemetry:write";
+
 /// Static cookie name for the short-lived state nonce used during the
 /// authorization-code exchange to defeat CSRF on the callback.
 pub const STATE_COOKIE: &str = "auth_state";

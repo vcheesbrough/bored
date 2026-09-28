@@ -366,6 +366,11 @@ async fn probe() {
         return;
     };
 
+    // The same answer carries the client-telemetry configuration (card
+    // #416). Handed over on every heartbeat: the first decides the session,
+    // and a later "off" is honoured.
+    crate::telemetry::configure(info.telemetry.as_ref());
+
     CONN.with(|c| {
         c.failures.set(0);
         c.heartbeat_ok.set(true);

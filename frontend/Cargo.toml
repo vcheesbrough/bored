@@ -44,4 +44,16 @@ web-sys = { version = "0.3", features = [
     "CssStyleDeclaration",
     "NodeList",
     "HtmlTextAreaElement",
+    # Client telemetry (card #416) — see `telemetry::runtime`/`platform`:
+    # high-resolution epoch timestamps, random trace/span ids, the keepalive
+    # unload flush (a raw `fetch` with a `RequestInit`, since gloo-net cannot
+    # set `keepalive`), and the `visibilitychange` flush trigger.
+    "Performance",
+    "Crypto",
+    "Headers",
+    "RequestInit",
+    "RequestCredentials",
+    "VisibilityState",
+    "Document",
+    "Window",
 ] }

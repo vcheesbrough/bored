@@ -167,5 +167,8 @@ async fn info(deployment: DeploymentInfo) -> axum::Json<shared::AppInfo> {
             .unwrap_or_else(|| shared::app_version().to_string()),
         env: deployment.environment,
         branch: deployment.branch,
+        // Client telemetry is wired to configuration in a later commit of
+        // card #416; until then the SPA is told nothing and stays off.
+        telemetry: None,
     })
 }

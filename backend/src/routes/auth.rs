@@ -103,6 +103,12 @@ pub async fn login(
     // Build the authorize URL. We request the standard openid+profile+email
     // scopes plus the env-specific access scope so the issued token will
     // pass the middleware's scope check on subsequent requests.
+    //
+    // `telemetry:write` too (card #416, decision D1): the SPA presents this
+    // session's access token to the telemetry ingest, which refuses a token
+    // without that scope. Requested unconditionally — a provider without the
+    // mapping simply does not grant it, and `/api/telemetry/token` then
+    // declines to hand the token out.
     let authorize = match url::Url::parse_with_params(
         auth.authorize_url(),
         &[
@@ -112,8 +118,9 @@ pub async fn login(
             (
                 "scope",
                 &format!(
-                    "openid profile email offline_access {}",
-                    auth.required_scope
+                    "openid profile email offline_access {} {}",
+                    auth.required_scope,
+                    crate::auth::TELEMETRY_SCOPE
                 ),
             ),
             ("state", &oauth_state),
