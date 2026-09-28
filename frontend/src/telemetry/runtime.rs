@@ -543,7 +543,11 @@ pub fn flush_now() {
         if state.policy.stopped().is_some() {
             return Vec::new();
         }
-        let Some(token) = state.valid_token(now) else {
+        // The refresh margin is waived here: it exists so an ordinary export
+        // never leaves with a token about to die, but on the way out there is
+        // no chance to fetch a fresh one, and a token with seconds left still
+        // gets through. Only a genuinely expired token is not sent.
+        let Some(token) = state.valid_token(now - TOKEN_MARGIN_MS) else {
             return Vec::new();
         };
         let version = state.version;
