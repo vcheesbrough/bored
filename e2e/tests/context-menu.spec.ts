@@ -102,6 +102,9 @@ test.describe('Card context menu', () => {
 
     const cards = page.locator('.card-item');
     const search = page.locator('.navbar-search-input');
+    // `gotoBoardView` waits for the columns row, not for the cards in it; an
+    // empty `order()` would make the first move target no card at all.
+    await expect(cards).toHaveCount(3);
     // The column top to bottom, as card names. `innerText` also carries the
     // card number and any badges, so match on the name rather than compare it.
     const order = async () =>

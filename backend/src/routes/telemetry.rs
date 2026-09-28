@@ -42,6 +42,10 @@ use axum::{
 
 use crate::auth::{SessionAccessToken, TELEMETRY_SCOPE};
 
+/// Least remaining lifetime a handed-out token must have, in seconds. Less
+/// than the SPA's own refresh margin would be a token it discards on arrival.
+const MIN_LIFETIME_SECS: u64 = 30;
+
 /// The handler. `enabled` is fixed when the router is built (the route is
 /// mounted as a closure capturing it, like `/api/info`'s deployment facts);
 /// `session` is present only when the middleware authenticated a browser
@@ -76,10 +80,29 @@ fn decide(enabled: bool, session: Option<&SessionAccessToken>, now: u64) -> Resp
         )
             .into_response();
     }
+    let expires_in = session.exp().saturating_sub(now);
+    if expires_in < MIN_LIFETIME_SECS {
+        // Almost (or already) expired. The middleware refreshes a token inside
+        // its 60 s window, but a request that reuses a just-rotated session
+        // (the refresh cache hands the same rotation to concurrent requests
+        // for up to two minutes) can arrive with an older one. Handing that out
+        // would earn a `401` at the ingest and spend the exporter's one
+        // refresh; a `503` is "try again shortly", and by the next export the
+        // browser's cookies carry a session the middleware refreshes for real.
+        let mut response = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session token about to expire; retry",
+        )
+            .into_response();
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        return response;
+    }
     let body = shared::TelemetryToken {
         access_token: session.token().to_string(),
         // Relative, so a browser with a wrong clock still refreshes on time.
-        expires_in: session.exp().saturating_sub(now),
+        expires_in,
     };
     let mut response = Json(body).into_response();
     // A bearer must never be stored by the browser or anything in between.
@@ -155,10 +178,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_already_expired_token_reports_zero_not_an_underflow() {
-        let s = session("telemetry:write", 500);
-        let response = decide(true, Some(&s), 1_000);
-        let token: shared::TelemetryToken = serde_json::from_str(&body_of(response).await).unwrap();
-        assert_eq!(token.expires_in, 0);
+    async fn a_nearly_or_already_expired_token_is_not_handed_out() {
+        for exp in [500, 1_000, 1_000 + MIN_LIFETIME_SECS - 1] {
+            let s = session("telemetry:write", exp);
+            let response = decide(true, Some(&s), 1_000);
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "exp {exp}"
+            );
+            assert!(response.headers().contains_key(header::RETRY_AFTER));
+            assert!(!body_of(response).await.contains("the-access-token"));
+        }
+        // Exactly the minimum is enough.
+        let s = session("telemetry:write", 1_000 + MIN_LIFETIME_SECS);
+        assert_eq!(decide(true, Some(&s), 1_000).status(), StatusCode::OK);
     }
 }

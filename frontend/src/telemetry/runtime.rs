@@ -505,21 +505,67 @@ async fn post(endpoint: &str, signal: Signal, token: &str, body: String) -> (u16
     let signal_handle = controller.as_ref().map(web_sys::AbortController::signal);
     let _deadline = controller
         .map(|controller| gloo_timers::callback::Timeout::new(10_000, move || controller.abort()));
-    let request = gloo_net::http::Request::post(&url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", &format!("Bearer {token}"))
-        // The ingest reads only the bearer; bored's session cookies have no
-        // business reaching another container.
-        .credentials(web_sys::RequestCredentials::Omit)
-        .abort_signal(signal_handle.as_ref())
-        .body(body);
-    let Ok(request) = request else {
+    // A batch small enough goes out as a keepalive request too: the page can
+    // be left while an ordinary export is in flight, and a plain `fetch` is
+    // cancelled with the page — taking with it the items the tick had already
+    // taken from the outbox, which the unload flush can then no longer see.
+    // Larger batches cannot (keepalive bodies share a 64 KiB budget) and take
+    // that small risk.
+    let keepalive = body.len() <= KEEPALIVE_BATCH_BYTES;
+    let Some(promise) = start_fetch(&url, &body, token, keepalive, signal_handle.as_ref()) else {
         return (0, None);
     };
-    match request.send().await {
-        Ok(response) => (response.status(), response.headers().get("retry-after")),
+    // `dyn_into` checks at run time that the resolved JS value really is a
+    // `Response` before treating it as one.
+    use wasm_bindgen::JsCast;
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+        Ok(value) => match value.dyn_into::<web_sys::Response>() {
+            Ok(response) => (
+                response.status(),
+                response.headers().get("retry-after").ok().flatten(),
+            ),
+            Err(_) => (0, None),
+        },
+        // A rejected fetch: no HTTP answer at all.
         Err(_) => (0, None),
     }
+}
+
+/// Start one POST of an OTLP JSON body with the bearer, optionally as a
+/// keepalive request. `None` if the browser refused to build it.
+fn start_fetch(
+    url: &str,
+    body: &str,
+    token: &str,
+    keepalive: bool,
+    abort: Option<&web_sys::AbortSignal>,
+) -> Option<js_sys::Promise> {
+    let window = web_sys::window()?;
+    let headers = web_sys::Headers::new().ok()?;
+    headers.set("Content-Type", "application/json").ok()?;
+    headers
+        .set("Authorization", &format!("Bearer {token}"))
+        .ok()?;
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_headers(&headers);
+    init.set_body(&wasm_bindgen::JsValue::from_str(body));
+    // The ingest reads only the bearer; bored's session cookies have no
+    // business reaching another container.
+    init.set_credentials(web_sys::RequestCredentials::Omit);
+    if let Some(abort) = abort {
+        init.set_signal(Some(abort));
+    }
+    if keepalive {
+        // `keepalive` has no typed setter in this web-sys version, so it is
+        // set as a plain property on the init dictionary.
+        let _ = js_sys::Reflect::set(
+            &init,
+            &wasm_bindgen::JsValue::from_str("keepalive"),
+            &wasm_bindgen::JsValue::TRUE,
+        );
+    }
+    Some(window.fetch_with_str_and_init(url, &init))
 }
 
 // ── The unload flush ─────────────────────────────────────────────────────
@@ -573,27 +619,9 @@ pub fn flush_now() {
 
 /// Fire one keepalive POST and ignore the outcome.
 fn send_keepalive(url: &str, body: &str, token: &str) {
-    let Some(window) = web_sys::window() else {
+    let Some(promise) = start_fetch(url, body, token, true, None) else {
         return;
     };
-    let Ok(headers) = web_sys::Headers::new() else {
-        return;
-    };
-    let _ = headers.set("Content-Type", "application/json");
-    let _ = headers.set("Authorization", &format!("Bearer {token}"));
-    let init = web_sys::RequestInit::new();
-    init.set_method("POST");
-    init.set_headers(&headers);
-    init.set_body(&wasm_bindgen::JsValue::from_str(body));
-    init.set_credentials(web_sys::RequestCredentials::Omit);
-    // `keepalive` has no typed setter in this web-sys version, so it is set
-    // as a plain property on the init dictionary.
-    let _ = js_sys::Reflect::set(
-        &init,
-        &wasm_bindgen::JsValue::from_str("keepalive"),
-        &wasm_bindgen::JsValue::TRUE,
-    );
-    let promise = window.fetch_with_str_and_init(url, &init);
     // Await it off to the side, so a failure is swallowed here rather than
     // printed by the browser as an unhandled rejection.
     wasm_bindgen_futures::spawn_local(async move {

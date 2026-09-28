@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test as base, type Page } from '@playwright/test';
 import * as fs from 'fs';
 import { apiCreateBoard, apiCreateCard, apiCreateColumn, gotoBoardView, openChooser } from './helpers';
 
@@ -11,6 +11,37 @@ import { apiCreateBoard, apiCreateCard, apiCreateColumn, gotoBoardView, openChoo
 // OpenTelemetry Collector with a file exporter — whose JSON-lines output is
 // mounted read-only here. Assertions are on what that receiver actually got,
 // never on configuration.
+
+/**
+ * Every test here gets a page with a session of its own, signed in through the
+ * real `/auth/login` flow, rather than the suite's shared `storageState`.
+ *
+ * The shared state is one refresh token that every other spec's page starts
+ * from, and the backend's refresh cache hands the same rotation to every
+ * request presenting the same old token for up to two minutes. With the mock's
+ * 65-second access tokens, a page following that shared chain can be handed an
+ * access token that has already expired by the ingest's reckoning — which the
+ * token route rightly refuses (`503`, retry). Production browsers each have
+ * their own chain and 15-minute tokens; a fresh sign-in per test gives these
+ * tests the same.
+ */
+const test = base.extend({
+  page: async ({ browser, baseURL }, use) => {
+    const context = await browser.newContext({
+      baseURL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+    });
+    const page = await context.newPage();
+    // Land on `/health` — plain text, no SPA — so the test's own first
+    // navigation does not abort a half-loaded app (which would surface as a
+    // page error in the liveness checks).
+    await page.goto('/auth/login?return_to=/health');
+    await page.waitForURL((url) => url.pathname === '/health');
+    await use(page);
+    await context.close();
+  },
+});
 
 /** Where the fake receiver writes what reached it (one export per line). */
 const OTLP_OUT = process.env.OTLP_OUT ?? '/otlp/otlp.jsonl';
@@ -200,9 +231,9 @@ test.describe('client telemetry', () => {
     }
   });
 
-  test('a service.name outside the allowed set is dropped by the ingest', async ({ page, request }) => {
+  test('a service.name outside the allowed set is dropped by the ingest', async ({ page }) => {
     // A real session token, as the SPA would get it.
-    const tokenRes = await request.get('/api/telemetry/token');
+    const tokenRes = await page.request.get('/api/telemetry/token');
     expect(tokenRes.status()).toBe(200);
     expect(tokenRes.headers()['cache-control']).toContain('no-store');
     const { access_token: token } = await tokenRes.json();
@@ -295,6 +326,9 @@ test.describe('client telemetry', () => {
 
   test('leaving the page flushes what is buffered (keepalive, not the 5 s tick)', async ({ page, request }) => {
     const board = await boardWithCard(request, 'otel-unload');
+    // A second board only the chooser's own fetch can show: seeing it proves
+    // that fetch — and so the chooser's span — has finished.
+    const other = await apiCreateBoard(request, `otel-unload-other-${Date.now()}`);
     const since = Date.now();
     await gotoBoardView(page, board.name);
     await waitFor(
@@ -308,7 +342,7 @@ test.describe('client telemetry', () => {
     // Something new, then leave at once — well inside the next tick.
     const beforeChooser = Date.now();
     await openChooser(page);
-    await expect(page.locator('.board-chooser')).toContainText(board.name);
+    await expect(page.locator('.board-chooser')).toContainText(other.name);
     await page.goto('about:blank');
 
     await waitFor(
