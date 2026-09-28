@@ -1,0 +1,31 @@
+# The e2e rig's edge (card #416): the same split production's Traefik makes on
+# bored's hostname. OTLP's own paths go to the telemetry ingest
+# (otlp-collector-oidc), unprefixed; everything else goes to the app. The
+# browser therefore sees one origin, as in production — no CORS, and the
+# SPA's configured telemetry endpoint is the app's own origin.
+#
+# Both backends serve self-signed certificates; the static configuration sets
+# `serversTransport.insecureSkipVerify`, as the homelab Traefik does.
+http:
+  routers:
+    otlp:
+      # Longer rule, so it outranks the catch-all below (Traefik orders by
+      # rule length by default).
+      rule: "PathPrefix(`/v1/`) || PathPrefix(`/opentelemetry.proto.collector`)"
+      entryPoints: [websecure]
+      tls: {}
+      service: otlp
+    app:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [websecure]
+      tls: {}
+      service: app
+  services:
+    otlp:
+      loadBalancer:
+        servers:
+          - url: https://collector:4318
+    app:
+      loadBalancer:
+        servers:
+          - url: https://bored:443

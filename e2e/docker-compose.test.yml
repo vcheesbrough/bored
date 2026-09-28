@@ -36,7 +36,7 @@ services:
                   "claims": {
                     "sub": "bored-test-service-account",
                     "aud": ["bored-test"],
-                    "scope": "openid profile email offline_access bored:test:access",
+                    "scope": "openid profile email offline_access bored:test:access telemetry:write",
                     "preferred_username": "test-user",
                     "email": "test@example.com"
                   }
@@ -48,9 +48,15 @@ services:
     networks:
       - e2e-net
 
-  app:
+  # The image under test. Reached through `app` (the edge below), never
+  # directly: the browser, the OIDC redirect and the tests all use
+  # https://app, as production users go through Traefik.
+  bored:
     image: ${TEST_IMAGE:?TEST_IMAGE must be set}
     environment:
+      # Client telemetry (card #416): the SPA exports to its own origin, where
+      # the edge routes OTLP's paths to the ingest.
+      BORED__CLIENT_TELEMETRY__ENDPOINT: https://app
       # No SOVEREIGN_CONFIG_ACCESS_URL[_FILE] here — the sovereign layer stays
       # off (config.rs falls back to defaults + env), proving the no-sovereign
       # fallback path e2e is meant to exercise.
@@ -76,6 +82,78 @@ services:
     networks:
       - e2e-net
 
+  # The edge (card #416): a Traefik doing what production's does on bored's
+  # hostname — OTLP's paths to the ingest, everything else to the app — so the
+  # SPA's telemetry is same-origin here exactly as it is live. Named `app` so
+  # every existing URL, cookie and redirect (https://app/…) is unchanged.
+  app:
+    build:
+      context: ./edge
+      dockerfile_inline: |
+        FROM traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+        COPY dynamic.yml /etc/traefik/dynamic.yml
+    command:
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      # Both backends present self-signed certificates.
+      - --serversTransport.insecureSkipVerify=true
+      - --ping=true
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      bored:
+        condition: service_healthy
+      # Started, never healthy-gated: the ingest is never in a health gate.
+      collector:
+        condition: service_started
+    networks:
+      - e2e-net
+
+  # The telemetry ingest, the released image unmodified (card #416), configured
+  # as bored's deploy configures it: the browser session's issuer and client
+  # id (decision D1), `bored-spa` only, identity narrowed to id and name
+  # (decision D2), environment and path marker stamped.
+  collector:
+    image: ghcr.io/vcheesbrough/otlp-collector-oidc:0.13.0@sha256:2db8a527da487c9091b74ee3a537785153b26f914e9e6f3ca2f1684793f02666
+    environment:
+      OIDC_ISSUER_URL: http://mock-oidc:8080/default
+      OIDC_AUDIENCE: bored-test
+      # The mock starts after the ingest; retry discovery quickly rather than
+      # answering `503 not ready` for the default 30 s.
+      OIDC_DISCOVERY_RETRY: 2s
+      ALLOWED_SERVICE_NAMES: bored-spa
+      CLAIM_ATTRIBUTES: sub=user.id,preferred_username=user.name
+      CLIENT_RESOURCE_ATTRIBUTES: deployment.environment.name=test,telemetry_source=client
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://receiver:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      LOG_OUTPUT: stdout
+    depends_on:
+      - mock-oidc
+      - receiver
+    networks:
+      - e2e-net
+
+  # The fake OTLP receiver behind the ingest (and the server's own export):
+  # writes what reaches it to the shared `otlp-out` volume. See
+  # otlp/receiver.yaml.
+  receiver:
+    build:
+      context: ./otlp
+      dockerfile_inline: |
+        FROM otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
+        COPY receiver.yaml /etc/receiver.yaml
+    command: ["--config=/etc/receiver.yaml"]
+    # Root, to write into the freshly created (root-owned) named volume.
+    user: "0"
+    volumes:
+      - otlp-out:/otlp
+    networks:
+      - e2e-net
+
   playwright:
     build:
       context: .
@@ -93,8 +171,11 @@ services:
       OIDC_CLIENT_ID: bored-test
       OIDC_CLIENT_SECRET: test-secret
       REQUIRED_SCOPE: bored:test:access
+      # What the fake OTLP receiver wrote (card #416's telemetry spec).
+      OTLP_OUT: /otlp/otlp.jsonl
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
+      - otlp-out:/otlp:ro
     depends_on:
       app:
         condition: service_healthy
@@ -105,3 +186,7 @@ services:
 
 networks:
   e2e-net:
+
+volumes:
+  # The fake receiver's output, shared read-only with the Playwright container.
+  otlp-out:
