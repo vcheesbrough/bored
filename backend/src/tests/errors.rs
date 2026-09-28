@@ -378,6 +378,50 @@ async fn a_failed_field_assert_keeps_field_and_record_but_not_the_value() {
     );
 }
 
+/// The driver's client-layer arm (`surrealdb::Error::Api`). `LossyTake` —
+/// asking for one row from a result holding several — carries the whole
+/// response in the error, card bodies included, so it is reduced to its
+/// variant path only.
+#[tokio::test]
+async fn a_client_layer_error_keeps_only_its_variant() {
+    let db = db::connect_mem().await.expect("mem db");
+    for id in ["c1", "c2"] {
+        db.query(
+            "CREATE type::thing('cards', $id) SET \
+             column = type::thing('columns', 'col-1'), \
+             body = $text, position = 1",
+        )
+        .bind(("id", id))
+        .bind(("text", SENSITIVE))
+        .await
+        .expect("dispatched")
+        .check()
+        .expect("card accepted");
+    }
+
+    // `Option<_>` asks for at most one row; there are two.
+    let error = db
+        .query("SELECT * FROM cards")
+        .await
+        .expect("dispatched")
+        .take::<Option<crate::models::DbCard>>(0)
+        .expect_err("two rows cannot become one");
+    assert!(
+        format!("{error:?}").contains(SENSITIVE),
+        "premise: the error carries the rows, got: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").starts_with("Api("),
+        "premise: this is the client-layer arm, got: {error:?}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("db_client"), "error.type missing: {logs}");
+    assert!(logs.contains("Api::LossyTake"), "variant missing: {logs}");
+}
+
 #[tokio::test]
 async fn a_duplicate_record_id_names_the_record() {
     let db = db::connect_mem().await.expect("mem db");
