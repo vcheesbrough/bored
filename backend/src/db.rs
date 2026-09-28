@@ -379,6 +379,94 @@ async fn migrate_board_names(db: &Surreal<Db>) -> surrealdb::Result<()> {
 mod tests {
     use super::*;
 
+    /// Every SurrealDB call in product code goes through `.traced(..)`, so a
+    /// call added later cannot quietly miss its span (card #415).
+    ///
+    /// A source scan, like the telemetry module's SDK allowlist test: for each
+    /// `db.<query|select|create|update|delete|upsert|insert>(` outside test
+    /// code, the text up to the next `.await` must contain `.traced(`. Only
+    /// code before a file's `#[cfg(test)] mod tests` is scanned, and comment
+    /// lines are skipped.
+    #[test]
+    fn every_database_call_is_traced() {
+        const METHODS: [&str; 7] = [
+            "query", "select", "create", "update", "delete", "upsert", "insert",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut pending = vec![root];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    // Test-only trees.
+                    if name != "tests" {
+                        pending.push(path);
+                    }
+                } else if name.ends_with(".rs") && name != "tests.rs" {
+                    files.push(path);
+                }
+            }
+        }
+
+        let mut calls = 0;
+        let mut untraced = Vec::new();
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("read source");
+            // Product code only: stop at the test module.
+            let product = source
+                .find("#[cfg(test)]\nmod tests")
+                .map_or(source.as_str(), |cut| &source[..cut]);
+            // Blank out comment lines so a doc example is not counted.
+            let code: String = product
+                .lines()
+                .map(|line| {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") { "" } else { line }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let bytes = code.as_bytes();
+            let mut index = 0;
+            while let Some(found) = code[index..].find("db") {
+                let start = index + found;
+                index = start + 2;
+                // `db` must be a whole word (not `self.dbx` or `Db`).
+                if start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
+                    continue;
+                }
+                let rest = code[index..].trim_start();
+                let Some(after_dot) = rest.strip_prefix('.') else {
+                    continue;
+                };
+                let after_dot = after_dot.trim_start();
+                if !METHODS
+                    .iter()
+                    .any(|method| after_dot.starts_with(&format!("{method}(")))
+                {
+                    continue;
+                }
+                calls += 1;
+                let chain = &code[index..];
+                let until_await = chain.find(".await").map_or(chain, |end| &chain[..end]);
+                if !until_await.contains(".traced(") {
+                    let line = code[..start].lines().count() + 1;
+                    untraced.push(format!("{}:{line}", path.display()));
+                }
+            }
+        }
+        // Non-degenerate: the scan must be finding the product's calls.
+        assert!(calls > 50, "only {calls} database calls found");
+        assert!(
+            untraced.is_empty(),
+            "database calls without `.traced(..)`:\n{}",
+            untraced.join("\n")
+        );
+    }
+
     // Exercises the real `connect_persistent` path (on-disk SurrealKv + tuned
     // `Config`), rather than the in-memory `connect_mem` used elsewhere. The goal
     // is to prove the tuned-`Config` connection still opens, runs `init()` (schema

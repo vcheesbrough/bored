@@ -36,6 +36,14 @@ RUN mkdir -p backend/src && touch backend/src/main.rs \
 # secret.
 COPY scripts/test-docker-git-credential.sh scripts/test-docker-git-credential.sh
 RUN sh /app/scripts/test-docker-git-credential.sh
+# Same arrangement for the deploy's telemetry hand-off (card #415): the script
+# that keeps the rendered OTEL_* variables away from docker itself and hands
+# them to the container. It runs on the deploy agent, not in this image, but
+# testing it here means every image build checks it. A fake `docker` stands in
+# for the real one; nothing is started.
+COPY scripts/compose-up-with-otel.sh scripts/compose-up-with-otel.sh
+COPY scripts/test-compose-up-with-otel.sh scripts/test-compose-up-with-otel.sh
+RUN sh /app/scripts/test-compose-up-with-otel.sh
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.

@@ -71,7 +71,11 @@ impl<B> MakeSpan<B> for ServerSpan {
             http.request.method = method.label(),
             http.route = route,
             url.path = %request.uri().path(),
-            url.scheme = request.uri().scheme_str().unwrap_or("https"),
+            // Only when the request says so. A server sees an origin-form URI
+            // (`/api/…`) with no scheme, and this span factory cannot tell the
+            // TLS listener from the plain-HTTP one, so it records nothing
+            // rather than a guess.
+            url.scheme = request.uri().scheme_str(),
             http.response.status_code = Empty,
             error.type = Empty,
         );

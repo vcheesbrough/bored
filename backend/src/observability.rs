@@ -785,52 +785,64 @@ impl Telemetry {
 
     /// Flush and stop every provider, bounded by [`FLUSH_TIMEOUT`].
     ///
-    /// Runs the SDK's blocking `shutdown` calls on a blocking-pool thread:
-    /// they wait for the exporter threads, whose HTTP requests run on *this*
+    /// Runs the SDK's blocking `shutdown` calls on blocking-pool threads: they
+    /// wait for the exporter threads, whose HTTP requests run on *this*
     /// runtime (see [`OtlpHttpClient`]), so blocking a runtime thread here
     /// could starve the very requests being waited for.
     ///
-    /// Traces first, then metrics, then logs, so the log records of the
-    /// shutdown itself are the last thing flushed.
+    /// The three providers flush **concurrently**, each on its own thread and
+    /// each under its own bound, so one slow signal cannot spend another's
+    /// time. That matters because the metrics provider ignores its timeout
+    /// argument in this SDK version (its final export is bounded only by the
+    /// reader's own export timeout): run in sequence, a slow collector could
+    /// make it use the whole budget and leave the logs — the shutdown's own
+    /// records included — unflushed. An outer bound caps the total.
     pub async fn shutdown(self) {
         let Providers {
             tracer,
             logger,
             meter,
         } = self.providers;
-        if tracer.is_none() && logger.is_none() && meter.is_none() {
+
+        // One blocking task per provider present. Each returns the signal's
+        // name and, on failure, the SDK's error text (which names the failure
+        // kind, never an exported value).
+        let mut flushes = Vec::new();
+        if let Some(tracer) = tracer {
+            flushes.push(tokio::task::spawn_blocking(move || {
+                ("traces", tracer.shutdown_with_timeout(FLUSH_TIMEOUT).err())
+            }));
+        }
+        if let Some(logger) = logger {
+            flushes.push(tokio::task::spawn_blocking(move || {
+                ("logs", logger.shutdown_with_timeout(FLUSH_TIMEOUT).err())
+            }));
+        }
+        if let Some(meter) = meter {
+            flushes.push(tokio::task::spawn_blocking(move || {
+                ("metrics", meter.shutdown_with_timeout(FLUSH_TIMEOUT).err())
+            }));
+        }
+        if flushes.is_empty() {
             return;
         }
-        let flush = tokio::task::spawn_blocking(move || {
-            let mut failures: Vec<(&'static str, String)> = Vec::new();
-            if let Some(tracer) = tracer
-                && let Err(error) = tracer.shutdown_with_timeout(FLUSH_TIMEOUT)
-            {
-                failures.push(("traces", error.to_string()));
-            }
-            if let Some(meter) = meter
-                && let Err(error) = meter.shutdown_with_timeout(FLUSH_TIMEOUT)
-            {
-                failures.push(("metrics", error.to_string()));
-            }
-            if let Some(logger) = logger
-                && let Err(error) = logger.shutdown_with_timeout(FLUSH_TIMEOUT)
-            {
-                failures.push(("logs", error.to_string()));
-            }
-            failures
-        });
-        // An outer bound as well: the metrics provider ignores its timeout
-        // argument in this SDK version, so the three inner bounds alone do not
-        // cap the total.
-        match tokio::time::timeout(FLUSH_TIMEOUT * 2, flush).await {
-            Ok(Ok(failures)) => {
-                for (signal, error) in failures {
-                    tracing::warn!(signal, error = %error, "telemetry flush at shutdown failed");
+
+        // `join_all` waits for every task; the timeout caps the wait for all
+        // of them together at twice one provider's bound.
+        match tokio::time::timeout(FLUSH_TIMEOUT * 2, futures_util::future::join_all(flushes)).await
+        {
+            Ok(results) => {
+                for result in results {
+                    match result {
+                        Ok((_, None)) => {}
+                        Ok((signal, Some(error))) => {
+                            tracing::warn!(signal, error = %error, "telemetry flush at shutdown failed");
+                        }
+                        Err(join_error) => {
+                            tracing::warn!(error = %join_error, "telemetry flush at shutdown panicked");
+                        }
+                    }
                 }
-            }
-            Ok(Err(join_error)) => {
-                tracing::warn!(error = %join_error, "telemetry flush at shutdown panicked");
             }
             Err(_) => tracing::warn!("telemetry flush at shutdown timed out"),
         }
@@ -1002,6 +1014,31 @@ pub(crate) mod test_support {
                             total += point.value();
                         }
                     }
+                }
+            }
+        }
+        total
+    }
+
+    /// The current value of a sum instrument (counter or up-down counter,
+    /// `u64` or `i64`) with no attributes, summed over its points.
+    pub(crate) fn sum_value(metric: &str) -> i64 {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        let collected = collect_metrics();
+        let mut total: i64 = 0;
+        for scope in collected.scope_metrics() {
+            for found in scope.metrics().filter(|found| found.name() == metric) {
+                match found.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                        total += sum
+                            .data_points()
+                            .map(|point| i64::try_from(point.value()).unwrap_or(i64::MAX))
+                            .sum::<i64>();
+                    }
+                    AggregatedMetrics::I64(MetricData::Sum(sum)) => {
+                        total += sum.data_points().map(|point| point.value()).sum::<i64>();
+                    }
+                    _ => {}
                 }
             }
         }

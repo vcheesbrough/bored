@@ -58,6 +58,12 @@ pub struct AppState {
     /// pool rather than opening their own. Any new outbound call belongs on it
     /// too, so #415's client span and trace propagation cover it for free.
     pub http: reqwest::Client,
+    /// Raised when the server starts shutting down (card #415). SSE streams
+    /// end on it, so an open board tab lets the graceful drain finish at once
+    /// instead of holding it for the whole drain timeout. `main` hands the same
+    /// signal to `listen::serve`, which raises it; a test state keeps its own,
+    /// never-raised one unless the test wires it the same way.
+    pub draining: crate::listen::Draining,
 }
 
 impl AppState {
@@ -78,6 +84,7 @@ impl AppState {
             // Built here, once per state, so every `AppState` — production's
             // and each test's — has a client whether or not auth is enabled.
             http: crate::http_client::build(),
+            draining: crate::listen::Draining::new(),
         }
     }
 

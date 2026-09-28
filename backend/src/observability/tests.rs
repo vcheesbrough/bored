@@ -205,6 +205,7 @@ async fn lifecycle(variables: &[(&str, &str)]) -> (String, Duration, CapturedWri
     let server = tokio::spawn(crate::listen::serve_plain(
         listener,
         router().await,
+        crate::listen::Draining::new(),
         async move {
             let _ = stop_rx.await;
         },
@@ -1222,6 +1223,179 @@ async fn detached_work_starts_its_own_trace_linked_to_the_request() {
     );
     // …and the spawned task ran inside it, not in an orphaned trace.
     assert_eq!(inside.parent_span_id, detached.span_context.span_id());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shutdown with streams open, and the SSE metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An SSE stream never ends by itself, so a graceful shutdown with a board
+/// tab open used to have nothing to wait for but the timeout. The drain signal
+/// ends the stream: `serve_plain` returns promptly, and the stream is closed —
+/// its span ended and its "sse unsubscribed" line written — *before* it
+/// returns, so `main`'s telemetry flush that follows includes it.
+#[tokio::test]
+async fn shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() {
+    let stdout = CapturedWriter::default();
+    let (_telemetry, subscriber, _announce) = prepare_for_test(&[], stdout.clone()).expect("off");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let db = crate::db::connect_mem().await.expect("mem db");
+    let state = AppState::new(db);
+    let draining = state.draining.clone();
+    let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(crate::listen::serve_plain(
+        listener,
+        router,
+        draining,
+        async move {
+            let _ = stop_rx.await;
+        },
+    ));
+
+    // Open a stream and hold it: the response head arrives, the body never ends.
+    let mut stream = reqwest::get(format!("http://{address}/api/events"))
+        .await
+        .expect("stream opens");
+    assert_eq!(stream.status().as_u16(), 200);
+    assert!(stdout.line("sse subscribed").is_some(), "{}", stdout.text());
+
+    let started = Instant::now();
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+    let took = started.elapsed();
+
+    assert!(
+        took < Duration::from_secs(2),
+        "returned after {took:?}: the open stream held the drain"
+    );
+    assert!(
+        stdout.line("sse unsubscribed").is_some(),
+        "the stream must be closed before serve_plain returns: {}",
+        stdout.text()
+    );
+    // The client sees the stream end, rather than a connection that hangs.
+    let rest = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Ok(Some(_)) = stream.chunk().await {}
+    })
+    .await;
+    assert!(rest.is_ok(), "the client's stream did not end");
+}
+
+/// A request that ignores the drain signal cannot hold shutdown: after
+/// `DRAIN_TIMEOUT`, `serve_plain` stops waiting and returns.
+#[tokio::test]
+async fn shutdown_gives_up_on_a_request_that_outlasts_the_drain() {
+    let router = axum::Router::new().route(
+        "/hang",
+        axum::routing::get(|| async {
+            std::future::pending::<()>().await;
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(crate::listen::serve_plain(
+        listener,
+        router,
+        crate::listen::Draining::new(),
+        async move {
+            let _ = stop_rx.await;
+        },
+    ));
+
+    // Start the hanging request and give it time to reach the handler.
+    let hanging = tokio::spawn(reqwest::get(format!("http://{address}/hang")));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let started = Instant::now();
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+    let took = started.elapsed();
+
+    let drain = crate::listen::DRAIN_TIMEOUT;
+    assert!(
+        took >= drain - Duration::from_millis(200),
+        "returned after {took:?}: an in-flight request must get the drain period"
+    );
+    assert!(
+        took < drain + Duration::from_secs(2),
+        "returned after {took:?}: the drain is not bounded"
+    );
+    hanging.abort();
+}
+
+/// `bored.sse.subscribers` goes up when a stream opens and back down when the
+/// client goes away; a subscriber that falls more than the broadcast capacity
+/// behind has the skipped events counted in `bored.sse.lagged` (they used to be
+/// dropped silently); delivered events count in `bored.sse.events`. Driven
+/// through the real handler on a real socket.
+#[tokio::test]
+async fn sse_streams_count_subscribers_delivered_and_lagged_events() {
+    use super::test_support::sum_value;
+    use crate::events::{BROADCAST_CAPACITY, BoardEvent, BroadcastEvent};
+
+    let db = crate::db::connect_mem().await.expect("mem db");
+    let state = AppState::new(db);
+    let events = state.events.clone();
+    let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let subscribers_before = sum_value(SSE_SUBSCRIBERS);
+    let lagged_before = sum_value(SSE_LAGGED);
+    let delivered_before = sum_value(SSE_EVENTS);
+
+    let mut stream = reqwest::get(format!("http://{address}/api/events"))
+        .await
+        .expect("stream opens");
+    assert_eq!(sum_value(SSE_SUBSCRIBERS), subscribers_before + 1);
+
+    // Send more than the channel holds without yielding. The test runtime is
+    // single-threaded, so the server cannot drain the receiver meanwhile: it
+    // falls `overflow` events behind.
+    let overflow = 50;
+    let event = || BroadcastEvent {
+        board_id: "b".to_string(),
+        event: BoardEvent::BoardDeleted {
+            board_id: "b".to_string(),
+        },
+    };
+    for _ in 0..(BROADCAST_CAPACITY + overflow) {
+        let _ = events.send(event());
+    }
+    // Reading lets the server poll the stream, meet the lag, and deliver what
+    // the channel still holds.
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.chunk())
+        .await
+        .expect("an event arrives")
+        .expect("readable");
+    assert!(first.is_some());
+    assert!(
+        sum_value(SSE_LAGGED) >= lagged_before + overflow as i64,
+        "lagged: {} -> {}",
+        lagged_before,
+        sum_value(SSE_LAGGED)
+    );
+    assert!(sum_value(SSE_EVENTS) > delivered_before);
+
+    // The client goes away. The server notices on its next write, so keep
+    // sending until the subscription is released (bounded).
+    drop(stream);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while sum_value(SSE_SUBSCRIBERS) != subscribers_before && Instant::now() < deadline {
+        let _ = events.send(event());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        sum_value(SSE_SUBSCRIBERS),
+        subscribers_before,
+        "the subscriber count must come back down on disconnect"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

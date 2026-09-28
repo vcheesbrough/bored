@@ -175,6 +175,10 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
         AppState::new(db)
     };
 
+    // The state's drain signal, kept before `state` moves into the router:
+    // `listen::serve` raises it on shutdown, and the SSE handler (holding a
+    // clone through the state) ends its streams on it.
+    let draining = state.draining.clone();
     let app = app(
         state,
         &server.static_dir,
@@ -184,7 +188,7 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
 
     // Serve until SIGTERM (`docker stop`) or Ctrl-C, then drain open
     // connections for a bounded time. See `listen.rs`.
-    listen::serve(&server, app, listen::shutdown_signal()).await;
+    listen::serve(&server, app, draining, listen::shutdown_signal()).await;
     Ok(())
 }
 

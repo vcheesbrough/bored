@@ -208,6 +208,16 @@ weaken them.**
   still collects (`log_source="docker"`). The stdout copy is crash-safe and is
   what `docker logs` and e2e read; whether Alloy keeps shipping it is the
   platform's decision.
+- **An inbound `traceparent` is trusted, sampling flag included.** The
+  sampler is parent-based (the contract's default), so a client that sends
+  `traceparent: …-00` through Traefik gets its requests' spans dropped, and it
+  chooses the trace id its log lines are correlated under. Logs and metrics
+  still record every request, so this suppresses the trace record, not the
+  fact of the request. Accepted: sampling policy is the platform's to set
+  (skill §2), and the trust boundary belongs at the edge — Traefik could drop
+  or re-root inbound context — not in each product. Revisit with a
+  non-default sampler in the `otel` layer if the trace record ever has to
+  withstand a hostile client.
 - **Only `http/protobuf`.** `grpc` and `http/json` are valid OTLP protocols but
   this build carries only the http/protobuf client, so startup rejects them.
 - **The one duplicated fact:** `observability.environment` (for `/api/info`,

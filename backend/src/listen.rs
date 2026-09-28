@@ -5,11 +5,12 @@
 //! ten seconds later Docker's SIGKILL ended the process mid-whatever. Nothing
 //! could be flushed, because nothing ran after the serve call.
 //!
-//! Now: on SIGTERM or Ctrl-C the server stops accepting, gives in-flight
-//! requests [`DRAIN_TIMEOUT`] to finish, and returns — so `main` can flush
-//! telemetry. The drain is **bounded** on purpose: SSE streams never end on
-//! their own, so an unbounded graceful shutdown would wait for every open
-//! board tab and never return.
+//! Now: on SIGTERM or Ctrl-C the server raises [`Draining`] (which ends every
+//! SSE stream — they never end on their own), stops accepting, gives in-flight
+//! requests up to [`DRAIN_TIMEOUT`] to finish, and returns — so `main` can
+//! flush telemetry, including the spans of the streams it just closed. The
+//! drain is **bounded** as well, so no single slow request can hold shutdown
+//! past Docker's stop timeout.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -20,6 +21,45 @@ use axum_server::tls_rustls::RustlsConfig; // TLS support using rustls (pure-Rus
 
 use crate::config::ServerConfig;
 
+/// "The server is draining": raised once, when the shutdown signal arrives,
+/// and observable by any number of waiters.
+///
+/// Long-lived responses watch it and end themselves — the SSE stream above
+/// all, which otherwise never ends. A `watch` channel rather than a `Notify`
+/// because a waiter that starts *after* the signal must still see it.
+/// Cloning shares the one channel (it lives behind an `Arc`).
+#[derive(Clone)]
+pub(crate) struct Draining(std::sync::Arc<tokio::sync::watch::Sender<bool>>);
+
+impl Draining {
+    pub(crate) fn new() -> Self {
+        // `watch::channel` returns (Sender, Receiver); receivers are made on
+        // demand by `subscribe`, so the initial one is dropped.
+        let (sender, _) = tokio::sync::watch::channel(false);
+        Self(std::sync::Arc::new(sender))
+    }
+
+    /// Raise the signal. Idempotent.
+    pub(crate) fn start(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Resolves once the signal has been raised (at once if it already was).
+    pub(crate) fn started(&self) -> impl Future<Output = ()> + Send + use<> {
+        let mut receiver = self.0.subscribe();
+        async move {
+            // `wait_for` checks the current value first, then waits for
+            // changes. It errs only once every `Draining` clone (and so the
+            // sender) is gone — the state that owned it has been dropped —
+            // and nothing will ever raise it then, so wait forever rather
+            // than treat that as a shutdown.
+            if receiver.wait_for(|draining| *draining).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
 /// How long open connections get to finish after the shutdown signal. With
 /// `observability::FLUSH_TIMEOUT` and the runtime's own bound this stays inside
 /// the compose file's `stop_grace_period`.
@@ -28,10 +68,14 @@ pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
 /// Serve `app` according to `server`, until `shutdown` completes.
 ///
 /// A TLS pair present ⇒ HTTPS on :443 (the deployed shape). Otherwise plain
-/// HTTP on `server.http-port` (dev mode, e2e).
+/// HTTP on `server.http-port` (dev mode, e2e). When `shutdown` completes,
+/// `draining` is raised first — so SSE streams end and their connections can
+/// close — then the listener stops accepting and open requests get
+/// [`DRAIN_TIMEOUT`] to finish.
 pub(crate) async fn serve(
     server: &ServerConfig,
     app: Router,
+    draining: Draining,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) {
     match server.tls_pair() {
@@ -50,6 +94,7 @@ pub(crate) async fn serve(
             tokio::spawn(async move {
                 shutdown.await;
                 tracing::info!("shutdown signal received, draining connections");
+                draining.start();
                 stopper.graceful_shutdown(Some(DRAIN_TIMEOUT));
             });
             if let Err(error) = axum_server::bind_rustls(addr, tls_config)
@@ -68,7 +113,7 @@ pub(crate) async fn serve(
                 .await
                 .expect("failed to bind the HTTP listener");
             tracing::info!(%addr, "bored backend listening (plain HTTP)");
-            serve_plain(listener, app, shutdown).await;
+            serve_plain(listener, app, draining, shutdown).await;
         }
     }
     tracing::info!("server stopped");
@@ -79,19 +124,14 @@ pub(crate) async fn serve(
 pub(crate) async fn serve_plain(
     listener: tokio::net::TcpListener,
     app: Router,
+    draining: Draining,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) {
-    // A oneshot channel carries "start draining" from the signal watcher below
-    // into axum's graceful-shutdown future.
-    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        // Either a message or the sender being dropped means "stop"; both are
-        // fine, so the result is ignored.
-        let _ = drain_rx.await;
-    });
+    // axum's graceful shutdown waits on this future: once `draining` is
+    // raised it stops accepting and waits for open connections to finish.
+    let server = axum::serve(listener, app).with_graceful_shutdown(draining.started());
     // Run the server as its own task so this function can stop waiting for it
-    // after the drain timeout, rather than for as long as the slowest SSE
-    // client stays connected.
+    // after the drain timeout, rather than for as long as the slowest client.
     let mut task = tokio::spawn(async move { server.await });
 
     tokio::select! {
@@ -104,16 +144,21 @@ pub(crate) async fn serve_plain(
             tracing::info!("shutdown signal received, draining connections");
         }
     }
-    let _ = drain_tx.send(());
+    // Raising the signal also ends every SSE stream (events.rs), so an open
+    // board tab no longer holds the drain open.
+    draining.start();
     match tokio::time::timeout(DRAIN_TIMEOUT, &mut task).await {
         Ok(result) => report(result),
         Err(_) => {
             tracing::warn!(
                 timeout_secs = DRAIN_TIMEOUT.as_secs(),
-                "connections still open after the drain timeout; closing them"
+                "connections still open after the drain timeout; giving up on them"
             );
-            // Aborting the task drops the server future and with it every open
-            // connection.
+            // Stop waiting. `abort` cancels the serve loop; the connections it
+            // had spawned run as tasks of their own and are dropped when the
+            // runtime shuts down (`main`'s bounded `shutdown_timeout`), after
+            // the telemetry flush. Only a request that ignores the drain signal
+            // for the whole timeout gets here.
             task.abort();
         }
     }

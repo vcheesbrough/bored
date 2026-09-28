@@ -211,6 +211,14 @@ pub async fn sse_handler(
                 .unwrap_or_else(|_| r#"{"type":"error"}"#.to_string());
             Ok::<Event, Infallible>(Event::default().data(data))
         });
+    // End the stream when the server starts shutting down (card #415). An SSE
+    // stream never ends by itself, so without this every open tab would hold
+    // the graceful drain for its whole timeout; ended, the response completes,
+    // the connection closes, and the browser's EventSource reconnects to the
+    // next container. `take_until` yields items until the future resolves,
+    // then ends the stream — dropping `SseConnection` with it, which ends the
+    // stream span and logs the unsubscribe before telemetry is flushed.
+    let stream = futures_util::StreamExt::take_until(stream, state.draining.started());
 
     Sse::new(stream).keep_alive(
         // Send a comment ": ping" every 15 seconds to prevent idle disconnects.
