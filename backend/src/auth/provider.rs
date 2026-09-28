@@ -3,6 +3,8 @@
 
 use serde::Deserialize;
 
+use crate::redact;
+
 /// Configuration sourced from environment variables at startup.
 ///
 /// Cloned cheaply via `Arc<AuthConfig>` and shared into every request via
@@ -71,10 +73,26 @@ impl std::fmt::Debug for AuthConfig {
     }
 }
 
+/// How many times startup tries the discovery document before giving up.
+const DISCOVERY_ATTEMPTS: u32 = 10;
+
+/// The pause between discovery attempts.
+///
+/// How long startup can wait depends on how the IdP fails. One that refuses
+/// connections (not listening yet) fails each attempt at once, so the budget
+/// is about `DISCOVERY_ATTEMPTS` x this delay — ~10 s. One that accepts but
+/// never answers costs each attempt the shared client's 10 s request timeout
+/// (`http_client::REQUEST_TIMEOUT`) as well, so the worst case is ~110 s. Before
+/// card #120 discovery had no timeout, and that case hung startup forever.
+const DISCOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Subset of the OIDC discovery document we care about. Fields not listed
 /// (e.g. `userinfo_endpoint`, `response_types_supported`) are ignored.
+///
+/// `pub(crate)` only because `discover_with_retries` returns it to tests;
+/// its fields stay private to this module.
 #[derive(Deserialize)]
-struct DiscoveryDoc {
+pub(crate) struct DiscoveryDoc {
     authorization_endpoint: String,
     token_endpoint: String,
     jwks_uri: String,
@@ -93,8 +111,11 @@ impl AuthConfig {
     /// `Some` and every leaf it requires is already known non-blank
     /// (`OidcConfig::validate` guarantees it). A reachable discovery document
     /// is still a hard startup error.
-    pub async fn from_config(oidc: &crate::config::OidcConfig) -> Self {
-        let discovery = Self::discover(&oidc.issuer_url)
+    ///
+    /// `http` is the backend's shared client (`AppState::http`, card #120),
+    /// borrowed for the discovery calls.
+    pub async fn from_config(oidc: &crate::config::OidcConfig, http: &reqwest::Client) -> Self {
+        let discovery = Self::discover(&oidc.issuer_url, http)
             .await
             .expect("OIDC discovery failed for oidc.issuer-url");
 
@@ -123,26 +144,51 @@ impl AuthConfig {
     /// IdP may not yet be listening when bored boots, so a single attempt is
     /// flaky. Total wait is bounded so genuine misconfiguration still fails
     /// the process quickly rather than hanging.
-    async fn discover(issuer_url: &str) -> Result<DiscoveryDoc, String> {
+    ///
+    /// Logging (card #366): the URL is logged as `redact::url` renders it —
+    /// scheme, host, port and path, with any query string or userinfo
+    /// dropped — and each failure through `redact::http_error`, never
+    /// reqwest's verbatim message, which embeds the full URL and, for a
+    /// decode failure, quotes the response body. The same redacted text is
+    /// what ends up in the startup panic if every attempt fails.
+    async fn discover(issuer_url: &str, http: &reqwest::Client) -> Result<DiscoveryDoc, String> {
+        Self::discover_with_retries(issuer_url, http, DISCOVERY_ATTEMPTS, DISCOVERY_RETRY_DELAY)
+            .await
+    }
+
+    /// [`Self::discover`] with the retry budget as parameters, so a test can
+    /// drive the failure path — and read what it logs and returns — in one
+    /// attempt instead of waiting out ten seconds of backoff.
+    pub(crate) async fn discover_with_retries(
+        issuer_url: &str,
+        http: &reqwest::Client,
+        attempts: u32,
+        delay: std::time::Duration,
+    ) -> Result<DiscoveryDoc, String> {
         let base = issuer_url.trim_end_matches('/');
         let url = format!("{base}/.well-known/openid-configuration");
+        // Computed once: the redacted form is all that is ever logged.
+        let logged_url = redact::url(&url);
         let mut last_err = String::new();
-        for attempt in 1..=10 {
-            match reqwest::get(&url).await {
+        for attempt in 1..=attempts {
+            // `http.get(..).send()` rather than `reqwest::get(..)`: the free
+            // function builds a brand-new client — and connection pool — on
+            // every call, with no timeout.
+            match http.get(&url).send().await {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => match resp.json::<DiscoveryDoc>().await {
                         Ok(doc) => return Ok(doc),
-                        Err(e) => last_err = format!("parsing JSON: {e}"),
+                        Err(e) => last_err = format!("parsing JSON: {}", redact::http_error(&e)),
                     },
-                    Err(e) => last_err = format!("non-success status: {e}"),
+                    Err(e) => last_err = format!("non-success status: {}", redact::http_error(&e)),
                 },
-                Err(e) => last_err = format!("fetch failed: {e}"),
+                Err(e) => last_err = format!("fetch failed: {}", redact::http_error(&e)),
             }
-            tracing::warn!(url = %url, attempt, error = %last_err, "OIDC discovery attempt failed; retrying");
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tracing::warn!(url = %logged_url, attempt, error = %last_err, "OIDC discovery attempt failed; retrying");
+            tokio::time::sleep(delay).await;
         }
         Err(format!(
-            "OIDC discovery {url} failed after retries: {last_err}"
+            "OIDC discovery {logged_url} failed after retries: {last_err}"
         ))
     }
 

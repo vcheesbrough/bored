@@ -33,6 +33,7 @@ use rand::RngCore;
 use serde::Deserialize;
 
 use crate::auth::{Claims, STATE_COOKIE};
+use crate::redact;
 use crate::routes::boards::AppState;
 
 /// Cookie max-age (seconds) for the auth state nonce. Five minutes is more
@@ -172,7 +173,12 @@ pub async fn callback(
     };
 
     if let Some(err) = &params.error {
-        tracing::warn!(error = %err, "auth callback received error");
+        // `err` comes from a query string anyone can type, so only a value
+        // shaped like an RFC 6749 error code is logged (card #366).
+        tracing::warn!(
+            error = redact::oauth_error_code(err),
+            "auth callback received error"
+        );
         return (
             StatusCode::FORBIDDEN,
             format!("authentication denied: {err}"),

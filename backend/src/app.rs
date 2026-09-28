@@ -2,10 +2,12 @@
 
 use axum::{
     Router,
+    body::Body,
+    http::Request,
     middleware,
     routing::{delete, get, post, put}, // HTTP method helpers for the router
 };
-use tower_http::trace::{DefaultMakeSpan, TraceLayer}; // Middleware: request tracing
+use tower_http::trace::TraceLayer; // Middleware: request tracing
 
 use crate::auth::auth_middleware;
 use crate::routes::boards::AppState;
@@ -146,10 +148,35 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
         // failed` line in `error.rs` — carry no method or path. Opening a span
         // emits no log line of its own; this only makes the request's fields
         // available to the events that do.
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
-        )
+        //
+        // The span is built by `request_span` rather than tower-http's
+        // `DefaultMakeSpan`, whose `uri` field is the whole request target,
+        // query string included (card #366).
+        .layer(TraceLayer::new_for_http().make_span_with(request_span))
+}
+
+/// The span every request runs inside — and so the fields every log line
+/// raised during that request carries.
+///
+/// The same three fields tower-http's `DefaultMakeSpan` records (`method`,
+/// `uri`, `version`), at INFO, with one deliberate difference: `uri` is the
+/// **path only**. The query string is where `/auth/callback` receives the
+/// OAuth authorization code and `state`, and where `/api/events` receives its
+/// `board_id`; with the default span, every WARN or ERROR line inside those
+/// requests shipped the code to Loki. The field keeps its old name so existing
+/// Loki queries on `uri` still match. (#415 replaces this span with the
+/// semconv `http.server` span, which carries `url.path` and no query either.)
+///
+/// A plain `fn` works as the `make_span_with` argument because tower-http
+/// implements its `MakeSpan` trait for any `Fn(&Request<B>) -> Span`.
+fn request_span(request: &Request<Body>) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        method = %request.method(),
+        // `Uri::path()` is everything before `?` — never the query.
+        uri = %request.uri().path(),
+        version = ?request.version(),
+    )
 }
 
 pub(crate) async fn health() -> &'static str {
