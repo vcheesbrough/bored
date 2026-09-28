@@ -29,8 +29,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # One TLS stack across the workspace: rustls, no system OpenSSL. `backend`
 # already required this; `mcp` inherits it rather than pulling reqwest's
 # default native-tls backend for the same HTTPS calls to the same host.
-# `default-features = false` also leaves reqwest's `http2` off, so these clients
-# speak HTTP/1.1 — card #363 decides whether that should change.
+#
+# HTTP/1.1 only, deliberately (card #363, iteration 62). `default-features =
+# false` leaves reqwest's `http2` feature off, and we keep it off. Measured
+# 2026-09-28 before deciding:
+#   * Both peers *do* offer h2 via ALPN — Authentik (the only peer of the
+#     backend's shared client) and the bored proxy `mcp` talks to — so this is a choice,
+#     not a limitation.
+#   * No workload here benefits. Every client makes a few small sequential
+#     requests to one origin over a kept-alive connection; h2 only wins on
+#     many *concurrent* requests to one origin. Ten sequential GETs to the
+#     bored proxy measured the same either way (first request ~55-62 ms with
+#     the handshake, reused-connection requests ~0.5-1.3 ms, h1.1 and h2
+#     indistinguishable).
+#   * The cost falls on `mcp`: +3 crates, +0.96 MB (+10.6 %) on the release
+#     binary (9.10 -> 10.06 MB) and a few seconds of clean build. `backend`
+#     pays ~nothing (+528 bytes) — hyper/axum/tonic already compile `h2` in.
+# Revisit if a member starts issuing concurrent requests to one origin (an
+# HTTP exporter or fan-out client added under #415 would be the trigger).
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",

@@ -23,9 +23,11 @@ mod config;
 mod db;
 mod error;
 mod events;
+mod http_client;
 mod listen;
 mod models;
 mod observability;
+mod redact;
 mod routes;
 mod server_span;
 mod spa;
@@ -162,27 +164,12 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
     // `oidc` is `None` when `oidc.issuer-url` is unset — auth-disabled mode,
     // useful for local hacking without a live IdP and for unit tests.
     let state = if let Some(oidc) = oidc {
-        let auth = AuthConfig::from_config(&oidc).await;
-        tracing::info!(
-            issuer = %auth.issuer_url,
-            client_id = %auth.client_id,
-            required_scope = %auth.required_scope,
-            jwks_uri = %auth.jwks_uri,
-            authorize_endpoint = %auth.authorize_endpoint,
-            token_endpoint = %auth.token_endpoint,
-            "OIDC auth enabled"
-        );
-        let cache = Arc::new(JwksCache::new(auth.jwks_uri.clone()));
-        let sessions = Arc::new(
-            AuthSessionManager::from_config(
-                &session.expect("session config is loaded whenever oidc is enabled"),
-            )
-            // `SessionConfig::validate` already rejected a malformed key at the
-            // config-loading stage above — this can only fail if that invariant
-            // is broken.
-            .expect("session.cookie-key already validated by config::SessionConfig::validate"),
-        );
-        AppState::new(db).with_auth(Arc::new(auth), cache, sessions)
+        with_oidc(
+            AppState::new(db),
+            &oidc,
+            &session.expect("session config is loaded whenever oidc is enabled"),
+        )
+        .await
     } else {
         tracing::warn!("oidc.issuer-url not set — auth middleware will inject anonymous claim");
         AppState::new(db)
@@ -199,6 +186,42 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
     // connections for a bounded time. See `listen.rs`.
     listen::serve(&server, app, listen::shutdown_signal()).await;
     Ok(())
+}
+
+/// Enable OIDC auth on `state`: resolve the provider's endpoints, then build
+/// the JWKS cache and the browser-session manager.
+///
+/// Every component is handed `state.http` — the backend's one outbound HTTP
+/// client (card #120) — rather than building its own, so discovery, the JWKS
+/// fetch, token exchange, refresh and revocation all share one connection
+/// pool. `state.http.clone()` is a cheap handle onto that same client (and
+/// pool), not a copy of it. Split out of `main` so a test can run this exact
+/// wiring against a fake identity provider.
+async fn with_oidc(
+    state: AppState,
+    oidc: &config::OidcConfig,
+    session: &config::SessionConfig,
+) -> AppState {
+    // `&state.http` lends the client for the duration of discovery.
+    let auth = AuthConfig::from_config(oidc, &state.http).await;
+    tracing::info!(
+        issuer = %auth.issuer_url,
+        client_id = %auth.client_id,
+        required_scope = %auth.required_scope,
+        jwks_uri = %auth.jwks_uri,
+        authorize_endpoint = %auth.authorize_endpoint,
+        token_endpoint = %auth.token_endpoint,
+        "OIDC auth enabled"
+    );
+    let cache = Arc::new(JwksCache::new(auth.jwks_uri.clone(), state.http.clone()));
+    let sessions = Arc::new(
+        AuthSessionManager::from_config(session, state.http.clone())
+            // `SessionConfig::validate` already rejected a malformed key at the
+            // config-loading stage — this can only fail if that invariant is
+            // broken.
+            .expect("session.cookie-key already validated by config::SessionConfig::validate"),
+    );
+    state.with_auth(Arc::new(auth), cache, sessions)
 }
 
 // ── Integration tests ─────────────────────────────────────────────────────────

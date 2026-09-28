@@ -50,6 +50,13 @@ pub struct AppState {
     /// every board is deliberate — link creation is rare and human-paced, so
     /// per-board locking would be complexity without a measurable win.
     pub link_lock: Arc<Mutex<()>>,
+    /// The backend's one outbound HTTP client (card #120), built by
+    /// `http_client::build`. OIDC discovery, the JWKS fetch, token exchange,
+    /// refresh and revocation all go through it — `JwksCache` and
+    /// `AuthSessionManager` hold clones, which share this client's connection
+    /// pool rather than opening their own. Any new outbound call belongs on it
+    /// too, so #415's client span and trace propagation cover it for free.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -67,6 +74,9 @@ impl AppState {
             jwks_cache: None,
             auth_sessions: None,
             link_lock: Arc::new(Mutex::new(())),
+            // Built here, once per state, so every `AppState` — production's
+            // and each test's — has a client whether or not auth is enabled.
+            http: crate::http_client::build(),
         }
     }
 

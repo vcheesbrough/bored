@@ -659,6 +659,7 @@ dependencies = [
  "sha2",
  "shared",
  "sovereign-config-provider",
+ "strum",
  "surrealdb",
  "tempfile",
  "time",
