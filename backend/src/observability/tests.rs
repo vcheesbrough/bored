@@ -1328,6 +1328,265 @@ async fn shutdown_gives_up_on_a_request_that_outlasts_the_drain() {
     hanging.abort();
 }
 
+/// Start `serve_tls` — the deployed listener — on an ephemeral loopback port
+/// with a certificate made for this test. Returns the base URL, a client that
+/// accepts that certificate, the stop sender and the server task.
+async fn start_tls(
+    router: axum::Router,
+    draining: crate::listen::Draining,
+) -> (
+    String,
+    reqwest::Client,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    // The backend installs `ring` in `main`; a test has to do it itself.
+    // (`Err` means another test already did — fine.)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("test certificate");
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+        certified.cert.pem().into_bytes(),
+        certified.signing_key.serialize_pem().into_bytes(),
+    )
+    .await
+    .expect("tls config");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(crate::listen::serve_tls(
+        listener,
+        tls,
+        router,
+        draining,
+        async move {
+            let _ = stop_rx.await;
+        },
+    ));
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    (format!("https://localhost:{port}"), client, stop_tx, server)
+}
+
+/// The TLS listener (what both deployments run) ends open SSE streams on
+/// shutdown and returns promptly, with the stream closed first.
+#[tokio::test]
+async fn tls_shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() {
+    let stdout = CapturedWriter::default();
+    let (_telemetry, subscriber, _announce) = prepare_for_test(&[], stdout.clone()).expect("off");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let db = crate::db::connect_mem().await.expect("mem db");
+    let state = AppState::new(db);
+    let draining = state.draining.clone();
+    let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
+    let (base, client, stop_tx, server) = start_tls(router, draining).await;
+
+    let stream = client
+        .get(format!("{base}/api/events"))
+        .send()
+        .await
+        .expect("stream opens over TLS");
+    assert_eq!(stream.status().as_u16(), 200);
+    assert!(stdout.line("sse subscribed").is_some(), "{}", stdout.text());
+
+    let started = Instant::now();
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+    let took = started.elapsed();
+
+    assert!(
+        took < Duration::from_secs(2),
+        "returned after {took:?}: the open stream held the drain"
+    );
+    assert!(
+        stdout.line("sse unsubscribed").is_some(),
+        "the stream must be closed before serve_tls returns: {}",
+        stdout.text()
+    );
+    drop(stream);
+}
+
+/// …and a request that ignores the drain signal cannot hold it past
+/// `DRAIN_TIMEOUT`.
+#[tokio::test]
+async fn tls_shutdown_gives_up_on_a_request_that_outlasts_the_drain() {
+    let router = axum::Router::new().route(
+        "/hang",
+        axum::routing::get(|| async {
+            std::future::pending::<()>().await;
+        }),
+    );
+    let (base, client, stop_tx, server) = start_tls(router, crate::listen::Draining::new()).await;
+
+    let hanging = tokio::spawn(async move { client.get(format!("{base}/hang")).send().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let started = Instant::now();
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+    let took = started.elapsed();
+
+    let drain = crate::listen::DRAIN_TIMEOUT;
+    assert!(
+        took >= drain - Duration::from_millis(200),
+        "returned after {took:?}: an in-flight request must get the drain period"
+    );
+    assert!(
+        took < drain + Duration::from_secs(2),
+        "returned after {took:?}: the drain is not bounded"
+    );
+    hanging.abort();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The real OTLP client, end to end
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What a fake OTLP/HTTP collector received: one entry per POST.
+#[derive(Clone, Debug)]
+struct Received {
+    path: String,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+/// A fake collector on a real loopback port: accepts any POST, records it,
+/// answers 200 with an empty body (a valid empty protobuf response).
+async fn fake_collector() -> (String, Arc<Mutex<Vec<Received>>>) {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&received);
+    let router = axum::Router::new().fallback(
+        move |uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
+            let record = Arc::clone(&record);
+            async move {
+                record.lock().unwrap().push(Received {
+                    path: uri.path().to_string(),
+                    content_type: headers
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string(),
+                    body: body.to_vec(),
+                });
+                axum::http::StatusCode::OK
+            }
+        },
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://{address}"), received)
+}
+
+/// The production exporters — through `OtlpHttpClient`, the only way the
+/// signals leave the process — deliver a span and a log record to a collector
+/// as http/protobuf, on the OTLP paths, carrying the span's trace id and the
+/// service identity. Every other test reads the in-memory exporters; this one
+/// checks the bytes that actually go out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_real_exporters_deliver_spans_and_logs_to_a_collector() {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let (endpoint, received) = fake_collector().await;
+    let stdout = CapturedWriter::default();
+    let variables = [
+        TEST_VARIABLES[0],
+        TEST_VARIABLES[1],
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint.as_str()),
+        ("OTEL_METRICS_EXPORTER", "none"),
+    ];
+    let (telemetry, subscriber, _announce) =
+        prepare_for_test(&variables, stdout.clone()).expect("on");
+
+    // The global default for the duration, so the batch threads' spans and
+    // the exporters' own tasks all see the same subscriber.
+    let trace_id = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!("delivered span");
+        let trace_id = span.context().span().span_context().trace_id();
+        span.in_scope(|| tracing::info!("delivered log line"));
+        trace_id
+    };
+    telemetry.shutdown().await;
+
+    let received = received.lock().unwrap().clone();
+    let paths: BTreeSet<&str> = received.iter().map(|post| post.path.as_str()).collect();
+    assert!(
+        paths.contains("/v1/traces"),
+        "paths: {paths:?}; stdout: {}",
+        stdout.text()
+    );
+    assert!(paths.contains("/v1/logs"), "paths: {paths:?}");
+    for post in &received {
+        assert_eq!(post.content_type, "application/x-protobuf", "{}", post.path);
+    }
+    // The trace id travels as its 16 raw bytes in the protobuf body.
+    let trace_bytes = trace_id.to_bytes();
+    let contains = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    };
+    for path in ["/v1/traces", "/v1/logs"] {
+        let body: Vec<u8> = received
+            .iter()
+            .filter(|post| post.path == path)
+            .flat_map(|post| post.body.clone())
+            .collect();
+        assert!(contains(&body, &trace_bytes), "{path} lacks the trace id");
+        assert!(contains(&body, b"bored"), "{path} lacks service.name");
+        assert!(
+            contains(&body, b"deployment.environment.name"),
+            "{path} lacks the environment"
+        );
+    }
+}
+
+/// Stdout names the same span the OTLP record does when the innermost span is
+/// a dependency's (surrealdb opens `debug` spans the span layer filters out).
+#[test]
+fn a_log_inside_a_dependency_span_carries_the_enclosing_product_span_ids() {
+    let stdout = CapturedWriter::default();
+    let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "debug");
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info_span!("product").in_scope(|| {
+            tracing::debug_span!(target: "surrealdb::core", "dependency").in_scope(|| {
+                tracing::debug!("inside the dependency span");
+            });
+        });
+    });
+
+    let spans = pipeline.finished_spans();
+    let product = spans
+        .iter()
+        .find(|span| span.name == "product")
+        .expect("product span");
+    assert!(
+        !spans.iter().any(|span| span.name == "dependency"),
+        "precondition: the dependency span is not exported"
+    );
+    let line = stdout
+        .line("inside the dependency span")
+        .expect("stdout line");
+    assert_eq!(
+        line["trace_id"],
+        product.span_context.trace_id().to_string()
+    );
+    assert_eq!(line["span_id"], product.span_context.span_id().to_string());
+
+    let logs = pipeline.finished_logs();
+    let record = logs
+        .iter()
+        .find(|log| log_body(log) == "inside the dependency span")
+        .expect("record");
+    let context = record.record.trace_context().expect("trace context");
+    assert_eq!(context.span_id, product.span_context.span_id());
+}
+
 /// `bored.sse.subscribers` goes up when a stream opens and back down when the
 /// client goes away; a subscriber that falls more than the broadcast capacity
 /// behind has the skipped events counted in `bored.sse.lagged` (they used to be

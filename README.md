@@ -222,9 +222,12 @@ holding the `OTEL_*` leaves as direct children and nothing else:
 /bored/devops/{dev,prod}/otel/OTEL_EXPORTER_OTLP_PROTOCOL  # http/protobuf (prod aliases dev)
 ```
 
-The deploy steps render it onto compose's environment —
-`sovereign-config render /bored/devops/<env>/otel -- docker compose … up` — and
-`deploy/docker-compose.yml` passes the names through without holding a value. Retargeting or
+The deploy steps render it —
+`sovereign-config render /bored/devops/<env>/otel -- ./scripts/compose-up-with-otel.sh … up` —
+and the script writes the variables to `deploy/otel.env`, which `deploy/docker-compose.yml`
+reads through `env_file:` (`required: false`), unsets them so docker itself never sees them
+(the docker CLI is OpenTelemetry-instrumented and would rewrite `OTEL_RESOURCE_ATTRIBUTES`),
+and deletes the file once compose has read it. The compose file holds no value. Retargeting or
 silencing telemetry is a write to the store and a redeploy, not a commit. The collector address is
 one shared leaf, `/observability/otlp-endpoint`, aliased into every environment. `telemetry_source=otlp`
 is how Alloy marks bored's OTLP logs `log_source="otlp"` in Loki.

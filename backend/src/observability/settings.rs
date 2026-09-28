@@ -115,6 +115,26 @@ impl Signal {
         }
     }
 
+    /// The path the spec appends to the *shared* endpoint for this signal (a
+    /// per-signal endpoint is used exactly as given).
+    fn otlp_path(self) -> &'static str {
+        match self {
+            Signal::Traces => "v1/traces",
+            Signal::Metrics => "v1/metrics",
+            Signal::Logs => "v1/logs",
+        }
+    }
+
+    /// `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT` — the per-signal export timeout,
+    /// in milliseconds, which wins over the shared `OTEL_EXPORTER_OTLP_TIMEOUT`.
+    fn timeout_variable(self) -> &'static str {
+        match self {
+            Signal::Traces => "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+            Signal::Metrics => "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
+            Signal::Logs => "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT",
+        }
+    }
+
     /// Lower-case name for the startup line.
     pub(crate) fn name(self) -> &'static str {
         match self {
@@ -153,7 +173,9 @@ impl OffReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Decision {
     Off(OffReason),
-    On(Enabled),
+    // Boxed: `Enabled` is a few hundred bytes and `Off` one, and clippy
+    // rightly objects to every `Decision` paying for the larger.
+    On(Box<Enabled>),
 }
 
 /// Telemetry is on. Everything the module needs that the SDK would not read
@@ -178,6 +200,22 @@ pub(crate) struct Enabled {
     /// The shared endpoint, when set — only for the startup line; the SDK
     /// reads the variable itself.
     pub(crate) endpoint: Option<String>,
+    /// Each signal's export timeout, in `Signal::ALL` order: its own
+    /// `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT`, else the shared
+    /// `OTEL_EXPORTER_OTLP_TIMEOUT`, else the spec's 10 s. The module applies
+    /// it to the HTTP request itself, which the SDK cannot do for a client it
+    /// did not build.
+    pub(crate) timeouts: [std::time::Duration; 3],
+    /// Each exporting signal's full endpoint URL, in `Signal::ALL` order: its
+    /// own `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` as given, else the shared
+    /// endpoint with the spec's `/v1/<signal>` appended. `None` for a signal
+    /// that does not export.
+    ///
+    /// Resolved here and handed to each exporter explicitly, rather than left
+    /// to the SDK's own reading of the environment, so the URL that is
+    /// validated is the URL that is used — and the SDK's `localhost` fallback
+    /// has nothing to fall back from.
+    pub(crate) endpoints: [Option<String>; 3],
 }
 
 impl Enabled {
@@ -189,7 +227,28 @@ impl Enabled {
             Signal::Logs => self.logs,
         }
     }
+
+    /// `signal`'s endpoint URL (see [`Enabled::endpoints`]).
+    pub(crate) fn endpoint_for(&self, signal: Signal) -> Option<&str> {
+        let index = Signal::ALL
+            .iter()
+            .position(|candidate| *candidate == signal)
+            .expect("every signal is in ALL");
+        self.endpoints[index].as_deref()
+    }
+
+    /// `signal`'s export timeout (see [`Enabled::timeouts`]).
+    pub(crate) fn timeout(&self, signal: Signal) -> std::time::Duration {
+        match signal {
+            Signal::Traces => self.timeouts[0],
+            Signal::Metrics => self.timeouts[1],
+            Signal::Logs => self.timeouts[2],
+        }
+    }
 }
+
+/// The spec's default for `OTEL_EXPORTER_OTLP_TIMEOUT`.
+const DEFAULT_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A variable (or a combination of them) that fails validation. Names the
 /// variable and why, **never** echoes a value it cannot vouch for: a header
@@ -437,7 +496,31 @@ where
             )
         })?;
 
-    Ok(Decision::On(Enabled {
+    // Already checked to be non-negative integers (milliseconds) above.
+    let millis = |variable: &str| get(variable).and_then(|value| value.parse::<u64>().ok());
+    let shared_timeout = millis("OTEL_EXPORTER_OTLP_TIMEOUT");
+    let timeouts = Signal::ALL.map(|signal| {
+        millis(signal.timeout_variable())
+            .or(shared_timeout)
+            .map_or(DEFAULT_EXPORT_TIMEOUT, std::time::Duration::from_millis)
+    });
+
+    // Each exporting signal's URL. The checks above guarantee that one of the
+    // two sources exists for every signal that exports.
+    let mut endpoints: [Option<String>; 3] = [None, None, None];
+    for (index, signal) in Signal::ALL.iter().enumerate() {
+        if exports[index] {
+            endpoints[index] = get(signal.endpoint_variable())
+                .map(str::to_string)
+                .or_else(|| {
+                    shared_endpoint.map(|shared| {
+                        format!("{}/{}", shared.trim_end_matches('/'), signal.otlp_path())
+                    })
+                });
+        }
+    }
+
+    Ok(Decision::On(Box::new(Enabled {
         traces: exports[0],
         metrics: exports[1],
         logs: exports[2],
@@ -445,7 +528,9 @@ where
         environment,
         resource_attributes,
         endpoint: shared_endpoint.map(str::to_string),
-    }))
+        timeouts,
+        endpoints,
+    })))
 }
 
 /// An endpoint must be an absolute `http`/`https` URL with a host. `url`
@@ -776,6 +861,58 @@ mod tests {
         assert!(parse_resource_attributes("a=1,a=2").is_err());
         assert!(parse_resource_attributes("a=%zz").is_err());
         assert!(parse_resource_attributes("a=%2").is_err());
+    }
+
+    #[test]
+    fn endpoints_are_resolved_per_signal_as_the_spec_says() {
+        let mut vars = with("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318/");
+        vars.push((
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            "http://logs:9999/custom",
+        ));
+        let Decision::On(enabled) = decide(vars).unwrap() else {
+            panic!("on")
+        };
+        // The shared endpoint gains `/v1/<signal>` (one slash, whatever the
+        // value ended with); a per-signal endpoint is used exactly as given.
+        assert_eq!(
+            enabled.endpoint_for(Signal::Traces),
+            Some("http://collector:4318/v1/traces")
+        );
+        assert_eq!(
+            enabled.endpoint_for(Signal::Metrics),
+            Some("http://collector:4318/v1/metrics")
+        );
+        assert_eq!(
+            enabled.endpoint_for(Signal::Logs),
+            Some("http://logs:9999/custom")
+        );
+        // A silenced signal has none.
+        let Decision::On(silenced) = decide(with("OTEL_TRACES_EXPORTER", "none")).unwrap() else {
+            panic!("on")
+        };
+        assert_eq!(silenced.endpoint_for(Signal::Traces), None);
+    }
+
+    #[test]
+    fn export_timeouts_follow_the_spec_precedence() {
+        use std::time::Duration;
+        let Decision::On(defaulted) = decide(complete()).unwrap() else {
+            panic!("on")
+        };
+        for signal in Signal::ALL {
+            assert_eq!(defaulted.timeout(signal), Duration::from_secs(10));
+        }
+        let mut vars = complete();
+        vars.push(("OTEL_EXPORTER_OTLP_TIMEOUT", "2500"));
+        vars.push(("OTEL_EXPORTER_OTLP_LOGS_TIMEOUT", "700"));
+        let Decision::On(set) = decide(vars).unwrap() else {
+            panic!("on")
+        };
+        // The per-signal value wins; the shared one covers the rest.
+        assert_eq!(set.timeout(Signal::Logs), Duration::from_millis(700));
+        assert_eq!(set.timeout(Signal::Traces), Duration::from_millis(2500));
+        assert_eq!(set.timeout(Signal::Metrics), Duration::from_millis(2500));
     }
 
     #[test]

@@ -72,10 +72,6 @@ const INITIAL_LOG_LEVEL: &str = "info";
 /// Docker's stop timeout, so the flush happens before a SIGKILL could.
 pub(crate) const FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Timeout on one OTLP HTTP request. The spec's default for
-/// `OTEL_EXPORTER_OTLP_TIMEOUT`.
-const EXPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// The instrumentation scope every product span, log and metric is reported
 /// under.
 const SCOPE: &str = "bored";
@@ -160,7 +156,18 @@ impl Providers {
     /// export request onto it (see [`OtlpHttpClient`]).
     fn otlp(enabled: &Enabled) -> Result<Self, TelemetryError> {
         let resource = resource(enabled);
-        let client = OtlpHttpClient::new(tokio::runtime::Handle::current());
+        // One client per signal, each with that signal's export timeout on the
+        // request itself (see `settings::Enabled::timeouts`).
+        let runtime = tokio::runtime::Handle::current();
+        let client_for =
+            |signal: Signal| OtlpHttpClient::new(runtime.clone(), enabled.timeout(signal));
+        // Each exporter is given the URL settings.rs resolved and validated,
+        // explicitly, so the SDK's own environment reading (and its
+        // `localhost` default) never decides where telemetry goes. It is
+        // present for every signal that exports; the empty fallback is
+        // unreachable and would fail the build of that exporter.
+        let endpoint_for =
+            |signal: Signal| enabled.endpoint_for(signal).unwrap_or_default().to_string();
 
         // A small helper so each builder's error names its signal.
         let failed = |signal: Signal| {
@@ -172,17 +179,19 @@ impl Providers {
 
         // Each exporter: `with_http()` picks the HTTP transport,
         // `with_protocol(HttpBinary)` is http/protobuf, and `with_http_client`
-        // hands it our client instead of letting it build its own. The
-        // endpoint, headers and timeout are *not* set here: the builder reads
-        // `OTEL_EXPORTER_OTLP_*` itself, and settings.rs has already checked
-        // them (in particular that the endpoint is present).
+        // hands it our client instead of letting it build its own, and
+        // `with_endpoint` the resolved URL. Headers are *not* set here: the
+        // builder reads `OTEL_EXPORTER_OTLP_HEADERS` itself. It reads the
+        // timeout variables too, but only for its retry deadline — the request
+        // itself is bounded by the client above.
         let tracer = enabled
             .traces
             .then(|| {
                 opentelemetry_otlp::SpanExporter::builder()
                     .with_http()
                     .with_protocol(Protocol::HttpBinary)
-                    .with_http_client(client.clone())
+                    .with_endpoint(endpoint_for(Signal::Traces))
+                    .with_http_client(client_for(Signal::Traces))
                     .build()
                     .map(|exporter| tracer_provider(exporter, resource.clone()))
                     .map_err(failed(Signal::Traces))
@@ -195,7 +204,8 @@ impl Providers {
                 opentelemetry_otlp::LogExporter::builder()
                     .with_http()
                     .with_protocol(Protocol::HttpBinary)
-                    .with_http_client(client.clone())
+                    .with_endpoint(endpoint_for(Signal::Logs))
+                    .with_http_client(client_for(Signal::Logs))
                     .build()
                     .map(|exporter| logger_provider(exporter, resource.clone()))
                     .map_err(failed(Signal::Logs))
@@ -207,7 +217,8 @@ impl Providers {
                 opentelemetry_otlp::MetricExporter::builder()
                     .with_http()
                     .with_protocol(Protocol::HttpBinary)
-                    .with_http_client(client.clone())
+                    .with_endpoint(endpoint_for(Signal::Metrics))
+                    .with_http_client(client_for(Signal::Metrics))
                     // Cumulative is the contract (skill §2): a backend that
                     // wants delta gets it from the collector.
                     .with_temporality(Temporality::Cumulative)
@@ -342,9 +353,11 @@ struct OtlpHttpClient {
 }
 
 impl OtlpHttpClient {
-    fn new(runtime: tokio::runtime::Handle) -> Self {
+    /// `timeout` bounds each export request, send to last response byte — the
+    /// signal's `OTEL_EXPORTER_OTLP_*TIMEOUT` (10 s by default).
+    fn new(runtime: tokio::runtime::Handle, timeout: Duration) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(EXPORT_REQUEST_TIMEOUT)
+            .timeout(timeout)
             .build()
             // `build` fails only if the TLS backend cannot initialise, which
             // the rest of the process would hit first; a plain client keeps
@@ -605,20 +618,26 @@ where
         self.inner
             .format_event(ctx, Writer::new(&mut line), event)?;
 
-        // The event's innermost span, if it has one. `event_scope` honours an
-        // explicit `parent:` as well as the current span.
-        let span_id = ctx
+        // The event's scope, innermost span first (`event_scope` honours an
+        // explicit `parent:` as well as the current span). The ids are
+        // collected up front so no span is borrowed while the span layer's
+        // extensions are read below.
+        let scope: Vec<tracing::span::Id> = ctx
             .event_scope()
-            .and_then(|mut scope| scope.next())
-            .map(|span| span.id());
-        let ids = span_id.and_then(|id| {
-            // Read the OpenTelemetry context the span layer keeps for this
-            // span. Done *after* formatting, so no span extensions are borrowed
-            // while the span layer takes its lock.
-            let dispatch = self.dispatch.get()?;
-            tracing_opentelemetry::get_otel_context(&id, &dispatch)
-                .map(|context| context.span().span_context().clone())
-                .filter(|span_context| span_context.is_valid())
+            .map(|scope| scope.map(|span| span.id()).collect())
+            .unwrap_or_default();
+        // The nearest enclosing span the span layer tracks. The innermost one
+        // may be a dependency's (surrealdb opens `debug` spans) that the span
+        // layer filters out and so has no OTel context; the log bridge still
+        // correlates the event through the product span around it, and the
+        // stdout copy must name the same span. Done *after* formatting, so no
+        // extensions are borrowed while the span layer takes its lock.
+        let ids = self.dispatch.get().and_then(|dispatch| {
+            scope.iter().find_map(|id| {
+                tracing_opentelemetry::get_otel_context(id, &dispatch)
+                    .map(|context| context.span().span_context().clone())
+                    .filter(|span_context| span_context.is_valid())
+            })
         });
 
         if let Some(span_context) = ids

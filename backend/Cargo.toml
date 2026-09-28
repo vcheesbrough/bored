@@ -104,6 +104,14 @@ http = "1"
 # In-memory span, log and metric exporters, so the telemetry tests assert on
 # what an exporter actually received rather than on configuration.
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
+# A throwaway self-signed certificate for the TLS listener's shutdown tests
+# (`listen::serve_tls`), made at test time so no key is committed. `ring`,
+# the crypto provider the backend already uses, rather than rcgen's default.
+rcgen = { version = "0.14", default-features = false, features = [
+    "crypto",
+    "pem",
+    "ring",
+] }
 axum-test = "15"
 serial_test = "3"
 tempfile = "3"

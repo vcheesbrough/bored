@@ -85,25 +85,10 @@ pub(crate) async fn serve(
                 .expect("failed to load TLS config");
             // `[0, 0, 0, 0]` means bind to all network interfaces (0.0.0.0).
             let addr = SocketAddr::from(([0, 0, 0, 0], 443));
+            let listener =
+                std::net::TcpListener::bind(addr).expect("failed to bind the TLS listener");
             tracing::info!(%addr, "bored backend listening (TLS)");
-            // axum-server's `Handle` is how a running server is told to stop:
-            // `graceful_shutdown(Some(d))` stops accepting at once and closes
-            // whatever is still open after `d`.
-            let handle = axum_server::Handle::new();
-            let stopper = handle.clone();
-            tokio::spawn(async move {
-                shutdown.await;
-                tracing::info!("shutdown signal received, draining connections");
-                draining.start();
-                stopper.graceful_shutdown(Some(DRAIN_TIMEOUT));
-            });
-            if let Err(error) = axum_server::bind_rustls(addr, tls_config)
-                .handle(handle)
-                .serve(app.into_make_service())
-                .await
-            {
-                tracing::error!(error = %error, "server stopped with an error");
-            }
+            serve_tls(listener, tls_config, app, draining, shutdown).await;
         }
         None => {
             let addr = SocketAddr::from(([0, 0, 0, 0], server.http_port));
@@ -117,6 +102,43 @@ pub(crate) async fn serve(
         }
     }
     tracing::info!("server stopped");
+}
+
+/// TLS serving with a bounded drain — the deployed shape. Split out, like
+/// [`serve_plain`], so a test can run it on an ephemeral port with a
+/// throwaway certificate and a shutdown signal it controls.
+pub(crate) async fn serve_tls(
+    listener: std::net::TcpListener,
+    tls_config: RustlsConfig,
+    app: Router,
+    draining: Draining,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) {
+    // Tokio adopts the socket, and needs it non-blocking to do so.
+    listener
+        .set_nonblocking(true)
+        .expect("failed to make the TLS listener non-blocking");
+    // axum-server's `Handle` is how a running server is told to stop:
+    // `graceful_shutdown(Some(d))` stops accepting at once and closes
+    // whatever is still open after `d` — so, unlike the plain branch, the
+    // library itself bounds the drain.
+    let handle = axum_server::Handle::new();
+    let stopper = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        tracing::info!("shutdown signal received, draining connections");
+        // First, so SSE streams end and their connections can close well
+        // inside the drain period.
+        draining.start();
+        stopper.graceful_shutdown(Some(DRAIN_TIMEOUT));
+    });
+    if let Err(error) = axum_server::from_tcp_rustls(listener, tls_config)
+        .handle(handle)
+        .serve(app.into_make_service())
+        .await
+    {
+        tracing::error!(error = %error, "server stopped with an error");
+    }
 }
 
 /// Plain-HTTP serving with a bounded drain. Split out so a test can run it on
