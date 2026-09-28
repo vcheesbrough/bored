@@ -531,5 +531,60 @@ impl ValidatedConfig for ServerConfig {
     }
 }
 
+/// `client-telemetry` group — where the SPA sends its own traces and logs
+/// (card #416). Optional as a whole: absent, or `endpoint` blank, means the
+/// SPA is told telemetry is off and never initialises OTLP.
+///
+/// In sovereign-config it lives beside the other groups
+/// (`/bored/{env}/server/client-telemetry/endpoint`); `BORED__CLIENT_TELEMETRY__ENDPOINT`
+/// overrides it (e2e). The value is the ingest's base URL — bored's own
+/// origin in production, where Traefik routes OTLP's `/v1/` paths to the
+/// environment's `otlp-collector-oidc`. It is handed to the browser as-is, so
+/// it is never a secret.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClientTelemetryConfig {
+    #[serde(default, deserialize_with = "blank_as_none")]
+    pub endpoint: Option<String>,
+}
+
+impl ValidatedConfig for ClientTelemetryConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let Some(endpoint) = self.endpoint.as_deref() else {
+            return Ok(());
+        };
+        // Parsed rather than prefix-checked, so a typo fails startup here
+        // instead of silently turning the SPA's telemetry off (the SPA refuses
+        // an endpoint it cannot use, which would look exactly like "off").
+        let parsed = url::Url::parse(endpoint).map_err(|_| {
+            ConfigError::invalid("client-telemetry.endpoint", "must be an absolute URL")
+        })?;
+        let usable = matches!(parsed.scheme(), "https" | "http")
+            && parsed.host().is_some()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none();
+        if !usable {
+            return Err(ConfigError::invalid(
+                "client-telemetry.endpoint",
+                "must be an http(s) base URL with a host and no query or fragment",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Load the optional `client-telemetry` group: a missing group is the
+/// default (off), not an error.
+pub fn load_client_telemetry(cfg: &Config) -> Result<ClientTelemetryConfig, ConfigError> {
+    match cfg.get::<config::Value>("client-telemetry") {
+        Ok(_) => load_group::<ClientTelemetryConfig>(cfg, "client-telemetry"),
+        Err(config::ConfigError::NotFound(_)) => Ok(ClientTelemetryConfig::default()),
+        Err(source) => Err(ConfigError::Load {
+            group: "client-telemetry".to_string(),
+            source,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests;

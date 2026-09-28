@@ -55,6 +55,59 @@ pub const REFRESH_COOKIE: &str = "auth_refresh";
 /// Encrypted OIDC ID token retained solely as an RP-initiated logout hint.
 pub const ID_COOKIE: &str = "auth_id";
 
+/// The browser session's current access token, placed in request extensions
+/// by [`auth_middleware`] **only** when the request authenticated with the
+/// session cookies — never for a bearer caller. Read by exactly one handler,
+/// `GET /api/telemetry/token` (card #416), which hands it to the SPA for the
+/// telemetry ingest.
+///
+/// Fields are private and `Debug` is written by hand, so the token cannot be
+/// printed by accident: the only way to it is [`SessionAccessToken::token`].
+#[derive(Clone)]
+pub struct SessionAccessToken {
+    token: String,
+    exp: u64,
+    scope: Option<String>,
+}
+
+impl SessionAccessToken {
+    pub fn new(token: String, exp: u64, scope: Option<String>) -> Self {
+        Self { token, exp, scope }
+    }
+
+    /// Built from a token the middleware has just validated, and its claims.
+    pub(crate) fn from_claims(token: String, claims: &Claims) -> Self {
+        Self::new(token, claims.exp, claims.scope.clone())
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Expiry, seconds since the Unix epoch.
+    pub fn exp(&self) -> u64 {
+        self.exp
+    }
+
+    /// Whether the token's space-separated `scope` holds `wanted` as a whole
+    /// word (so `telemetry:writer` does not count as `telemetry:write`).
+    pub fn has_scope(&self, wanted: &str) -> bool {
+        self.scope
+            .as_deref()
+            .is_some_and(|scope| scope.split_whitespace().any(|s| s == wanted))
+    }
+}
+
+impl std::fmt::Debug for SessionAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionAccessToken")
+            .field("token", &"[REDACTED]")
+            .field("exp", &self.exp)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
 /// The scope bored's telemetry ingest requires on the bearer the SPA presents
 /// (card #416). Requested at login; `/api/telemetry/token` hands out only a
 /// session token that carries it.

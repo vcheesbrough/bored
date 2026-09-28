@@ -170,6 +170,36 @@ test.describe('client telemetry', () => {
     expect(server.traceId).toBe(screen.traceId);
   });
 
+  test('the telemetry token is handed only to a browser session', async ({ playwright, baseURL }) => {
+    // A bearer caller (a client-credentials token, as MCP holds) already has
+    // its credential; the route must not swap it for another. Minted here
+    // rather than taken from global-setup: the mock's tokens last 65 s, and
+    // this spec runs late in the suite.
+    const mock = await playwright.request.newContext();
+    const minted = await mock.post(process.env.OIDC_TOKEN_URL!, {
+      form: {
+        grant_type: 'client_credentials',
+        client_id: process.env.OIDC_CLIENT_ID!,
+        client_secret: process.env.OIDC_CLIENT_SECRET!,
+        scope: process.env.REQUIRED_SCOPE!,
+      },
+    });
+    const { access_token: token } = await minted.json();
+    await mock.dispose();
+    const bearer = await playwright.request.newContext({
+      baseURL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    try {
+      expect((await bearer.get('/api/me')).status()).toBe(200); // the bearer is good…
+      expect((await bearer.get('/api/telemetry/token')).status()).toBe(403); // …but gets no token
+    } finally {
+      await bearer.dispose();
+    }
+  });
+
   test('a service.name outside the allowed set is dropped by the ingest', async ({ page, request }) => {
     // A real session token, as the SPA would get it.
     const tokenRes = await request.get('/api/telemetry/token');

@@ -204,3 +204,95 @@ async fn api_unknown_route_returns_404_not_spa_fallback() {
     let resp = server.get("/api/nonexistent").await;
     resp.assert_status(StatusCode::NOT_FOUND);
 }
+
+// ── Client telemetry configuration (card #416) ─────────────────────────────
+
+/// An app with browser auth switched on, built without any network: the
+/// provider endpoints are fixed strings and nothing here fetches the JWKS.
+async fn auth_enabled_app(deployment: DeploymentInfo) -> TestServer {
+    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let auth = crate::auth::AuthConfig {
+        issuer_url: "https://idp.invalid/application/o/bored-test/".to_string(),
+        client_id: "bored-test".to_string(),
+        client_secret: "secret".to_string(),
+        redirect_uri: "https://bored.invalid/auth/callback".to_string(),
+        required_scope: "bored:test:access".to_string(),
+        end_session_url: None,
+        authorize_endpoint: "https://idp.invalid/authorize".to_string(),
+        token_endpoint: "https://idp.invalid/token".to_string(),
+        jwks_uri: "https://idp.invalid/jwks".to_string(),
+        revocation_endpoint: None,
+        mcp_issuer_url: None,
+        mcp_client_id: None,
+    };
+    let jwks = Arc::new(crate::auth::JwksCache::new(auth.jwks_uri.clone()));
+    // Any 64 bytes make a valid cookie key; `base64::Engine` is the trait
+    // whose `encode` method the STANDARD engine provides.
+    let cookie_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 64]);
+    let sessions = Arc::new(
+        crate::auth::AuthSessionManager::from_config(&config::SessionConfig { cookie_key })
+            .expect("a 64-byte key is valid"),
+    );
+    let state = AppState::new(db).with_auth(Arc::new(auth), jwks, sessions);
+    TestServer::new(app(state, "./dist", deployment).await).unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn info_reports_client_telemetry_off_without_an_endpoint() {
+    let server = auth_enabled_app(DeploymentInfo::new("dev", None)).await;
+    let info: shared::AppInfo = server.get("/api/info").await.json();
+    assert_eq!(
+        info.telemetry,
+        Some(shared::ClientTelemetryConfig {
+            enabled: false,
+            endpoint: String::new()
+        })
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn info_reports_client_telemetry_on_with_an_endpoint_and_auth() {
+    let deployment = DeploymentInfo::new("dev", None)
+        .with_client_telemetry(Some("https://bored-dev.example".to_string()));
+    let server = auth_enabled_app(deployment).await;
+    let info: shared::AppInfo = server.get("/api/info").await.json();
+    assert_eq!(
+        info.telemetry,
+        Some(shared::ClientTelemetryConfig {
+            enabled: true,
+            endpoint: "https://bored-dev.example".to_string()
+        })
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn client_telemetry_needs_auth_even_with_an_endpoint() {
+    // Auth disabled: there is no session to hand a bearer out from, so the
+    // SPA is told "off" and the token route has nothing to give.
+    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let deployment = DeploymentInfo::new("dev", None)
+        .with_client_telemetry(Some("https://bored-dev.example".to_string()));
+    let server = TestServer::new(app(AppState::new(db), "./dist", deployment).await).unwrap();
+    let info: shared::AppInfo = server.get("/api/info").await.json();
+    assert!(!info.telemetry.expect("always reported").enabled);
+    server
+        .get("/api/telemetry/token")
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[serial]
+async fn telemetry_token_route_is_behind_the_auth_middleware() {
+    let deployment = DeploymentInfo::new("dev", None)
+        .with_client_telemetry(Some("https://bored-dev.example".to_string()));
+    let server = auth_enabled_app(deployment).await;
+    // No cookie, no bearer: refused by the middleware before the handler.
+    server
+        .get("/api/telemetry/token")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}

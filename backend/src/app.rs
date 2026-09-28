@@ -23,6 +23,9 @@ pub struct DeploymentInfo {
     pub environment: String,
     /// Branch a dev deployment was built from; `None` in prod and locally.
     pub branch: Option<String>,
+    /// Where the SPA sends its own telemetry (`client-telemetry.endpoint`,
+    /// card #416); `None` when this deployment offers no ingest.
+    pub client_telemetry_endpoint: Option<String>,
 }
 
 impl DeploymentInfo {
@@ -30,7 +33,15 @@ impl DeploymentInfo {
         Self {
             environment: environment.into(),
             branch,
+            client_telemetry_endpoint: None,
         }
+    }
+
+    /// Builder-style: the same deployment, with a client-telemetry endpoint.
+    /// `mut self` takes ownership and hands it back modified, so calls chain.
+    pub fn with_client_telemetry(mut self, endpoint: Option<String>) -> Self {
+        self.client_telemetry_endpoint = endpoint;
+        self
     }
 }
 
@@ -49,6 +60,11 @@ impl DeploymentInfo {
 // dev or tests), the middleware short-circuits and injects a synthetic
 // `anonymous` claim so existing flows keep working unchanged.
 pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) -> Router {
+    // Client telemetry is on only with both an ingest endpoint and browser
+    // auth: the ingest accepts nothing but a session's bearer, and an
+    // auth-disabled server has no session to hand one out from (card #416).
+    let client_telemetry = deployment.client_telemetry_endpoint.is_some() && state.auth.is_some();
+
     // Build the protected `/api/*` sub-router. Every route here gets the auth
     // middleware applied below; handlers can extract `Extension<Claims>` to
     // get the validated identity. The middleware needs access to AppState
@@ -58,6 +74,17 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
         .route("/events", get(events::sse_handler))
         // Identity endpoint for the SPA navbar.
         .route("/me", get(routes::auth::me))
+        // The bearer the SPA presents to the telemetry ingest (card #416).
+        // A closure over `client_telemetry`, fixed at startup; the extension
+        // is present only for a cookie session.
+        .route(
+            "/telemetry/token",
+            get(
+                move |session: Option<axum::Extension<crate::auth::SessionAccessToken>>| {
+                    routes::telemetry::token(client_telemetry, session)
+                },
+            ),
+        )
         .route("/boards", get(routes::boards::list_boards))
         .route("/boards", post(routes::boards::create_board))
         .route("/boards/:slug", get(routes::boards::get_board))
@@ -127,7 +154,10 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
         // `/api/info` is intentionally public — the frontend fetches it
         // unauthenticated on every page load to populate the version watermark.
         // It must stay outside any auth-gated sub-router.
-        .route("/api/info", get(move || info(deployment.clone())))
+        .route(
+            "/api/info",
+            get(move || info(deployment.clone(), client_telemetry)),
+        )
         // Browser-facing OAuth2 flow endpoints.
         .nest("/auth", auth_routes)
         // Protected API — every route under here requires a valid token (or
@@ -161,14 +191,27 @@ pub(crate) async fn health() -> &'static str {
 // `shared::app_version`). `APP_VERSION` remains an optional runtime override
 // (used by tests and ad-hoc runs); when unset the burned-in tag is reported.
 // `deployment` is captured at startup from `ObservabilityConfig` (see `app`).
-async fn info(deployment: DeploymentInfo) -> axum::Json<shared::AppInfo> {
+//
+// It also carries the SPA's telemetry configuration (card #416): the browser
+// has no compiled-in endpoint, so this answer is the only way it learns
+// whether and where to export. Off is said explicitly (`enabled: false`) rather
+// than by omission, so "this deployment has switched it off" is visible.
+async fn info(deployment: DeploymentInfo, client_telemetry: bool) -> axum::Json<shared::AppInfo> {
+    let telemetry = match (client_telemetry, deployment.client_telemetry_endpoint) {
+        (true, Some(endpoint)) => shared::ClientTelemetryConfig {
+            enabled: true,
+            endpoint,
+        },
+        _ => shared::ClientTelemetryConfig {
+            enabled: false,
+            endpoint: String::new(),
+        },
+    };
     axum::Json(shared::AppInfo {
         version: config::app_version_override()
             .unwrap_or_else(|| shared::app_version().to_string()),
         env: deployment.environment,
         branch: deployment.branch,
-        // Client telemetry is wired to configuration in a later commit of
-        // card #416; until then the SPA is told nothing and stays off.
-        telemetry: None,
+        telemetry: Some(telemetry),
     })
 }
