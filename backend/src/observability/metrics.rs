@@ -1,3 +1,5 @@
+// TEMP-62: db/auth handles are wired once iteration 62 lands; remove then.
+#![allow(dead_code)]
 //! Every metric bored exports: the instruments, created once, and the typed
 //! handles product code records through.
 //!
@@ -327,6 +329,8 @@ pub(crate) enum HttpMethod {
 }
 
 impl HttpMethod {
+    // Test-only: the every-variant test iterates it.
+    #[cfg(test)]
     pub(crate) const ALL: [HttpMethod; 10] = [
         HttpMethod::Get,
         HttpMethod::Head,
@@ -387,6 +391,8 @@ pub(crate) enum ErrorType {
 }
 
 impl ErrorType {
+    // Test-only: the every-variant test iterates it.
+    #[cfg(test)]
     pub(crate) const ALL: [ErrorType; 2] =
         [ErrorType::InternalServerError, ErrorType::OtherServerError];
 
@@ -421,6 +427,8 @@ pub(crate) enum DbErrorClass {
 }
 
 impl DbErrorClass {
+    // Test-only: the every-variant test iterates it.
+    #[cfg(test)]
     pub(crate) const ALL: [DbErrorClass; 2] =
         [DbErrorClass::UniqueViolation, DbErrorClass::Internal];
 
@@ -456,6 +464,8 @@ pub(crate) enum AuthOutcome {
 }
 
 impl AuthOutcome {
+    // Test-only: the every-variant test iterates it.
+    #[cfg(test)]
     pub(crate) const ALL: [AuthOutcome; 9] = [
         AuthOutcome::BearerAccepted,
         AuthOutcome::BearerRejected,

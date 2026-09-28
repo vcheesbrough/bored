@@ -425,8 +425,11 @@ fn is_product_span(metadata: &Metadata<'_>) -> bool {
 /// Two reload handles, one per layer, each re-parsing the same directive
 /// string (an `EnvFilter` is not `Clone`). Boxed closures because the handles'
 /// full types name the layered subscriber they sit in, which is unwritable.
+/// One layer's "apply this directive string" callback.
+type Reloader = Box<dyn Fn(&str) + Send + Sync>;
+
 struct LogLevel {
-    reloaders: Vec<Box<dyn Fn(&str) + Send + Sync>>,
+    reloaders: Vec<Reloader>,
 }
 
 impl LogLevel {
@@ -516,7 +519,7 @@ where
     // bridge's `experimental_span_attributes` feature is off): a record is
     // joined to its span by trace id, and copying would log what the span
     // already records.
-    let mut reloaders: Vec<Box<dyn Fn(&str) + Send + Sync>> = vec![Box::new(move |directives| {
+    let mut reloaders: Vec<Reloader> = vec![Box::new(move |directives| {
         // A failed reload means the subscriber is gone; nothing to do.
         let _ = fmt_handle.reload(level_filter(directives));
     })];
@@ -859,6 +862,7 @@ pub(crate) fn adopt_parent(span: &tracing::Span, headers: &http::HeaderMap) {
 /// Takes the context from the current *tracing* span, not from the SDK's own
 /// "current context", which is empty unless the span layer has activated it —
 /// and an empty context injects nothing, without an error (rust.md).
+#[allow(dead_code)] // TEMP-62
 pub(crate) fn inject_current(headers: &mut http::HeaderMap) {
     let context = tracing::Span::current().context();
     global::get_text_map_propagator(|propagator| {
@@ -869,6 +873,7 @@ pub(crate) fn inject_current(headers: &mut http::HeaderMap) {
 /// Link `span` to `from` — for detached work, which starts its own trace
 /// rather than being a child of the request that queued it (a child would keep
 /// the request's trace open for as long as the work runs).
+#[allow(dead_code)] // TEMP-62
 pub(crate) fn link_to(span: &tracing::Span, from: &tracing::Span) {
     let linked = from.context().span().span_context().clone();
     if linked.is_valid() {
@@ -880,6 +885,7 @@ pub(crate) fn link_to(span: &tracing::Span, from: &tracing::Span) {
 /// `opentelemetry-semantic-conventions` (or a `bored.`-prefixed one). The
 /// `tracing` macros only accept literal keys at creation; this is the path for
 /// everything else.
+#[allow(dead_code)] // TEMP-62
 pub(crate) fn set_span_attribute(
     span: &tracing::Span,
     key: &'static str,
