@@ -259,6 +259,28 @@ mod tests {
         }
     }
 
+    /// Each shape of the driver's record id: the two scalar shapes are
+    /// rendered, a compound shape (which renders its values) is not.
+    #[test]
+    fn things_render_scalar_ids_and_hide_compound_ones() {
+        use surrealdb::sql::{Array, Id, Thing, Value};
+
+        // `Thing::from((table, id))` is the driver's own constructor.
+        let string_id = Thing::from(("cards", Id::String("c1".to_string())));
+        assert_eq!(thing(&string_id), "cards:c1");
+
+        let number_id = Thing::from(("cards", Id::Number(42)));
+        assert_eq!(thing(&number_id), "cards:42");
+
+        // A string id that is free text, not an identifier.
+        let text_id = Thing::from(("cards", Id::String("a card body".to_string())));
+        assert_eq!(thing(&text_id), "cards:<redacted>");
+
+        // An array id would render its elements — user values.
+        let array_id = Thing::from(("cards", Id::Array(Array::from(vec![Value::from("SECRET")]))));
+        assert_eq!(thing(&array_id), "cards:<redacted>");
+    }
+
     #[test]
     fn record_strings_keep_table_and_plain_ids_only() {
         assert_eq!(record_string("cards:c1"), "cards:c1");

@@ -396,3 +396,53 @@ async fn the_callback_logs_an_oauth_error_code_but_not_free_text() {
     );
     assert!(!logs.contains(SENSITIVE), "free text leaked: {logs}");
 }
+
+/// Card #120: the shared client gives up on a provider that accepts the
+/// connection but never answers, instead of hanging the request (and, on the
+/// JWKS path, every request waiting on the cache) forever. Before the change,
+/// discovery and the JWKS fetch used clients with no timeout at all.
+///
+/// Drives `AppState::http` — the client production uses — against a socket
+/// that accepts and then stays silent, and measures the wait with the test's
+/// own clock. The bounds bracket the 10 s request timeout: not before it
+/// (the timeout is not shorter than configured), and well before a hang.
+#[tokio::test]
+async fn the_shared_client_times_out_on_a_silent_provider() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("addr");
+    // Accept connections and hold them open without ever writing a byte.
+    // The accepted sockets are kept in a Vec so they are not dropped (which
+    // would close them and turn the hang into a quick connection reset).
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+
+    let state = AppState::new(db::connect_mem().await.expect("mem db"));
+    let started = std::time::Instant::now();
+    let error = state
+        .http
+        .get(format!("http://{addr}/jwks"))
+        .send()
+        .await
+        .expect_err("a silent provider cannot answer");
+    let waited = started.elapsed();
+
+    assert!(
+        crate::redact::http_error(&error).starts_with("timeout"),
+        "the failure is reported as a timeout: {}",
+        crate::redact::http_error(&error)
+    );
+    assert!(
+        waited >= std::time::Duration::from_secs(9),
+        "gave up after {waited:?}, before the 10 s timeout"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "waited {waited:?}; the 10 s timeout did not apply"
+    );
+}

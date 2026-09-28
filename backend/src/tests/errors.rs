@@ -333,6 +333,88 @@ async fn user_text_cannot_impersonate_an_index_violation() {
 /// in a log line can only mean user content leaked into it.
 const SENSITIVE: &str = "SECRET-card-body-7f3a";
 
+#[tokio::test]
+async fn a_failed_field_assert_keeps_field_and_record_but_not_the_value() {
+    let db = db::connect_mem().await.expect("mem db");
+
+    // An ASSERT clause makes the driver raise `FieldValue` (rather than
+    // `FieldCheck`, which is the type check): "Found '<value>' for field
+    // `probe`, with record `cards:c1`, but field must conform to: …".
+    db.query(
+        "DEFINE FIELD probe ON cards TYPE option<string> ASSERT $value = NONE OR $value = 'ok'",
+    )
+    .await
+    .expect("field defined")
+    .check()
+    .expect("no statement error");
+    let error = db
+        .query(
+            "CREATE type::thing('cards', 'c1') SET \
+             column = type::thing('columns', 'col-1'), \
+             body = 'b', position = 1, probe = $text",
+        )
+        .bind(("text", SENSITIVE))
+        .await
+        .expect("dispatched")
+        .check()
+        .expect_err("the assert rejects the value");
+    assert!(
+        format!("{error:?}").starts_with("Db(FieldValue"),
+        "premise: this is the FieldValue arm, got: {error:?}"
+    );
+    assert!(
+        error.to_string().contains(SENSITIVE),
+        "premise: the driver quotes the value back, got: {error}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("Db::FieldValue"), "variant missing: {logs}");
+    assert!(logs.contains("field=probe"), "field missing: {logs}");
+    assert!(
+        logs.contains("record=cards:c1"),
+        "record id missing: {logs}"
+    );
+}
+
+#[tokio::test]
+async fn a_duplicate_record_id_names_the_record() {
+    let db = db::connect_mem().await.expect("mem db");
+    let create = || {
+        db.query(
+            "CREATE type::thing('cards', 'c1') SET \
+             column = type::thing('columns', 'col-1'), \
+             body = $text, position = 1",
+        )
+        .bind(("text", SENSITIVE))
+    };
+    create()
+        .await
+        .expect("dispatched")
+        .check()
+        .expect("first card accepted");
+    let error = create()
+        .await
+        .expect("dispatched")
+        .check()
+        .expect_err("the id is taken");
+    assert!(
+        format!("{error:?}").starts_with("Db(RecordExists"),
+        "premise: this is the RecordExists arm, got: {error:?}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
+    assert!(logs.contains("Db::RecordExists"), "variant missing: {logs}");
+    assert!(
+        logs.contains("record=cards:c1"),
+        "record id missing: {logs}"
+    );
+}
+
 /// Turn a database error into the log line an operator would see.
 fn logged_line_for(error: surrealdb::Error) -> String {
     let api_error = ApiError::from(error);
