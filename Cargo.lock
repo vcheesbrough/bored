@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "1.61.0"
+version = "1.62.0"
 dependencies = [
  "axum",
  "axum-extra",
@@ -650,6 +650,7 @@ dependencies = [
  "sha2",
  "shared",
  "sovereign-config-provider",
+ "strum",
  "surrealdb",
  "tempfile",
  "time",
@@ -1629,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "1.61.0"
+version = "1.62.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -2968,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "1.61.0"
+version = "1.62.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5078,7 +5079,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.61.0"
+version = "1.62.0"
 dependencies = [
  "serde",
  "serde_json",

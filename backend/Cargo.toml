@@ -33,6 +33,10 @@ futures-util = "0.3"
 url = "2"
 surrealdb = { version = "2", features = ["kv-mem", "kv-surrealkv"] }
 ulid = "1"
+# `EnumIter` / `EnumCount` on `error::ErrorType`, so tests (and #415's metric
+# setup) can walk every variant without a hand-kept list that could drift.
+# Already in the dependency tree via surrealdb; this adds no new crate.
+strum = { version = "0.27", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 # OIDC auth — JWT validation against cached JWKS, code/token exchange,

@@ -7,8 +7,6 @@
 //! agrees with itself; a real violation proves the substring is still there
 //! after a driver upgrade.
 
-use std::sync::{Arc, Mutex};
-
 use axum::body::to_bytes;
 use axum::response::IntoResponse;
 use surrealdb::{Surreal, engine::local::Db};
@@ -60,79 +58,6 @@ async fn body_text(response: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).expect("error bodies are UTF-8")
 }
 
-/// A log destination that keeps everything in memory.
-///
-/// `tracing` writes through a `MakeWriter`, which hands out a fresh writer per
-/// event; this one hands out clones of the same `Arc`, so every event lands in
-/// the one buffer the test reads afterwards.
-#[derive(Clone)]
-struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .expect("log buffer poisoned")
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// Run `f` with a subscriber that writes into a buffer, and return what it
-/// logged. `with_default` installs the subscriber for this thread only, so
-/// tests running in parallel cannot capture each other's output.
-fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
-    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(BufferWriter(Arc::clone(&buffer)))
-        .with_ansi(false)
-        .finish();
-
-    let value = tracing::subscriber::with_default(subscriber, f);
-
-    let logs = String::from_utf8(buffer.lock().expect("log buffer poisoned").clone())
-        .expect("log output is UTF-8");
-    (value, logs)
-}
-
-/// As `capture_logs`, for work that has to be awaited — a whole request, say.
-///
-/// `set_default` returns a guard rather than taking a closure, so the
-/// subscriber stays installed across `.await`. `#[tokio::test]` runs on a
-/// current-thread runtime, so the request future stays on this thread and
-/// inside this thread's subscriber.
-///
-/// The default `fmt()` filter is INFO, which is deliberate: it is the level
-/// deployments run at, so anything this test sees is something production
-/// would see too.
-async fn capture_logs_async<T>(f: impl std::future::Future<Output = T>) -> (T, String) {
-    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(BufferWriter(Arc::clone(&buffer)))
-        .with_ansi(false)
-        .finish();
-
-    let guard = tracing::subscriber::set_default(subscriber);
-    let value = f.await;
-    drop(guard);
-
-    let logs = String::from_utf8(buffer.lock().expect("log buffer poisoned").clone())
-        .expect("log output is UTF-8");
-    (value, logs)
-}
-
 #[tokio::test]
 async fn a_duplicate_board_name_is_a_bodiless_conflict() {
     let db = db::connect_mem().await.expect("mem db");
@@ -177,12 +102,16 @@ async fn a_duplicate_link_pair_is_a_conflict_that_says_why() {
 async fn any_other_database_error_is_a_logged_500() {
     let db = db::connect_mem().await.expect("mem db");
 
+    // "nonsense" stands in for anything a query text could hold. A parse
+    // error quotes the query back, so it must not reach the log.
     let error = db
         .query("SELEKT nonsense FROM")
         .await
         .expect_err("a malformed query fails to parse");
-    // What the old `map_err(|_| …)` threw away, and what the log must carry.
-    let cause = error.to_string();
+    assert!(
+        format!("{error:?}").contains("nonsense"),
+        "premise: the driver carries the query text, got: {error:?}"
+    );
 
     let api_error = ApiError::from(error);
     assert!(
@@ -203,10 +132,20 @@ async fn any_other_database_error_is_a_logged_500() {
         logs.contains("ERROR"),
         "an internal error must be logged at ERROR level, got: {logs}"
     );
-    let first_line = cause.lines().next().expect("the cause is not empty");
+    // What the old `map_err(|_| …)` threw away and #348 restored — *what kind*
+    // of failure this was — survives the redaction of card #366 …
     assert!(
-        logs.contains(first_line),
-        "the log line must carry the cause {first_line:?}, got: {logs}"
+        logs.contains("error.type") && logs.contains("db_engine"),
+        "the log line must carry a typed error.type, got: {logs}"
+    );
+    assert!(
+        logs.contains("Db::InvalidQuery"),
+        "the log line must name the driver's error variant, got: {logs}"
+    );
+    // … but the query text does not.
+    assert!(
+        !logs.contains("nonsense") && !logs.contains("SELEKT"),
+        "query text leaked into the log: {logs}"
     );
 }
 
@@ -313,9 +252,13 @@ async fn a_failing_request_logs_its_method_and_path() {
         .expect("no statement error");
 
     let path = format!("/api/columns/{}/cards", column.id);
+    // A query string the route ignores, standing in for the OAuth `code` that
+    // `/auth/callback` receives: it must not be copied into the span every
+    // log line of the request carries (card #366).
+    let target = format!("{path}?code={SENSITIVE}");
     // `TestRequest` is `IntoFuture`, not `Future`, so it is awaited inside an
     // async block rather than handed over directly.
-    let (response, logs) = capture_logs_async(async { server.get(&path).await }).await;
+    let (response, logs) = capture_logs_async(async { server.get(&target).await }).await;
 
     response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     assert!(
@@ -329,6 +272,10 @@ async fn a_failing_request_logs_its_method_and_path() {
     assert!(
         logs.contains("GET"),
         "the log line must name the method, got: {logs}"
+    );
+    assert!(
+        !logs.contains(SENSITIVE),
+        "the query string must not reach the log, got: {logs}"
     );
 }
 
@@ -367,4 +314,139 @@ async fn user_text_cannot_impersonate_an_index_violation() {
         matches!(ApiError::from(error), ApiError::Internal(_)),
         "a value that merely spells an index name is still a server fault"
     );
+}
+
+// ── What a 500's log line may say (card #366) ───────────────────────────────
+//
+// Each test below provokes a *real* driver error whose message quotes a
+// sensitive value, and checks the emitted line from two sides:
+//
+// * the value is absent — the redaction works;
+// * the variant, the identifiers and the `error.type` are present — the
+//   redaction did not throw away what #348 added.
+//
+// The premise is asserted too (the raw driver message really does contain the
+// value), so a driver upgrade that stopped quoting values would make these
+// tests fail loudly rather than pass for the wrong reason.
+
+/// A string no route, schema or identifier contains, so finding it anywhere
+/// in a log line can only mean user content leaked into it.
+const SENSITIVE: &str = "SECRET-card-body-7f3a";
+
+/// Turn a database error into the log line an operator would see.
+fn logged_line_for(error: surrealdb::Error) -> String {
+    let api_error = ApiError::from(error);
+    assert!(
+        matches!(api_error, ApiError::Internal(_)),
+        "the test needs a 500, which is the only status that logs"
+    );
+    let (response, logs) = capture_logs(|| api_error.into_response());
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    logs
+}
+
+#[tokio::test]
+async fn a_card_body_quoted_in_a_field_error_never_reaches_the_log() {
+    let db = db::connect_mem().await.expect("mem db");
+
+    // `position` is an int; putting user text there makes SurrealDB answer
+    // "Found '<text>' for field `position`, with record `cards:c1`, …".
+    let error = db
+        .query(
+            "CREATE type::thing('cards', 'c1') SET \
+             column = type::thing('columns', 'col-1'), \
+             body = 'b', \
+             position = $text",
+        )
+        .bind(("text", SENSITIVE))
+        .await
+        .expect("query dispatched")
+        .check()
+        .expect_err("position is an int, not a string");
+    assert!(
+        error.to_string().contains(SENSITIVE),
+        "premise: the driver quotes the value back, got: {error}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    // What an operator still gets: the kind, the variant, which field and
+    // which record.
+    assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
+    assert!(logs.contains("Db::FieldCheck"), "variant missing: {logs}");
+    assert!(logs.contains("field=position"), "field missing: {logs}");
+    assert!(
+        logs.contains("record=cards:c1"),
+        "record id missing: {logs}"
+    );
+}
+
+#[tokio::test]
+async fn an_unmapped_unique_index_keeps_index_and_record_but_not_the_value() {
+    let db = db::connect_mem().await.expect("mem db");
+
+    // A unique index `classify` does not translate into a 409, so a
+    // violation of it is a 500 — the path whose log line must be redacted.
+    db.query("DEFINE INDEX test_body_unique ON cards FIELDS body UNIQUE")
+        .await
+        .expect("index defined")
+        .check()
+        .expect("no statement error");
+    let create = |id: &'static str| {
+        db.query(
+            "CREATE type::thing('cards', $id) SET \
+             column = type::thing('columns', 'col-1'), \
+             body = $text, \
+             position = 1",
+        )
+        .bind(("id", id))
+        .bind(("text", SENSITIVE))
+    };
+    create("c1")
+        .await
+        .expect("dispatched")
+        .check()
+        .expect("first card accepted");
+    let error = create("c2")
+        .await
+        .expect("dispatched")
+        .check()
+        .expect_err("the unique index rejects the duplicate body");
+    assert!(
+        error.to_string().contains(SENSITIVE),
+        "premise: the driver quotes the value back, got: {error}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("Db::IndexExists"), "variant missing: {logs}");
+    assert!(
+        logs.contains("index=test_body_unique"),
+        "index missing: {logs}"
+    );
+    // SurrealDB names the record that already holds the value.
+    assert!(
+        logs.contains("record=cards:c1"),
+        "record id missing: {logs}"
+    );
+}
+
+#[tokio::test]
+async fn a_serde_json_error_keeps_its_position_but_not_the_value() {
+    // serde_json quotes the value it choked on: `invalid type: string "…"`.
+    let error = serde_json::from_str::<u32>(&format!("\"{SENSITIVE}\""))
+        .expect_err("a string is not a u32");
+    assert!(
+        error.to_string().contains(SENSITIVE),
+        "premise: serde_json quotes the value back, got: {error}"
+    );
+
+    let (response, logs) = capture_logs(|| ApiError::from(error).into_response());
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("serialization"), "error.type missing: {logs}");
+    assert!(logs.contains("line 1 column"), "position missing: {logs}");
 }

@@ -12,28 +12,29 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::AuthConfig;
+use crate::redact;
 
 /// In-memory cache of OIDC public keys keyed by `kid`.
 ///
 /// Production identity providers rotate signing keys periodically; the cache
-/// re-fetches the JWKS document the first time it sees an unknown `kid`. The
-/// cache holds an `Arc<reqwest::Client>` so the underlying HTTPS connection
-/// pool is shared across refreshes.
+/// re-fetches the JWKS document the first time it sees an unknown `kid`.
 pub struct JwksCache {
     keys: RwLock<HashMap<String, DecodingKey>>,
+    /// A clone of the backend's shared client (`AppState::http`, card #120).
+    /// Cloning a `reqwest::Client` shares its connection pool, so JWKS
+    /// refreshes reuse the connection the token exchange already opened to
+    /// the same identity provider instead of dialling a pool of their own.
     http: reqwest::Client,
     jwks_url: String,
 }
 
 impl JwksCache {
-    pub fn new(jwks_url: String) -> Self {
+    /// `http` is taken by value: the caller passes `state.http.clone()`, and
+    /// the cache owns that handle for as long as it lives.
+    pub fn new(jwks_url: String, http: reqwest::Client) -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
-            // Default reqwest client — picks up system CA roots via rustls-native-roots
-            // wouldn't apply here since we use rustls-tls (webpki roots). That's fine
-            // for talking to public IdPs over a valid TLS cert; for a local mock OIDC
-            // running on plain HTTP, reqwest handles `http://` URLs natively too.
-            http: reqwest::Client::new(),
+            http,
             jwks_url,
         }
     }
@@ -49,7 +50,9 @@ impl JwksCache {
         // Slow path: refresh and try once more. We don't hold the write lock
         // across the network call to avoid blocking other readers.
         if let Err(e) = self.refresh().await {
-            tracing::warn!(error = %e, "JWKS refresh failed");
+            // The URL is named explicitly because a decode failure carries no
+            // URL of its own; `redact::url` keeps only its host and path.
+            tracing::warn!(url = %redact::url(&self.jwks_url), error = %e, "JWKS refresh failed");
             return None;
         }
         self.keys.read().await.get(kid).cloned()
@@ -58,18 +61,23 @@ impl JwksCache {
     /// Force-refresh the entire keyset. Replaces the cache atomically.
     /// Errors are surfaced rather than swallowed — we want the caller (the
     /// refresh-on-miss path or a startup warm) to log the underlying cause.
+    ///
+    /// Each failure is described through `redact::http_error`, which keeps
+    /// the failure kind, status, transport cause and the URL's host and path
+    /// but not reqwest's verbatim message (that embeds the full URL, and a
+    /// decode failure quotes the response body) — card #366.
     async fn refresh(&self) -> Result<(), String> {
         let jwks: Jwks = self
             .http
             .get(&self.jwks_url)
             .send()
             .await
-            .map_err(|e| format!("fetching JWKS: {e}"))?
+            .map_err(|e| format!("fetching JWKS: {}", redact::http_error(&e)))?
             .error_for_status()
-            .map_err(|e| format!("JWKS HTTP status: {e}"))?
+            .map_err(|e| format!("JWKS HTTP status: {}", redact::http_error(&e)))?
             .json()
             .await
-            .map_err(|e| format!("parsing JWKS: {e}"))?;
+            .map_err(|e| format!("parsing JWKS: {}", redact::http_error(&e)))?;
         let mut new_keys = HashMap::new();
         for jwk in jwks.keys {
             // Only RSA keys with a kid are supported. Other key types (EC,
