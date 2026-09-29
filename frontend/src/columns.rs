@@ -111,9 +111,15 @@ pub fn insert_absent(
 /// owner of its own) resolve them identically. When either is missing (a unit
 /// test of the column list alone) the column is still removed.
 ///
-/// `try_update`, because the chooser calls this after an `await`: the board
-/// may have been unmounted while the request was in flight, and writing a
-/// disposed signal panics.
+/// Every signal access is a `try_*` form, because the chooser calls this after
+/// an `await`: the board may have been unmounted while the request was in
+/// flight, disposing every signal here (the contexts are still found on a
+/// cleaned-up owner). The *reads* are what matter — `with_untracked` on a
+/// disposed signal panics, which wedges the tab. A plain `update` is already a
+/// silent no-op on a disposed signal in this `reactive_graph` version; the
+/// write says `try_update` anyway so the intent is visible at the call.
+/// `removing_after_the_board_is_gone_does_not_panic` and its sibling pin this
+/// down.
 pub fn remove(owner: &Owner, columns: RwSignal<Vec<RwSignal<shared::Column>>>, column_id: &str) {
     // `owner.with` runs the closure with `owner` as the current reactive
     // owner, so `use_context` searches the board's contexts. Each lookup is an
@@ -484,6 +490,46 @@ mod tests {
                 RwSignal::new(column("kept")),
             ])
         });
+        remove(&owner, columns, "doomed");
+        assert_eq!(column_ids(columns), ["kept"]);
+    }
+
+    #[test]
+    fn removing_after_the_board_is_gone_does_not_panic() {
+        // The chooser calls `remove` after its DELETE's `await`, by which time
+        // the user may have left the board: `BoardView`'s owner is cleaned up
+        // and every signal it owned disposed — but its contexts are still
+        // found, so `remove` goes on to read the disposed indexes. Reading a
+        // disposed signal panics, and a panic in WASM wedges the whole tab —
+        // so this must be a quiet no-op. (Controls: switching either index
+        // read back to `with_untracked` fails this test.)
+        let owner = Owner::new();
+        let (columns, _, _) = board(&owner, vec![link("z-x", "z", "x")]);
+        owner.cleanup();
+        remove(&owner, columns, "doomed");
+    }
+
+    #[test]
+    fn removing_with_disposed_indexes_does_not_panic() {
+        // The same race one level down, for the index reads and write that
+        // `remove` makes when the contexts are still found but the signals
+        // behind them have gone: each must treat "disposed" as "nothing
+        // there", not panic.
+        let owner = Owner::new();
+        let (columns, card_index, links) = board(&owner, vec![link("z-x", "z", "x")]);
+        card_index.0.dispose();
+        links.links.dispose();
+        remove(&owner, columns, "doomed");
+        assert_eq!(
+            column_ids(columns),
+            ["kept"],
+            "the column itself still goes"
+        );
+        // And the other way round: the card index alive, so ids are found,
+        // but the link list disposed under the prune.
+        let owner = Owner::new();
+        let (columns, _, links) = board(&owner, vec![link("z-x", "z", "x")]);
+        links.links.dispose();
         remove(&owner, columns, "doomed");
         assert_eq!(column_ids(columns), ["kept"]);
     }
