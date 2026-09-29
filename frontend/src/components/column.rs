@@ -6,6 +6,7 @@ use crate::components::card::{CardItem, ExpandedCardId};
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::links::BoardLinkIndex;
 use crate::search::{BoardCardIndex, BoardSearchQuery, card_is_visible, parse_query};
+use crate::snapshot::SnapshotGate;
 
 /// Context type provided by `ColumnView` so that `CardItem` children can
 /// look up their own current position within the column at drop time.
@@ -173,8 +174,20 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     });
 
     // ── SSE card events ────────────────────────────────────────────────────
-    Effect::new(move |_| {
-        let Some(event) = sse_event.get() else { return };
+    // `prev` is `None` only on the effect's first run, at mount.
+    Effect::new(move |prev: Option<()>| {
+        // Read on every run, the first included, so the effect subscribes.
+        let event = sse_event.get();
+        // `sse_event` is board-wide and never cleared, so at mount it still
+        // holds the last event the view saw — possibly from an earlier visit
+        // to this board, before changes this tab never heard about. The
+        // snapshot fetched at mount covers it; replaying it on top would put
+        // stale data over fresh (and before the gate existed it was only ever
+        // applied to an empty list, then overwritten by the snapshot).
+        if prev.is_none() {
+            return;
+        }
+        let Some(event) = event else { return };
         // Held back while the snapshot is in flight; see `snapshot_gate`.
         let Some(event) = snapshot_gate
             .try_update_value(|gate| gate.offer(event))
@@ -933,59 +946,6 @@ fn insert_sorted(cards: RwSignal<Vec<RwSignal<shared::Card>>>, card: shared::Car
     }
 }
 
-/// Buffers events that arrive while a column's card snapshot is in flight,
-/// so they can be replayed on top of it rather than lost to it (card #452).
-///
-/// Generic over the event so its rules can be tested without Leptos or
-/// real events. A fresh gate is closed: nothing has loaded yet, so an event
-/// seen before the first fetch starts is held for it too.
-#[derive(Debug)]
-struct SnapshotGate<E> {
-    /// The latest fetch started; only its response may open the gate.
-    fetch: u64,
-    /// `Some` while a snapshot is awaited — the events held for it, in order.
-    pending: Option<Vec<E>>,
-}
-
-impl<E> SnapshotGate<E> {
-    fn new() -> Self {
-        Self {
-            fetch: 0,
-            pending: Some(Vec::new()),
-        }
-    }
-
-    /// A fetch is starting: close the gate (keeping anything already held,
-    /// which the new snapshot may predate) and return its ticket.
-    fn begin(&mut self) -> u64 {
-        self.fetch += 1;
-        self.pending.get_or_insert_with(Vec::new);
-        self.fetch
-    }
-
-    /// An event arrived. `Some` gives it back to apply now; `None` means it
-    /// was held for the snapshot.
-    fn offer(&mut self, event: E) -> Option<E> {
-        match &mut self.pending {
-            Some(held) => {
-                held.push(event);
-                None
-            }
-            None => Some(event),
-        }
-    }
-
-    /// Fetch `fetch` has answered. For the latest fetch, open the gate and
-    /// return the held events to replay; for a superseded one, `None` — its
-    /// snapshot is older than the one still coming, and must not be applied.
-    fn land(&mut self, fetch: u64) -> Option<Vec<E>> {
-        if fetch != self.fetch {
-            return None;
-        }
-        Some(self.pending.take().unwrap_or_default())
-    }
-}
-
 /// Apply a `CardsRenumbered` event to `cards`: every named card takes its new
 /// position, and the column is re-sorted to match — all in one update.
 ///
@@ -1091,7 +1051,7 @@ fn apply_server_order(
 
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotGate, SortNotice, plan_sort, server_order};
+    use super::{SortNotice, plan_sort, server_order};
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
@@ -1227,58 +1187,6 @@ mod tests {
             held,
         );
         assert_eq!(shown(cards), pairs(&[("b", "b")]));
-    }
-
-    // ── SnapshotGate (card #452) ───────────────────────────────────────────
-
-    #[test]
-    fn events_during_the_fetch_are_held_and_handed_back_in_order() {
-        let mut gate = SnapshotGate::new();
-        let fetch = gate.begin();
-        assert_eq!(gate.offer("created"), None);
-        assert_eq!(gate.offer("updated"), None);
-        assert_eq!(gate.land(fetch), Some(vec!["created", "updated"]));
-    }
-
-    #[test]
-    fn once_landed_events_pass_straight_through() {
-        let mut gate = SnapshotGate::new();
-        let fetch = gate.begin();
-        assert_eq!(gate.land(fetch), Some(Vec::<&str>::new()));
-        assert_eq!(gate.offer("live"), Some("live"));
-    }
-
-    #[test]
-    fn an_event_before_the_first_fetch_starts_is_held_for_it() {
-        // The SSE effect can run before the fetch effect; a fresh gate is
-        // closed so that event is not applied to an empty, unloaded list.
-        let mut gate = SnapshotGate::new();
-        assert_eq!(gate.offer("early"), None);
-        let fetch = gate.begin();
-        assert_eq!(gate.land(fetch), Some(vec!["early"]));
-    }
-
-    #[test]
-    fn a_superseded_fetch_neither_opens_the_gate_nor_takes_the_events() {
-        let mut gate = SnapshotGate::new();
-        let first = gate.begin();
-        assert_eq!(gate.offer("a"), None);
-        let second = gate.begin();
-        assert_eq!(gate.offer("b"), None);
-        // The first response is older than the one still coming.
-        assert_eq!(gate.land(first), None);
-        assert_eq!(gate.offer("c"), None, "still closed for the second fetch");
-        assert_eq!(gate.land(second), Some(vec!["a", "b", "c"]));
-    }
-
-    #[test]
-    fn a_refetch_closes_an_open_gate_again() {
-        let mut gate = SnapshotGate::new();
-        let first = gate.begin();
-        assert_eq!(gate.land(first), Some(Vec::<&str>::new()));
-        let second = gate.begin();
-        assert_eq!(gate.offer("during refetch"), None);
-        assert_eq!(gate.land(second), Some(vec!["during refetch"]));
     }
 
     #[test]

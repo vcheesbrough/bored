@@ -18,6 +18,7 @@ use crate::search::{
     BoardCardIndex, BoardSearchQuery, ColumnCardsEntry, HashSuggestion, active_hash_prefix,
     apply_hash_suggestion, hash_suggestions, query_change_unpins,
 };
+use crate::snapshot::SnapshotGate;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ColumnGhostSide {
@@ -822,6 +823,16 @@ pub fn BoardView() -> AnyView {
         });
     });
 
+    // Board-level events that race the snapshot they apply to (card #452):
+    // the stream opens as soon as `board_ulid` is set, before the columns and
+    // links requests below have answered, and each of those ends by replacing
+    // its whole list. Column events wait for the columns snapshot, link events
+    // for the links snapshot, and are replayed on top of it. (Each column's
+    // cards have a gate of their own in `ColumnView`.)
+    let columns_gate = StoredValue::new(SnapshotGate::<BoardSseEvent>::new());
+    let links_gate = StoredValue::new(SnapshotGate::<BoardSseEvent>::new());
+    let replay_owner = view_owner.clone();
+
     // ── Initial data fetch ────────────────────────────────────────────────
     Effect::new(move |_| {
         let slug = board_slug();
@@ -842,6 +853,17 @@ pub fn BoardView() -> AnyView {
         board_links.set(Vec::new());
         board_links_loaded.set(false);
         loading.set(true);
+        // Closed now, synchronously: the stream this load opens must not get
+        // an event past the gates before the snapshots are even requested.
+        // Beginning a new load also retires the previous one's tickets, so a
+        // slow older response is discarded rather than applied.
+        let columns_fetch = columns_gate
+            .try_update_value(SnapshotGate::begin)
+            .unwrap_or_default();
+        let links_fetch = links_gate
+            .try_update_value(SnapshotGate::begin)
+            .unwrap_or_default();
+        let replay_owner = replay_owner.clone();
         // One root span per screen load (card #416): the board, columns and
         // links requests below — and each column's card fetch, through
         // `BoardLoadTrace` — are its children, so opening a board is one trace
@@ -866,24 +888,43 @@ pub fn BoardView() -> AnyView {
                 // Set the ULID after fetch — triggers the SSE effect to connect.
                 board_ulid.set(board.id);
             }
-            match crate::api::fetch_columns(&slug, load).await {
-                Ok(fetched) => {
-                    if board_slug() == slug {
-                        columns.set(fetched.into_iter().map(RwSignal::new).collect());
+            let fetched = crate::api::fetch_columns(&slug, load).await;
+            // `None`: a newer load has begun (it replays the held events), or
+            // the view is gone. Either way this snapshot is not wanted.
+            if let Some(held) = columns_gate
+                .try_update_value(|gate| gate.land(columns_fetch))
+                .flatten()
+            {
+                let snapshot = match fetched {
+                    // Only for the board still shown: moving to no board at
+                    // all begins no new load, so the ticket alone cannot tell.
+                    Ok(fetched) => (board_slug() == slug).then_some(fetched),
+                    Err(e) => {
+                        crate::telemetry::error("failed to fetch columns", &e);
+                        None
                     }
-                }
-                Err(e) => crate::telemetry::error("failed to fetch columns", &e),
+                };
+                land_columns(
+                    &replay_owner,
+                    columns,
+                    &board_ulid.get_untracked(),
+                    snapshot,
+                    held,
+                );
             }
-            match crate::api::fetch_board_links(&slug, load).await {
-                Ok(fetched) => {
-                    if board_slug() == slug {
-                        board_links.set(fetched);
-                        board_links_loaded.set(true);
+            let fetched = crate::api::fetch_board_links(&slug, load).await;
+            if let Some(held) = links_gate
+                .try_update_value(|gate| gate.land(links_fetch))
+                .flatten()
+            {
+                let snapshot = match fetched {
+                    Ok(fetched) => (board_slug() == slug).then_some(fetched),
+                    Err(e) => {
+                        crate::telemetry::error("failed to fetch links", &e);
+                        None
                     }
-                }
-                // Left false on failure: the index is genuinely unknown, and a
-                // sort computed from no edges would silently do nothing.
-                Err(e) => crate::telemetry::error("failed to fetch links", &e),
+                };
+                land_links(link_index, snapshot, held);
             }
             if board_slug() == slug {
                 loading.set(false);
@@ -909,60 +950,28 @@ pub fn BoardView() -> AnyView {
     let sse_column_owner = view_owner.clone();
     Effect::new(move |_| {
         let Some(event) = sse_event.get() else { return };
-        let ulid = board_ulid.get_untracked();
-        match event {
-            BoardSseEvent::ColumnCreated { column } => {
-                if column.board_id == ulid {
-                    crate::columns::insert_absent(&sse_column_owner, columns, column);
-                }
-            }
-            BoardSseEvent::ColumnUpdated { column } => {
-                if column.board_id == ulid {
-                    columns.with_untracked(|cs| {
-                        if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == column.id) {
-                            sig.set(column);
-                        }
-                    });
-                }
-            }
-            BoardSseEvent::ColumnDeleted { column_id } => {
-                columns.update(|cs| cs.retain(|s| s.get_untracked().id != column_id));
-            }
-            BoardSseEvent::ColumnsReordered { columns: reordered } => {
-                if reordered
-                    .first()
-                    .map(|c| c.board_id == ulid)
-                    .unwrap_or(false)
-                {
-                    columns.update(|cs| {
-                        cs.sort_by_key(|sig| {
-                            let id = sig.get_untracked().id.clone();
-                            reordered
-                                .iter()
-                                .position(|c| c.id == id)
-                                .unwrap_or(usize::MAX)
-                        });
-                    });
-                }
-            }
-            // Link events are already board-scoped by the SSE subscription, and
-            // a link created locally is deduplicated by id.
-            BoardSseEvent::CardLinkCreated { link } => link_index.insert_absent(link),
-            BoardSseEvent::CardLinkUpdated { link } => link_index.replace(link),
-            BoardSseEvent::CardLinkDeleted { link_id } => link_index.remove(&link_id),
-            // The server does remove a card's links first and broadcast each
-            // removal on its own, so in a healthy stream those `CardLinkDeleted`
-            // events have already pruned the index by the time this arrives and
-            // there is nothing left to retain out. This arm is for the tab that
-            // *missed* them — a receiver that lags out of the backend's 128-slot
-            // broadcast channel has events dropped silently, and the one
-            // announcing the card can outlive the ones announcing its links.
-            // Pruning by card id is always sound (a link cannot outlive either
-            // of its cards) and idempotent, so it costs nothing in the healthy
-            // case and heals the lagged one. The card itself is removed by the
-            // owning `ColumnView`'s own handler.
-            BoardSseEvent::CardDeleted { card_id } => link_index.remove_touching(&card_id),
-            _ => {}
+        // Each event waits behind the snapshot it applies to; see
+        // `columns_gate`. Events for neither (card events, handled by each
+        // column, and the rest) pass straight on and match nothing below.
+        let gate = if is_column_event(&event) {
+            columns_gate
+        } else if is_link_event(&event) {
+            links_gate
+        } else {
+            return;
+        };
+        let Some(event) = gate.try_update_value(|gate| gate.offer(event)).flatten() else {
+            return;
+        };
+        if is_column_event(&event) {
+            apply_column_event(
+                &sse_column_owner,
+                columns,
+                &board_ulid.get_untracked(),
+                event,
+            );
+        } else {
+            apply_link_event(link_index, event);
         }
     });
 
@@ -1142,9 +1151,277 @@ pub fn BoardView() -> AnyView {
     .into_any()
 }
 
+/// Column events: the ones the board's columns snapshot holds back.
+fn is_column_event(event: &BoardSseEvent) -> bool {
+    matches!(
+        event,
+        BoardSseEvent::ColumnCreated { .. }
+            | BoardSseEvent::ColumnUpdated { .. }
+            | BoardSseEvent::ColumnDeleted { .. }
+            | BoardSseEvent::ColumnsReordered { .. }
+    )
+}
+
+/// Link events — and `CardDeleted`, which prunes the links index — held back
+/// by the board's links snapshot.
+fn is_link_event(event: &BoardSseEvent) -> bool {
+    matches!(
+        event,
+        BoardSseEvent::CardLinkCreated { .. }
+            | BoardSseEvent::CardLinkUpdated { .. }
+            | BoardSseEvent::CardLinkDeleted { .. }
+            | BoardSseEvent::CardDeleted { .. }
+    )
+}
+
+/// The columns request has answered: install its `snapshot` (`None`: failed,
+/// or for a board no longer shown — the list is kept) and replay on top of it
+/// the column events held while it was in flight, in arrival order.
+fn land_columns(
+    owner: &Owner,
+    columns: RwSignal<Vec<RwSignal<shared::Column>>>,
+    ulid: &str,
+    snapshot: Option<Vec<shared::Column>>,
+    held: Vec<BoardSseEvent>,
+) {
+    if let Some(fetched) = snapshot {
+        let _ = columns.try_set(fetched.into_iter().map(RwSignal::new).collect());
+    }
+    for event in held {
+        apply_column_event(owner, columns, ulid, event);
+    }
+}
+
+/// The links request has answered: install its `snapshot` and mark the index
+/// loaded, then replay the link events held meanwhile. `None` (failed, or for
+/// a board no longer shown) leaves `loaded` false: the index is genuinely
+/// unknown, and a sort computed from no edges would silently do nothing.
+fn land_links(
+    link_index: BoardLinkIndex,
+    snapshot: Option<Vec<shared::CardLink>>,
+    held: Vec<BoardSseEvent>,
+) {
+    if let Some(fetched) = snapshot {
+        let _ = link_index.links.try_set(fetched);
+        let _ = link_index.loaded.try_set(true);
+    }
+    for event in held {
+        apply_link_event(link_index, event);
+    }
+}
+
+/// Apply a column event to the board's column list (`ulid` is the board's).
+/// Idempotent on replay: inserts skip a known column, the rest are by id.
+fn apply_column_event(
+    owner: &Owner,
+    columns: RwSignal<Vec<RwSignal<shared::Column>>>,
+    ulid: &str,
+    event: BoardSseEvent,
+) {
+    match event {
+        BoardSseEvent::ColumnCreated { column } if column.board_id == ulid => {
+            crate::columns::insert_absent(owner, columns, column);
+        }
+        BoardSseEvent::ColumnUpdated { column } if column.board_id == ulid => {
+            columns.with_untracked(|cs| {
+                if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == column.id) {
+                    sig.set(column);
+                }
+            });
+        }
+        BoardSseEvent::ColumnDeleted { column_id } => {
+            columns.update(|cs| cs.retain(|s| s.get_untracked().id != column_id));
+        }
+        BoardSseEvent::ColumnsReordered { columns: reordered }
+            if reordered.first().is_some_and(|c| c.board_id == ulid) =>
+        {
+            columns.update(|cs| {
+                cs.sort_by_key(|sig| {
+                    let id = sig.get_untracked().id.clone();
+                    reordered
+                        .iter()
+                        .position(|c| c.id == id)
+                        .unwrap_or(usize::MAX)
+                });
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Apply a link event (or `CardDeleted`) to the board's links index.
+/// Idempotent on replay: every operation is by id.
+fn apply_link_event(link_index: BoardLinkIndex, event: BoardSseEvent) {
+    match event {
+        // Link events are already board-scoped by the SSE subscription, and
+        // a link created locally is deduplicated by id.
+        BoardSseEvent::CardLinkCreated { link } => link_index.insert_absent(link),
+        BoardSseEvent::CardLinkUpdated { link } => link_index.replace(link),
+        BoardSseEvent::CardLinkDeleted { link_id } => link_index.remove(&link_id),
+        // The server does remove a card's links first and broadcast each
+        // removal on its own, so in a healthy stream those `CardLinkDeleted`
+        // events have already pruned the index by the time this arrives and
+        // there is nothing left to retain out. This arm is for the tab that
+        // *missed* them — a receiver that lags out of the backend's 128-slot
+        // broadcast channel has events dropped silently, and the one
+        // announcing the card can outlive the ones announcing its links.
+        // Pruning by card id is always sound (a link cannot outlive either
+        // of its cards) and idempotent, so it costs nothing in the healthy
+        // case and heals the lagged one. The card itself is removed by the
+        // owning `ColumnView`'s own handler.
+        BoardSseEvent::CardDeleted { card_id } => link_index.remove_touching(&card_id),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::watermark_label;
+
+    // ── Board-level replay (card #452) ─────────────────────────────────────
+    //
+    // The columns and links snapshots, landed with events held while they
+    // were in flight. Real signals on the host target.
+
+    use super::{is_column_event, is_link_event, land_columns, land_links};
+    use crate::events::BoardSseEvent;
+    use crate::links::BoardLinkIndex;
+    use leptos::prelude::*;
+
+    fn column(id: &str, board: &str, position: i32) -> shared::Column {
+        shared::Column {
+            id: id.to_string(),
+            board_id: board.to_string(),
+            name: id.to_string(),
+            position,
+            last_edited_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn link(id: &str, from: &str, to: &str) -> shared::CardLink {
+        shared::CardLink {
+            id: id.to_string(),
+            predecessor_id: from.to_string(),
+            successor_id: to.to_string(),
+            predecessor_number: 0,
+            successor_number: 0,
+            reason: None,
+            last_edited_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn column_ids(columns: RwSignal<Vec<RwSignal<shared::Column>>>) -> Vec<String> {
+        columns
+            .get_untracked()
+            .iter()
+            .map(|c| c.get_untracked().id)
+            .collect()
+    }
+
+    fn link_ids(index: BoardLinkIndex) -> Vec<String> {
+        index
+            .links
+            .get_untracked()
+            .into_iter()
+            .map(|l| l.id)
+            .collect()
+    }
+
+    fn index() -> BoardLinkIndex {
+        BoardLinkIndex {
+            links: RwSignal::new(Vec::new()),
+            loaded: RwSignal::new(false),
+        }
+    }
+
+    #[test]
+    fn a_column_created_during_the_load_survives_an_older_snapshot() {
+        let owner = Owner::new();
+        let columns = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::ColumnCreated {
+            column: column("new", "b", 20),
+        }];
+        land_columns(&owner, columns, "b", Some(vec![column("a", "b", 10)]), held);
+        assert_eq!(column_ids(columns), ["a", "new"]);
+    }
+
+    #[test]
+    fn a_column_deleted_during_the_load_is_removed_from_the_snapshot() {
+        let owner = Owner::new();
+        let columns = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::ColumnDeleted {
+            column_id: "a".to_string(),
+        }];
+        let snapshot = vec![column("a", "b", 10), column("c", "b", 20)];
+        land_columns(&owner, columns, "b", Some(snapshot), held);
+        assert_eq!(column_ids(columns), ["c"]);
+    }
+
+    #[test]
+    fn a_column_already_in_the_snapshot_is_not_duplicated() {
+        let owner = Owner::new();
+        let columns = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::ColumnCreated {
+            column: column("a", "b", 10),
+        }];
+        land_columns(&owner, columns, "b", Some(vec![column("a", "b", 10)]), held);
+        assert_eq!(column_ids(columns), ["a"]);
+    }
+
+    #[test]
+    fn a_link_created_during_the_load_survives_an_older_snapshot() {
+        // The e2e failure: `links added elsewhere arrive over SSE`.
+        let links = index();
+        let held = vec![BoardSseEvent::CardLinkCreated {
+            link: link("new", "x", "y"),
+        }];
+        land_links(links, Some(vec![link("old", "p", "q")]), held);
+        assert_eq!(link_ids(links), ["old", "new"]);
+        assert!(links.loaded.get_untracked());
+    }
+
+    #[test]
+    fn a_card_deleted_during_the_load_prunes_its_links_from_the_snapshot() {
+        let links = index();
+        let held = vec![BoardSseEvent::CardDeleted {
+            card_id: "x".to_string(),
+        }];
+        let snapshot = vec![link("a", "x", "y"), link("b", "p", "q")];
+        land_links(links, Some(snapshot), held);
+        assert_eq!(link_ids(links), ["b"]);
+    }
+
+    #[test]
+    fn a_failed_links_load_stays_unloaded_but_still_replays() {
+        let links = index();
+        let held = vec![BoardSseEvent::CardLinkCreated {
+            link: link("new", "x", "y"),
+        }];
+        land_links(links, None, held);
+        assert_eq!(link_ids(links), ["new"]);
+        assert!(!links.loaded.get_untracked(), "unknown, not loaded");
+    }
+
+    #[test]
+    fn each_event_waits_for_the_snapshot_it_applies_to() {
+        let created = BoardSseEvent::ColumnCreated {
+            column: column("c", "b", 0),
+        };
+        let linked = BoardSseEvent::CardLinkCreated {
+            link: link("l", "x", "y"),
+        };
+        let deleted = BoardSseEvent::CardDeleted {
+            card_id: "x".to_string(),
+        };
+        assert!(is_column_event(&created) && !is_link_event(&created));
+        assert!(is_link_event(&linked) && !is_column_event(&linked));
+        // `CardDeleted` prunes the links index, so it waits for the links.
+        assert!(is_link_event(&deleted) && !is_column_event(&deleted));
+    }
 
     // Prod and local runs report no branch at all (card #412): the watermark is
     // then just the version, with no trailing space to give it away.

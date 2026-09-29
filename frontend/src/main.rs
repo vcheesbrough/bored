@@ -10,6 +10,7 @@ mod pages;
 mod panic_banner;
 mod recent;
 mod search;
+mod snapshot;
 mod telemetry;
 
 use leptos::prelude::*;
