@@ -1,0 +1,68 @@
+# bored's client-telemetry ingest (card #416): the released
+# `otlp-collector-oidc` image, unmodified, one instance per environment, on
+# bored's own hostname. It authenticates the browser session's bearer
+# (decision D1), stamps identity and environment, drops anything outside
+# `service.name=bored-spa`, and forwards plain OTLP to the shared collector
+# (monitor-alloy) — the same upstream as the server's own export.
+#
+# A compose project of its own (`<project>-ingest`), started by the deploy
+# steps *after* the app and outside its `--wait`: the ingest is never part of
+# the deploy health gate, and a failure to start it is logged, not fatal
+# (`.woodpecker/build.yml`). Stopping this project is the emergency stop for
+# client telemetry; clients drop their events and carry on.
+#
+# No value lives here. The variables come from the environment's
+# `/bored/devops/<env>/ingest` layer, rendered by `sovereign-config render`
+# into `deploy/ingest.env` by scripts/compose-up-ingest.sh, which deletes the
+# file again once compose has read it. See README § Client telemetry.
+services:
+  otlp-ingest:
+    image: ghcr.io/vcheesbrough/otlp-collector-oidc:0.13.0@sha256:2db8a527da487c9091b74ee3a537785153b26f914e9e6f3ca2f1684793f02666
+    container_name: ${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}-ingest
+    # Stable host name, so the collector's own telemetry keeps one instance id
+    # across redeploys.
+    hostname: ${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}-ingest
+    restart: unless-stopped
+    env_file:
+      - path: ingest.env
+        required: true
+        # Values byte for byte: no `$` interpolation or quote stripping.
+        format: raw
+    # Hardening, as the image supports it: its own non-root user (the one that
+    # can read the embedded TLS key), no capabilities, a read-only root with
+    # /tmp for the rendered pipeline, and a memory cap above the collector's
+    # own `memory_limiter` (64 MiB by default).
+    user: "10001:10001"
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    networks:
+      # Traefik reaches it here, and it reaches monitor-alloy here.
+      - proxy-backend
+    labels:
+      # The collector's own stdout, labelled like every other app's for Alloy
+      # (mini-config/monitoring-stack/OBSERVABILITY.md).
+      - observability.service.name=otlp-collector-oidc
+      - observability.deployment.environment=${APP_ENV:?APP_ENV is required}
+      - traefik.enable=true
+      # OTLP's own paths on bored's hostname, unprefixed (bored's API lives
+      # under /api, so /v1/ is free). The rule is longer than the app's
+      # `Host(...)` rule, so Traefik gives it priority for these paths.
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.rule=Host(`${BORED_HOST:?BORED_HOST is required}`) && (PathPrefix(`/v1/`) || PathPrefix(`/opentelemetry.proto.collector`))
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.entrypoints=websecure
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.tls=true
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.tls.certresolver=myresolver
+      # Rate limit by source address at the edge; the ingest caps bodies.
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.middlewares=rate-limit@docker
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.service=${BORED_CONTAINER_NAME}-ingest
+      # One TLS port for both protocols, with the image's embedded self-signed
+      # certificate; the homelab Traefik's static `serversTransport` already
+      # skips verification for its backends, as it does for bored's own.
+      - traefik.http.services.${BORED_CONTAINER_NAME}-ingest.loadbalancer.server.port=4318
+      - traefik.http.services.${BORED_CONTAINER_NAME}-ingest.loadbalancer.server.scheme=https
+
+networks:
+  proxy-backend:
+    external: true
