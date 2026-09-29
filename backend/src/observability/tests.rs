@@ -1572,13 +1572,29 @@ async fn url_scheme_comes_from_the_listener() {
     let spans = pipeline.finished_spans();
     assert_eq!(scheme_of(&spans, "/over-tls").as_deref(), Some("https"));
     assert_eq!(scheme_of(&spans, "/over-plain").as_deref(), Some("http"));
+    // The metric reads the scheme separately from the span, so check it per
+    // route — routes unique to this test, so no other test's series can
+    // satisfy the assertion.
     let series = all_series(&collect_metrics());
-    assert!(series.iter().any(|(name, attributes)| {
-        name == semconv::metric::HTTP_SERVER_REQUEST_DURATION
-            && attributes.iter().any(|kv| {
-                kv.key.as_str() == semconv::attribute::URL_SCHEME && kv.value.to_string() == "https"
+    let metric_scheme = |route: &str| {
+        series
+            .iter()
+            .filter(|(name, _)| name == semconv::metric::HTTP_SERVER_REQUEST_DURATION)
+            .find(|(_, attributes)| {
+                attributes.iter().any(|kv| {
+                    kv.key.as_str() == semconv::attribute::HTTP_ROUTE
+                        && kv.value.to_string() == route
+                })
             })
-    }));
+            .and_then(|(_, attributes)| {
+                attributes
+                    .iter()
+                    .find(|kv| kv.key.as_str() == semconv::attribute::URL_SCHEME)
+                    .map(|kv| kv.value.to_string())
+            })
+    };
+    assert_eq!(metric_scheme("/over-tls").as_deref(), Some("https"));
+    assert_eq!(metric_scheme("/over-plain").as_deref(), Some("http"));
 }
 
 /// The TLS listener (what both deployments run) ends open SSE streams on
