@@ -16,6 +16,7 @@ use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardCounter, DbColumn};
@@ -36,7 +37,14 @@ fn normalize_tags(raw: &[String]) -> Result<Vec<String>, ApiError> {
 
 /// Load a card, mapping "no such card" onto 404 and a database fault onto 500.
 async fn load_card(db: &Surreal<Db>, card_id: &str) -> Result<DbCard, ApiError> {
-    let card: Option<DbCard> = db.select(("cards", card_id)).await?;
+    let card: Option<DbCard> = db
+        .select(("cards", card_id))
+        .traced(DbQuery::new(
+            "cards.load_card",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     card.ok_or(ApiError::NotFound)
 }
 
@@ -45,7 +53,14 @@ async fn load_card(db: &Surreal<Db>, card_id: &str) -> Result<DbCard, ApiError> 
 /// Use this for a column the caller asked for; use [`find_column`] for one the
 /// server looks up on its own behalf.
 async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, ApiError> {
-    let column: Option<DbColumn> = db.select(("columns", col_id)).await?;
+    let column: Option<DbColumn> = db
+        .select(("columns", col_id))
+        .traced(DbQuery::new(
+            "cards.load_column",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
     column.ok_or(ApiError::NotFound)
 }
 
@@ -56,7 +71,14 @@ async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, ApiErro
 /// caller's fault, so it is `Ok(None)` rather than a 404 — the callers fall
 /// back to an empty board id, which no connected client is scoped to.
 async fn find_column(db: &Surreal<Db>, col_id: &str) -> Result<Option<DbColumn>, ApiError> {
-    db.select(("columns", col_id)).await.map_err(ApiError::from)
+    db.select(("columns", col_id))
+        .traced(DbQuery::new(
+            "cards.find_column",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await
+        .map_err(ApiError::from)
 }
 
 /// The JSON snapshot an audit row stores for a card: the card exactly as the
@@ -83,6 +105,11 @@ async fn persist_update(
                 .bind(("card_id", card_id))
                 .bind(("editor", editor)),
         )
+        .traced(DbQuery::new(
+            "cards.persist_update",
+            DbOperation::Update,
+            "cards",
+        ))
         .await?
         .take(0)?;
     card.ok_or(ApiError::NotFound)
@@ -111,6 +138,7 @@ async fn persist_move(
         .bind(("col_id", col_id))
         .bind(("position", position))
         .bind(("editor", editor))
+        .traced(DbQuery::new("cards.persist_move", DbOperation::Update, "cards"))
         .await?
         .take(0)?;
     card.ok_or(ApiError::NotFound)
@@ -206,12 +234,21 @@ async fn audit_and_emit(state: &AppState, mutation: CardMutation<'_>) -> Result<
     Ok(())
 }
 
+#[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
 pub async fn list_cards(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
 ) -> Result<Json<Vec<shared::Card>>, ApiError> {
     // Verify the column exists before returning its cards.
-    let column: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
+    let column: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .traced(DbQuery::new(
+            "cards.list_cards",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
 
     if column.is_none() {
         return Err(ApiError::NotFound);
@@ -223,17 +260,27 @@ pub async fn list_cards(
             "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
         )
         .bind(("id", col_id))
+        .traced(DbQuery::new(
+            "cards.list_cards",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
     Ok(Json(cards.into_iter().map(DbCard::into_api).collect()))
 }
 
+#[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn get_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> Result<Json<shared::Card>, ApiError> {
-    let card: Option<DbCard> = state.db.select(("cards", &card_id)).await?;
+    let card: Option<DbCard> = state
+        .db
+        .select(("cards", &card_id))
+        .traced(DbQuery::new("cards.get_card", DbOperation::Select, "cards"))
+        .await?;
 
     match card {
         Some(c) => Ok(Json(c.into_api())),
@@ -245,6 +292,7 @@ pub async fn get_card(
 /// sequential number. Card numbers are globally unique (single counter), so no
 /// board scoping is needed. Used by the frontend when the URL carries
 /// `?card=<number>` instead of the internal ULID.
+#[tracing::instrument(skip_all, fields(bored.card.number = i64::from(number)))]
 pub async fn get_card_by_number(
     State(state): State<AppState>,
     Path(number): Path<u32>,
@@ -253,6 +301,11 @@ pub async fn get_card_by_number(
         .db
         .query("SELECT * FROM cards WHERE number = $number LIMIT 1")
         .bind(("number", number as i64))
+        .traced(DbQuery::new(
+            "cards.get_card_by_number",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -262,13 +315,22 @@ pub async fn get_card_by_number(
     }
 }
 
+#[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
 pub async fn create_card(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardRequest>,
 ) -> Result<(StatusCode, Json<shared::Card>), ApiError> {
-    let column: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
+    let column: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .traced(DbQuery::new(
+            "cards.create_card",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let column = match column {
@@ -290,6 +352,11 @@ pub async fn create_card(
     let counter: Option<DbCardCounter> = state
         .db
         .query("UPDATE card_counter:global SET count += 1 RETURN AFTER")
+        .traced(DbQuery::new(
+            "cards.create_card",
+            DbOperation::Update,
+            "card_counter",
+        ))
         .await?
         .take(0)?;
     let card_number = counter.map(|c| c.count).unwrap_or(1);
@@ -320,6 +387,11 @@ pub async fn create_card(
         .bind(("position", top_pos))
         .bind(("tags", tags))
         .bind(("editor", editor))
+        .traced(DbQuery::new(
+            "cards.create_card",
+            DbOperation::Create,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -370,6 +442,7 @@ pub async fn create_card(
 ///   wrong about both its column and its tags gets the 404, not the 422;
 /// * the no-op check runs **after** the column checks, so naming a nonexistent
 ///   column is still a 404 even when nothing would have been written.
+#[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn update_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -430,12 +503,21 @@ pub async fn update_card(
     Ok(Json(api_card))
 }
 
+#[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn delete_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
-    let existing: Option<DbCard> = state.db.select(("cards", &card_id)).await?;
+    let existing: Option<DbCard> = state
+        .db
+        .select(("cards", &card_id))
+        .traced(DbQuery::new(
+            "cards.delete_card",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
 
     let existing = match existing {
         Some(e) => e,
@@ -517,6 +599,7 @@ pub async fn delete_card(
 /// The two failure modes are ordered: an unknown target column is a 404 and is
 /// checked before the cross-board 422, which is the order the API has always
 /// answered them in.
+#[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn move_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -620,13 +703,22 @@ pub async fn move_card(
 /// One audit row per written card, all sharing a batch group. The group is
 /// informational: batch restore only fans out `delete` rows, so restoring one
 /// of these `move` rows restores that card's position alone.
+#[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
 pub async fn reorder_cards(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::CardsReorderRequest>,
 ) -> Result<Json<Vec<shared::Card>>, ApiError> {
-    let column: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
+    let column: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .traced(DbQuery::new(
+            "cards.reorder_cards",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
 
     let Some(column) = column else {
         return Err(ApiError::NotFound);
@@ -641,6 +733,11 @@ pub async fn reorder_cards(
             "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
         )
         .bind(("id", col_id.clone()))
+        .traced(DbQuery::new(
+            "cards.reorder_cards",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -729,6 +826,7 @@ pub async fn reorder_cards(
                 .bind(("pos", position))
                 .bind(("col_id", col_id.clone()))
                 .bind(("editor", editor.clone()))
+                .traced(DbQuery::new("cards.reorder_cards", DbOperation::Update, "cards"))
                 .await?
                 .take(0)?;
             let mut it = updated.into_iter();
@@ -812,6 +910,11 @@ pub async fn reorder_cards(
             "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
         )
         .bind(("id", col_id))
+        .traced(DbQuery::new(
+            "cards.reorder_cards",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 

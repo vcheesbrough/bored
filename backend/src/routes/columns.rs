@@ -6,11 +6,13 @@ use axum::{
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbColumn};
 use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
 
+#[tracing::instrument(skip_all, fields(bored.board.slug = %board_slug))]
 pub async fn list_columns(
     State(state): State<AppState>,
     Path(board_slug): Path<String>,
@@ -27,12 +29,18 @@ pub async fn list_columns(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
         .bind(("id", board_ulid))
+        .traced(DbQuery::new(
+            "columns.list_columns",
+            DbOperation::Select,
+            "columns",
+        ))
         .await?
         .take(0)?;
 
     Ok(Json(columns.into_iter().map(DbColumn::into_api).collect()))
 }
 
+#[tracing::instrument(skip_all, fields(bored.board.slug = %board_slug))]
 pub async fn create_column(
     State(state): State<AppState>,
     Path(board_slug): Path<String>,
@@ -56,6 +64,7 @@ pub async fn create_column(
         .bind(("name", payload.name))
         .bind(("position", payload.position))
         .bind(("editor", editor))
+        .traced(DbQuery::new("columns.create_column", DbOperation::Create, "columns"))
         .await?
         .take(0)?;
 
@@ -94,13 +103,22 @@ pub async fn create_column(
     }
 }
 
+#[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
 pub async fn update_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateColumnRequest>,
 ) -> Result<Json<shared::Column>, ApiError> {
-    let existing: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
+    let existing: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .traced(DbQuery::new(
+            "columns.update_column",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
@@ -134,6 +152,11 @@ pub async fn update_column(
         .db
         .update(("columns", &col_id))
         .merge(serde_json::Value::Object(patch))
+        .traced(DbQuery::new(
+            "columns.update_column",
+            DbOperation::Update,
+            "columns",
+        ))
         .await?;
 
     match column {
@@ -176,12 +199,21 @@ pub async fn update_column(
     }
 }
 
+#[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
 pub async fn delete_column(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
-    let existing: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
+    let existing: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .traced(DbQuery::new(
+            "columns.delete_column",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
@@ -197,6 +229,11 @@ pub async fn delete_column(
             "SELECT * FROM cards WHERE column = type::thing('columns', $cid) ORDER BY position ASC",
         )
         .bind(("cid", col_id.clone()))
+        .traced(DbQuery::new(
+            "columns.delete_column",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -231,7 +268,15 @@ pub async fn delete_column(
         )
         .await?;
 
-        let _: Option<DbCard> = state.db.delete(("cards", &entity_id)).await?;
+        let _: Option<DbCard> = state
+            .db
+            .delete(("cards", &entity_id))
+            .traced(DbQuery::new(
+                "columns.delete_column",
+                DbOperation::Delete,
+                "cards",
+            ))
+            .await?;
     }
 
     let col_snap = serde_json::to_value(existing.clone().into_api())?;
@@ -275,6 +320,7 @@ pub async fn delete_column(
 /// unchanged), so the caller must include every column to guarantee a consistent
 /// result. The board is looked up by slug; the ULID is used for the DB query
 /// guard that prevents cross-board IDOR writes.
+#[tracing::instrument(skip_all, fields(bored.board.slug = %board_slug))]
 pub async fn reorder_columns(
     State(state): State<AppState>,
     Path(board_slug): Path<String>,
@@ -295,7 +341,15 @@ pub async fn reorder_columns(
     // silently no-ops (matches zero rows) rather than mutating another board's
     // state — preventing cross-board IDOR writes.
     for (index, col_id) in payload.order.iter().enumerate() {
-        let before: Option<DbColumn> = state.db.select(("columns", col_id.as_str())).await?;
+        let before: Option<DbColumn> = state
+            .db
+            .select(("columns", col_id.as_str()))
+            .traced(DbQuery::new(
+                "columns.reorder_columns",
+                DbOperation::Select,
+                "columns",
+            ))
+            .await?;
         let Some(col_before) = before else {
             continue;
         };
@@ -320,6 +374,11 @@ pub async fn reorder_columns(
             .bind(("pos", index as i32))
             .bind(("board_id", board_ulid.clone()))
             .bind(("editor", editor.clone()))
+            .traced(DbQuery::new(
+                "columns.reorder_columns",
+                DbOperation::Update,
+                "columns",
+            ))
             .await?
             .take(0)?;
         let mut it = updated.into_iter();
@@ -359,6 +418,11 @@ pub async fn reorder_columns(
             "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
         )
         .bind(("id", board_ulid.clone()))
+        .traced(DbQuery::new(
+            "columns.reorder_columns",
+            DbOperation::Select,
+            "columns",
+        ))
         .await?
         .take(0)?;
 

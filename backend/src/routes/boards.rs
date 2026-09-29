@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::audit;
 use crate::auth::{AuthConfig, AuthSessionManager, Claims, JwksCache};
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BROADCAST_CAPACITY, BoardEvent, BroadcastEvent};
 use crate::models::{DbBoard, DbCard, DbColumn};
@@ -50,6 +51,19 @@ pub struct AppState {
     /// every board is deliberate — link creation is rare and human-paced, so
     /// per-board locking would be complexity without a measurable win.
     pub link_lock: Arc<Mutex<()>>,
+    /// The backend's one outbound HTTP client (card #120), built by
+    /// `http_client::build`. OIDC discovery, the JWKS fetch, token exchange,
+    /// refresh and revocation all go through it — `JwksCache` and
+    /// `AuthSessionManager` hold clones, which share this client's connection
+    /// pool rather than opening their own. Any new outbound call belongs on it
+    /// too, so #415's client span and trace propagation cover it for free.
+    pub http: reqwest::Client,
+    /// Raised when the server starts shutting down (card #415). SSE streams
+    /// end on it, so an open board tab lets the graceful drain finish at once
+    /// instead of holding it for the whole drain timeout. `main` hands the same
+    /// signal to `listen::serve`, which raises it; a test state keeps its own,
+    /// never-raised one unless the test wires it the same way.
+    pub draining: crate::listen::Draining,
 }
 
 impl AppState {
@@ -67,6 +81,10 @@ impl AppState {
             jwks_cache: None,
             auth_sessions: None,
             link_lock: Arc::new(Mutex::new(())),
+            // Built here, once per state, so every `AppState` — production's
+            // and each test's — has a client whether or not auth is enabled.
+            http: crate::http_client::build(),
+            draining: crate::listen::Draining::new(),
         }
     }
 
@@ -117,6 +135,11 @@ pub(crate) async fn find_board_by_slug(
     // (SurrealDB's bind requires 'static, which &str does not satisfy).
     db.query("SELECT * FROM boards WHERE name = $slug LIMIT 1")
         .bind(("slug", slug.to_owned()))
+        .traced(DbQuery::new(
+            "boards.find_board_by_slug",
+            DbOperation::Select,
+            "boards",
+        ))
         .await?
         .take(0)
         .map_err(ApiError::from)
@@ -124,14 +147,24 @@ pub(crate) async fn find_board_by_slug(
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+#[tracing::instrument(skip_all)]
 pub async fn list_boards(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<shared::Board>>, ApiError> {
-    let boards: Vec<DbBoard> = state.db.select("boards").await?;
+    let boards: Vec<DbBoard> = state
+        .db
+        .select("boards")
+        .traced(DbQuery::new(
+            "boards.list_boards",
+            DbOperation::Select,
+            "boards",
+        ))
+        .await?;
 
     Ok(Json(boards.into_iter().map(DbBoard::into_api).collect()))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn create_board(
     State(state): State<AppState>,
     claims: Extension<Claims>,
@@ -148,6 +181,11 @@ pub async fn create_board(
         .db
         .create(("boards", &id))
         .content(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
+        .traced(DbQuery::new(
+            "boards.create_board",
+            DbOperation::Create,
+            "boards",
+        ))
         .await?;
 
     // SurrealDB returns the created row; `None` here would mean the create
@@ -186,6 +224,7 @@ pub async fn create_board(
     Ok((StatusCode::CREATED, Json(api_board)))
 }
 
+#[tracing::instrument(skip_all, fields(bored.board.slug = %slug))]
 pub async fn get_board(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -196,6 +235,7 @@ pub async fn get_board(
     }
 }
 
+#[tracing::instrument(skip_all, fields(bored.board.slug = %slug))]
 pub async fn update_board(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -219,6 +259,11 @@ pub async fn update_board(
         .db
         .update(("boards", &board_ulid))
         .merge(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
+        .traced(DbQuery::new(
+            "boards.update_board",
+            DbOperation::Update,
+            "boards",
+        ))
         .await?;
 
     match board {
@@ -255,6 +300,7 @@ pub async fn update_board(
     }
 }
 
+#[tracing::instrument(skip_all, fields(bored.board.slug = %slug))]
 pub async fn delete_board(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -274,6 +320,11 @@ pub async fn delete_board(
              ORDER BY column ASC, position ASC",
         )
         .bind(("bid", id.clone()))
+        .traced(DbQuery::new(
+            "boards.delete_board",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -308,7 +359,15 @@ pub async fn delete_board(
         )
         .await?;
 
-        let _: Option<DbCard> = state.db.delete(("cards", &entity_id)).await?;
+        let _: Option<DbCard> = state
+            .db
+            .delete(("cards", &entity_id))
+            .traced(DbQuery::new(
+                "boards.delete_board",
+                DbOperation::Delete,
+                "cards",
+            ))
+            .await?;
     }
 
     let cols: Vec<DbColumn> = state
@@ -317,6 +376,11 @@ pub async fn delete_board(
             "SELECT * FROM columns WHERE board = type::thing('boards', $bid) ORDER BY position ASC",
         )
         .bind(("bid", id.clone()))
+        .traced(DbQuery::new(
+            "boards.delete_board",
+            DbOperation::Select,
+            "columns",
+        ))
         .await?
         .take(0)?;
 
@@ -341,7 +405,15 @@ pub async fn delete_board(
         )
         .await?;
 
-        let _: Option<DbColumn> = state.db.delete(("columns", &entity_id)).await?;
+        let _: Option<DbColumn> = state
+            .db
+            .delete(("columns", &entity_id))
+            .traced(DbQuery::new(
+                "boards.delete_board",
+                DbOperation::Delete,
+                "columns",
+            ))
+            .await?;
     }
 
     let board_snap = serde_json::to_value(board_record.clone().into_api())?;
@@ -363,7 +435,15 @@ pub async fn delete_board(
     )
     .await?;
 
-    let _: Option<DbBoard> = state.db.delete(("boards", &id)).await?;
+    let _: Option<DbBoard> = state
+        .db
+        .delete(("boards", &id))
+        .traced(DbQuery::new(
+            "boards.delete_board",
+            DbOperation::Delete,
+            "boards",
+        ))
+        .await?;
 
     let _ = state.events.send(BroadcastEvent {
         board_id: id.clone(),

@@ -10,6 +10,7 @@
 
 use surrealdb::{Surreal, engine::local::Db};
 
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::models::DbCard;
 
 /// Gap between adjacent card positions in the sparse ordering scheme.
@@ -100,6 +101,11 @@ async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<Vec<DbCard>,
              ORDER BY position ASC",
         )
         .bind(("col_id", col_id.to_string()))
+        .traced(DbQuery::new(
+            "cards.rebalance_column",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -118,6 +124,11 @@ async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<Vec<DbCard>,
             .query("UPDATE type::thing('cards', $id) SET position = $pos RETURN AFTER")
             .bind(("id", card.id.id.to_raw()))
             .bind(("pos", pos))
+            .traced(DbQuery::new(
+                "cards.rebalance_column",
+                DbOperation::Update,
+                "cards",
+            ))
             .await?
             .take(0)?;
         // `None` means the card was deleted between the SELECT and this
@@ -142,6 +153,11 @@ pub(super) async fn compute_top_position(
              ORDER BY position ASC",
         )
         .bind(("col_id", col_id.to_string()))
+        .traced(DbQuery::new(
+            "cards.compute_top_position",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -159,6 +175,11 @@ pub(super) async fn compute_top_position(
                  ORDER BY position ASC",
             )
             .bind(("col_id", col_id.to_string()))
+            .traced(DbQuery::new(
+                "cards.compute_top_position",
+                DbOperation::Select,
+                "cards",
+            ))
             .await?
             .take(0)?;
 
@@ -194,6 +215,11 @@ pub(super) async fn compute_sparse_position(
         )
         .bind(("col_id", col_id.to_string()))
         .bind(("card_id", card_id.to_string()))
+        .traced(DbQuery::new(
+            "cards.compute_sparse_position",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -219,6 +245,11 @@ pub(super) async fn compute_sparse_position(
             )
             .bind(("col_id", col_id.to_string()))
             .bind(("card_id", card_id.to_string()))
+            .traced(DbQuery::new(
+                "cards.compute_sparse_position",
+                DbOperation::Select,
+                "cards",
+            ))
             .await?
             .take(0)?;
 

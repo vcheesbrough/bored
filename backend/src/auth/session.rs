@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{AUTH_COOKIE, AuthConfig, Claims, ID_COOKIE, JwksCache, REFRESH_COOKIE, validate_jwt};
+use crate::http_client::{self, Outbound};
+use crate::redact;
 
 const ACCESS_COOKIE_DEFAULT_AGE_SECS: i64 = 15 * 60;
 const SESSION_COOKIE_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
@@ -110,6 +112,10 @@ struct RefreshState {
 /// lets same-token waiters reuse the one successful rotated response.
 pub struct AuthSessionManager {
     cookie_key: Key,
+    /// A clone of the backend's shared client (`AppState::http`, card #120),
+    /// used for token exchange, refresh and revocation. Its timeouts are the
+    /// ones `http_client::build` sets — the 5 s connect / 10 s total this
+    /// manager used to configure on a client of its own.
     http: reqwest::Client,
     refresh_state: Mutex<RefreshState>,
 }
@@ -126,11 +132,16 @@ impl AuthSessionManager {
     /// Build from an already-loaded `SessionConfig`'s cookie key. Exactly 64
     /// random bytes are used by the cookie crate as independent signing and
     /// encryption key material.
-    pub fn from_config(session: &crate::config::SessionConfig) -> Result<Self, String> {
-        Self::from_encoded_key(&session.cookie_key)
+    ///
+    /// `http` is the shared client the caller hands over (`state.http.clone()`).
+    pub fn from_config(
+        session: &crate::config::SessionConfig,
+        http: reqwest::Client,
+    ) -> Result<Self, String> {
+        Self::from_encoded_key(&session.cookie_key, http)
     }
 
-    fn from_encoded_key(encoded: &str) -> Result<Self, String> {
+    fn from_encoded_key(encoded: &str, http: reqwest::Client) -> Result<Self, String> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|_| "session.cookie-key must be valid standard base64".to_string())?;
@@ -140,17 +151,13 @@ impl AuthSessionManager {
                 bytes.len()
             ));
         }
-        Ok(Self::from_key_bytes(&bytes))
+        Ok(Self::from_key_bytes(&bytes, http))
     }
 
-    fn from_key_bytes(bytes: &[u8]) -> Self {
+    fn from_key_bytes(bytes: &[u8], http: reqwest::Client) -> Self {
         Self {
             cookie_key: Key::from(bytes),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("failed to build OIDC HTTP client"),
+            http,
             refresh_state: Mutex::new(RefreshState::default()),
         }
     }
@@ -227,20 +234,28 @@ impl AuthSessionManager {
         let mut form = grant.to_vec();
         form.push(("client_id", auth.client_id.as_str()));
         form.push(("client_secret", auth.client_secret.as_str()));
-        let response = self
-            .http
-            .post(auth.token_url())
-            .form(&form)
-            .send()
-            .await
-            .map_err(|error| format!("token endpoint unreachable: {error}"))?;
+        let response = http_client::send(
+            Outbound::TokenExchange,
+            self.http.post(auth.token_url()).form(&form),
+        )
+        .await
+        // `redact::http_error`, not `{error}`: reqwest's own message
+        // embeds the full URL (card #366).
+        .map_err(|error| format!("token endpoint unreachable: {}", redact::http_error(&error)))?;
         if !response.status().is_success() {
             return Err(format!("token endpoint returned {}", response.status()));
         }
         response
             .json()
             .await
-            .map_err(|error| format!("token response parse failed: {error}"))
+            // A decode error would quote the response body — which here is a
+            // token response. `redact::http_error` reports only "decode".
+            .map_err(|error| {
+                format!(
+                    "token response parse failed: {}",
+                    redact::http_error(&error)
+                )
+            })
     }
 
     pub async fn refresh(
@@ -424,18 +439,22 @@ impl AuthSessionManager {
         let Some(url) = auth.revoke_url() else {
             return Ok(());
         };
-        let response = self
-            .http
-            .post(url)
-            .form(&[
+        let response = http_client::send(
+            Outbound::Revocation,
+            self.http.post(url).form(&[
                 ("token", refresh_token),
                 ("token_type_hint", "refresh_token"),
                 ("client_id", auth.client_id.as_str()),
                 ("client_secret", auth.client_secret.as_str()),
-            ])
-            .send()
-            .await
-            .map_err(|error| format!("revocation endpoint unreachable: {error}"))?;
+            ]),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "revocation endpoint unreachable: {}",
+                redact::http_error(&error)
+            )
+        })?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -521,7 +540,7 @@ mod tests {
     };
 
     fn test_manager() -> AuthSessionManager {
-        AuthSessionManager::from_key_bytes(&[7_u8; 64])
+        AuthSessionManager::from_key_bytes(&[7_u8; 64], crate::http_client::build())
     }
 
     fn token_set() -> TokenSet {
@@ -587,11 +606,16 @@ mod tests {
     #[test]
     fn private_cookie_key_requires_valid_64_byte_base64() {
         let valid = base64::engine::general_purpose::STANDARD.encode([9_u8; 64]);
-        assert!(AuthSessionManager::from_encoded_key(&valid).is_ok());
-        assert!(AuthSessionManager::from_encoded_key("not base64").is_err());
+        assert!(AuthSessionManager::from_encoded_key(&valid, crate::http_client::build()).is_ok());
+        assert!(
+            AuthSessionManager::from_encoded_key("not base64", crate::http_client::build())
+                .is_err()
+        );
 
         let too_short = base64::engine::general_purpose::STANDARD.encode([9_u8; 63]);
-        assert!(AuthSessionManager::from_encoded_key(&too_short).is_err());
+        assert!(
+            AuthSessionManager::from_encoded_key(&too_short, crate::http_client::build()).is_err()
+        );
     }
 
     #[test]

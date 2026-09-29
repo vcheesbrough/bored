@@ -225,15 +225,24 @@ async fn auth_enabled_app(deployment: DeploymentInfo) -> TestServer {
         mcp_issuer_url: None,
         mcp_client_id: None,
     };
-    let jwks = Arc::new(crate::auth::JwksCache::new(auth.jwks_uri.clone()));
+    // The state owns the shared outbound client; the auth parts borrow a
+    // handle to it, as `main` wires them.
+    let state = AppState::new(db);
+    let jwks = Arc::new(crate::auth::JwksCache::new(
+        auth.jwks_uri.clone(),
+        state.http.clone(),
+    ));
     // Any 64 bytes make a valid cookie key; `base64::Engine` is the trait
     // whose `encode` method the STANDARD engine provides.
     let cookie_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 64]);
     let sessions = Arc::new(
-        crate::auth::AuthSessionManager::from_config(&config::SessionConfig { cookie_key })
-            .expect("a 64-byte key is valid"),
+        crate::auth::AuthSessionManager::from_config(
+            &config::SessionConfig { cookie_key },
+            state.http.clone(),
+        )
+        .expect("a 64-byte key is valid"),
     );
-    let state = AppState::new(db).with_auth(Arc::new(auth), jwks, sessions);
+    let state = state.with_auth(Arc::new(auth), jwks, sessions);
     TestServer::new(app(state, "./dist", deployment).await).unwrap()
 }
 
@@ -295,4 +304,22 @@ async fn telemetry_token_route_is_behind_the_auth_middleware() {
         .get("/api/telemetry/token")
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+/// A panic during startup or serving is still a logged failure (card #415):
+/// `guarded` turns it into `StartupError::Panicked` and writes the one
+/// `startup failed` line, so `main` goes on to flush telemetry instead of
+/// unwinding past it. The panic's own message stays out of that line.
+#[tokio::test]
+async fn a_panic_in_run_becomes_a_logged_startup_error() {
+    let (outcome, logs) = capture_logs_async(async {
+        crate::guarded(async {
+            panic!("secret-startup-detail");
+        })
+        .await
+    })
+    .await;
+    assert!(matches!(outcome, Err(crate::StartupError::Panicked)));
+    assert!(logs.contains("startup failed"), "{logs}");
+    assert!(!logs.contains("secret-startup-detail"), "{logs}");
 }

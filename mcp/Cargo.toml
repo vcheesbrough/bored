@@ -20,8 +20,8 @@ tokio.workspace = true
 # rustls with `default-features = false`, which has three consequences for this
 # binary — all of them matching how `backend` has always been built:
 #   * no system OpenSSL (it used to pull reqwest's default native-tls backend);
-#   * HTTP/1.1 only, since reqwest's `http2` default is off — see card #363,
-#     which decides whether to turn it back on workspace-wide;
+#   * HTTP/1.1 only, since reqwest's `http2` default is off — a measured,
+#     deliberate choice recorded next to the workspace entry (card #363);
 #   * certificates are checked against rustls' bundled webpki roots rather than
 #     the OS trust store, so a deployment behind a private CA would need
 #     `rustls-tls-native-roots` instead.

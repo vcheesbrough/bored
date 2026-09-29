@@ -10,6 +10,7 @@ use tokio::sync::broadcast::Sender;
 use ulid::Ulid;
 
 use crate::auth::Claims;
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbAuditLog, DbBoard, DbCard, DbColumn};
@@ -50,6 +51,11 @@ async fn try_merge_card_update_audit(
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(("eid", rec.entity_id.to_string()))
+        .traced(DbQuery::new(
+            "audit.try_merge_card_update_audit",
+            DbOperation::Select,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
     let Some(last) = rows.into_iter().next() else {
@@ -77,6 +83,11 @@ async fn try_merge_card_update_audit(
         .bind(("aid", audit_thing))
         .bind(("snapshot_after", rec.snapshot_after.clone()))
         .bind(("expected_created_at", expected_created_at))
+        .traced(DbQuery::new(
+            "audit.try_merge_card_update_audit",
+            DbOperation::Update,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
 
@@ -145,6 +156,11 @@ pub async fn record_and_broadcast(
         .bind(("restored_from", rec.restored_from))
         .bind(("batch_group", rec.batch_group))
         .bind(("audit_edit_session", aes))
+        .traced(DbQuery::new(
+            "audit.record_and_broadcast",
+            DbOperation::Create,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
 
@@ -181,6 +197,11 @@ pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Resu
 
     let existing: Vec<AuditEntityPair> = db
         .query("SELECT entity_type, entity_id FROM audit_log")
+        .traced(DbQuery::new(
+            "audit.migrate_audit_baselines",
+            DbOperation::Select,
+            "audit_log",
+        ))
         .await?
         .take(0)
         .unwrap_or_default();
@@ -228,6 +249,11 @@ pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Resu
         .bind(("board_id", board_id))
         .bind(("snapshot_after", snapshot_after))
         .bind(("created_at", created_at))
+        .traced(DbQuery::new(
+            "audit.insert_baseline_row",
+            DbOperation::Create,
+            "audit_log",
+        ))
         .await?
         .check()?;
         Ok(())
@@ -235,6 +261,11 @@ pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Resu
 
     let boards: Vec<DbBoard> = db
         .query("SELECT * FROM boards ORDER BY created_at ASC")
+        .traced(DbQuery::new(
+            "audit.insert_baseline_row",
+            DbOperation::Select,
+            "boards",
+        ))
         .await?
         .take(0)?;
 
@@ -264,6 +295,11 @@ pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Resu
 
     let columns: Vec<DbColumn> = db
         .query("SELECT * FROM columns ORDER BY board ASC, position ASC")
+        .traced(DbQuery::new(
+            "audit.insert_baseline_row",
+            DbOperation::Select,
+            "columns",
+        ))
         .await?
         .take(0)?;
 
@@ -290,6 +326,11 @@ pub(crate) async fn migrate_audit_baselines(db: &Surreal<Db>) -> surrealdb::Resu
 
     let cards: Vec<DbCard> = db
         .query("SELECT * FROM cards ORDER BY column ASC, position ASC")
+        .traced(DbQuery::new(
+            "audit.insert_baseline_row",
+            DbOperation::Select,
+            "cards",
+        ))
         .await?
         .take(0)?;
 
@@ -321,6 +362,11 @@ pub async fn list_board_history(
     let rows: Vec<DbAuditLog> = db
         .query("SELECT * FROM audit_log WHERE board_id = $bid ORDER BY created_at DESC")
         .bind(("bid", board_ulid.to_string()))
+        .traced(DbQuery::new(
+            "audit.list_board_history",
+            DbOperation::Select,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
     Ok(rows.into_iter().map(DbAuditLog::into_api).collect())
@@ -361,6 +407,11 @@ pub async fn list_card_history(
              ORDER BY created_at DESC",
         )
         .bind(("cid", card_id.to_string()))
+        .traced(DbQuery::new(
+            "audit.list_card_history",
+            DbOperation::Select,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
     // A delete row only has `snapshot_before`, a create row only
@@ -375,6 +426,11 @@ pub async fn list_card_history(
         )
         .bind(("bid", board_ulid.to_string()))
         .bind(("cid", card_id.to_string()))
+        .traced(DbQuery::new(
+            "audit.list_card_history",
+            DbOperation::Select,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
     rows.extend(link_rows);
@@ -386,7 +442,13 @@ async fn load_audit(
     db: &Surreal<Db>,
     audit_id: &str,
 ) -> Result<Option<DbAuditLog>, surrealdb::Error> {
-    db.select(("audit_log", audit_id)).await
+    db.select(("audit_log", audit_id))
+        .traced(DbQuery::new(
+            "audit.load_audit",
+            DbOperation::Select,
+            "audit_log",
+        ))
+        .await
 }
 
 async fn batch_delete_entries(
@@ -404,6 +466,11 @@ async fn batch_delete_entries(
              ORDER BY created_at DESC",
         )
         .bind(("bg", batch_group.to_string()))
+        .traced(DbQuery::new(
+            "audit.batch_delete_entries",
+            DbOperation::Select,
+            "audit_log",
+        ))
         .await?
         .take(0)?;
     Ok(rows)
@@ -424,7 +491,14 @@ async fn restore_one_delete(
         "board" => {
             let b: shared::Board =
                 serde_json::from_value(snapshot).map_err(|_| ApiError::UNPROCESSABLE)?;
-            let exists: Option<DbBoard> = db.select(("boards", &b.id)).await?;
+            let exists: Option<DbBoard> = db
+                .select(("boards", &b.id))
+                .traced(DbQuery::new(
+                    "audit.restore_one_delete",
+                    DbOperation::Select,
+                    "boards",
+                ))
+                .await?;
             if exists.is_some() {
                 return Err(ApiError::CONFLICT);
             }
@@ -434,6 +508,11 @@ async fn restore_one_delete(
                     "name": b.name,
                     "last_edited_by": editor.clone(),
                 }))
+                .traced(DbQuery::new(
+                    "audit.restore_one_delete",
+                    DbOperation::Create,
+                    "boards",
+                ))
                 .await?;
             let after = serde_json::to_value(b.clone())?;
             let _ = events.send(BroadcastEvent {
@@ -462,7 +541,14 @@ async fn restore_one_delete(
         "column" => {
             let c: shared::Column =
                 serde_json::from_value(snapshot).map_err(|_| ApiError::UNPROCESSABLE)?;
-            let exists: Option<DbColumn> = db.select(("columns", &c.id)).await?;
+            let exists: Option<DbColumn> = db
+                .select(("columns", &c.id))
+                .traced(DbQuery::new(
+                    "audit.restore_one_delete",
+                    DbOperation::Select,
+                    "columns",
+                ))
+                .await?;
             if exists.is_some() {
                 return Err(ApiError::CONFLICT);
             }
@@ -477,6 +563,11 @@ async fn restore_one_delete(
                 .bind(("name", c.name.clone()))
                 .bind(("position", c.position))
                 .bind(("editor", editor.clone()))
+                .traced(DbQuery::new(
+                    "audit.restore_one_delete",
+                    DbOperation::Create,
+                    "columns",
+                ))
                 .await?
                 .take(0)?;
             let after = serde_json::to_value(c.clone())?;
@@ -506,7 +597,14 @@ async fn restore_one_delete(
         "card" => {
             let card: shared::Card =
                 serde_json::from_value(snapshot).map_err(|_| ApiError::UNPROCESSABLE)?;
-            let exists: Option<DbCard> = db.select(("cards", &card.id)).await?;
+            let exists: Option<DbCard> = db
+                .select(("cards", &card.id))
+                .traced(DbQuery::new(
+                    "audit.restore_one_delete",
+                    DbOperation::Select,
+                    "cards",
+                ))
+                .await?;
             if exists.is_some() {
                 return Err(ApiError::CONFLICT);
             }
@@ -524,6 +622,11 @@ async fn restore_one_delete(
                 .bind(("number", card.number as i64))
                 .bind(("tags", card.tags.clone()))
                 .bind(("editor", editor.clone()))
+                .traced(DbQuery::new(
+                    "audit.restore_one_delete",
+                    DbOperation::Create,
+                    "cards",
+                ))
                 .await?
                 .take(0)?;
             let after = serde_json::to_value(card.clone())?;
@@ -631,7 +734,14 @@ async fn restore_card_content(
     row: &DbAuditLog,
 ) -> Result<Vec<shared::AuditLogEntry>, ApiError> {
     let (target_body, target_tags) = card_content_version(row)?;
-    let existing: Option<DbCard> = db.select(("cards", &row.entity_id)).await?;
+    let existing: Option<DbCard> = db
+        .select(("cards", &row.entity_id))
+        .traced(DbQuery::new(
+            "audit.restore_card_content",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     let existing = existing.ok_or(ApiError::NotFound)?;
     // Nothing to restore only when every half this row actually carries already
     // matches. A legacy row (`None`) carries no tags, so the body alone decides
@@ -666,7 +776,14 @@ async fn restore_card_content(
     if let Some(tags) = target_tags {
         request = request.bind(("tags", tags));
     }
-    let updated: Option<DbCard> = request.await?.take(0)?;
+    let updated: Option<DbCard> = request
+        .traced(DbQuery::new(
+            "audit.restore_card_content",
+            DbOperation::Update,
+            "cards",
+        ))
+        .await?
+        .take(0)?;
     let updated = updated.ok_or(ApiError::NotFound)?.into_api();
     let snapshot_after = serde_json::to_value(updated.clone())?;
     let original_audit_id = row.id.id.to_raw();

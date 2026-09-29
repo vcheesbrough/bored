@@ -96,6 +96,7 @@ Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but val
 | `bored_mcp_prod_client_secret` | blueprint var `AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET` (MCP OAuth client) |
 | `bored_dev_sovereign_access_url` | deploy-dev — read-only sovereign-config connection URL for `/bored/dev/server` |
 | `bored_prod_sovereign_access_url` | deploy-prod — read-only sovereign-config connection URL for `/bored/prod/server` |
+| `bored_devops_sovereign_access_url` | deploy-dev / deploy-prod — `SOVEREIGN_CONFIG_URL` for `sovereign-config render`: read-only connection **`bored-devops`** rooted at `/bored/devops` (the telemetry layer; see [Telemetry](#telemetry)) |
 | `claude_oauth_token` | PR review agent |
 | `pr_reviewer_gh_app_id` | PR review agent |
 | `pr_reviewer_gh_app_installation_id` | PR review agent |
@@ -112,7 +113,7 @@ Two environments share the same compose file:
 | dev | `https://bored-dev.desync.link` | `bored-dev` | `bored-dev-db` | `bored:dev:access` |
 | prod | `https://bored.desync.link` | `bored` | `bored-prod-db` | `bored:prod:access` |
 
-The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Docker probes `GET /health` on the internal listener every 10 seconds, allowing only that loopback probe to accept the self-signed certificate. After a 15-second startup grace period, three consecutive 3-second failures mark the container unhealthy. Logs go to stdout as JSON; the homelab's Alloy collects the container's Docker log stream into Loki, labelling it from the `observability.service.name` / `observability.deployment.environment` labels in `deploy/docker-compose.yml`.
+The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Docker probes `GET /health` on the internal listener every 10 seconds, allowing only that loopback probe to accept the self-signed certificate. After a 15-second startup grace period, three consecutive 3-second failures mark the container unhealthy. The health check never depends on telemetry. Traces, logs and metrics leave the process over OTLP (see [Telemetry](#telemetry)); logs are *also* written to stdout as JSON, which the homelab's Alloy collects from the container's Docker log stream into Loki, labelling it from the `observability.service.name` / `observability.deployment.environment` labels in `deploy/docker-compose.yml`. On `docker stop` the backend ends every SSE stream (browsers reconnect to the next container), stops accepting, drains open connections for up to 4 s, flushes telemetry and exits (`stop_grace_period: 15s`).
 
 ### Environment variables
 
@@ -128,6 +129,8 @@ APP_BRANCH                       # dev only: the branch this deploy was built fr
 APP_VERSION                      # optional override; leave unset (see "Version and reload" below)
 SOVEREIGN_CONFIG_ACCESS_URL_FILE # sourced from bored_{dev,prod}_sovereign_access_url,
                                   # materialised as a file (not left in the container's process env)
+OTEL_*                           # handed to the container via deploy/otel.env (env_file), never
+                                  # in docker's own env; rendered from /bored/devops/<env>/otel (see "Telemetry")
 ```
 
 Everything else — OIDC settings, the session cookie key, log level, the database
@@ -200,6 +203,58 @@ once the server has retired every protocol version the provider speaks.
 id=github_token,env=GITHUB_TOKEN` on `docker build`). An ordinary `gh` login supplies a token
 with enough scope — see [AGENTS.md § Getting `GITHUB_TOKEN`](AGENTS.md#getting-github_token) for
 the extraction command and for which local checks remain runnable without one.
+
+### Telemetry
+
+The backend exports **traces, logs and metrics over OTLP** (`http/protobuf`) to the homelab's
+collector, `monitor-alloy:4318`, following the machine-global `observability` contract
+([`backend/src/observability.rs`](backend/src/observability.rs) is the only place the SDK
+appears). It is configured by the standard `OTEL_*` variables and **nothing else** — there are no
+telemetry keys in the `observability` config group.
+
+**Where the variables come from.** Each environment has a layer of its own in sovereign-config,
+holding the `OTEL_*` leaves as direct children and nothing else:
+
+```
+/bored/devops/{dev,prod}/otel/OTEL_SERVICE_NAME            # bored (prod aliases dev)
+/bored/devops/{dev,prod}/otel/OTEL_RESOURCE_ATTRIBUTES     # deployment.environment.name=<env>,telemetry_source=otlp
+/bored/devops/{dev,prod}/otel/OTEL_EXPORTER_OTLP_ENDPOINT  # alias of /observability/otlp-endpoint
+/bored/devops/{dev,prod}/otel/OTEL_EXPORTER_OTLP_PROTOCOL  # http/protobuf (prod aliases dev)
+```
+
+The deploy steps render it —
+`sovereign-config render /bored/devops/<env>/otel -- ./scripts/compose-up-with-otel.sh … up` —
+and the script writes the variables to `deploy/otel.env`, which `deploy/docker-compose.yml`
+reads through `env_file:` (`required: false`), unsets them so docker itself never sees them
+(the docker CLI is OpenTelemetry-instrumented and would rewrite `OTEL_RESOURCE_ATTRIBUTES`),
+and deletes the file once compose has read it. The compose file holds no value. Retargeting or
+silencing telemetry is a write to the store and a redeploy, not a commit. The collector address is
+one shared leaf, `/observability/otlp-endpoint`, aliased into every environment. `telemetry_source=otlp`
+is how Alloy marks bored's OTLP logs `log_source="otlp"` in Loki.
+
+**Off.** No `OTEL_*` variable set means telemetry is off and the process runs exactly as it
+otherwise would: stdout JSON, no exporters, no background threads, and one startup line saying
+`telemetry off`. That is how `cargo run`, `cargo test` and e2e run. An environment runs without
+telemetry by leaving the layer off the render line; `OTEL_SDK_DISABLED=true` in the layer silences
+it while keeping the layer, and `OTEL_{TRACES,METRICS,LOGS}_EXPORTER=none` silences one signal.
+Inbound `traceparent` is still adopted and propagated when off.
+
+**Fails loudly, never quietly.** With any `OTEL_*` variable present the whole set is validated at
+startup: a missing endpoint (never the SDK's `localhost` default), a protocol other than
+`http/protobuf`, an unknown sampler or exporter, a sampler ratio outside `[0, 1]`, a propagator
+other than `tracecontext`, or a missing `service.name` / `deployment.environment.name` stops the
+process. An *unreachable* collector does not: batches are dropped and the SDK says so on stdout.
+
+**The one duplicated fact.** `observability.environment` (the `/api/info` watermark, needed with
+telemetry off) and `deployment.environment.name` (the telemetry identity) both state the
+environment. The pipeline's `APP_ENV` and the layer's `OTEL_RESOURCE_ATTRIBUTES` must agree; the
+backend refuses to start if they do not.
+
+**What is emitted.** A `server` span per request, parented on Traefik's edge span, with a child
+span per call that leaves the process; log records carrying `trace_id`/`span_id` (on the OTLP
+record and in the stdout JSON); `http.server.request.duration`, `bored.sse.*`, `bored.db.errors`,
+`bored.auth.outcomes` and `bored.build.info` (version and revision, compiled in). See AGENTS.md
+§ Observability for what is still short of the contract.
 
 ## Local development
 

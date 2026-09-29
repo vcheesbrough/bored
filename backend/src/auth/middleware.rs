@@ -9,6 +9,7 @@ use axum::{
 };
 
 use super::{Claims, SessionAccessToken, session::access_needs_refresh, validate_jwt};
+use crate::observability::metrics::{self, AuthOutcome};
 
 /// Axum middleware that extracts a token from the request, validates it, and
 /// inserts the resulting `Claims` into request extensions.
@@ -41,6 +42,7 @@ pub async fn auth_middleware(
             exp: u64::MAX,
         };
         req.extensions_mut().insert(claims);
+        metrics::auth_outcome(AuthOutcome::Anonymous);
         return next.run(req).await;
     };
 
@@ -55,9 +57,11 @@ pub async fn auth_middleware(
         return match validate_jwt(&token, auth, jwks).await {
             Ok(claims) => {
                 req.extensions_mut().insert(claims);
+                metrics::auth_outcome(AuthOutcome::BearerAccepted);
                 next.run(req).await
             }
             Err(reason) => {
+                metrics::auth_outcome(AuthOutcome::BearerRejected);
                 tracing::warn!(reason, "bearer auth rejected request");
                 (StatusCode::UNAUTHORIZED, reason).into_response()
             }
@@ -79,6 +83,7 @@ pub async fn auth_middleware(
     if let Some(refresh_token) = refresh_token.as_deref()
         && sessions.refresh_was_invalidated(refresh_token).await
     {
+        metrics::auth_outcome(AuthOutcome::Invalidated);
         let jar = sessions.clear_session(jar);
         return (
             jar,
@@ -102,9 +107,11 @@ pub async fn auth_middleware(
                 req.extensions_mut()
                     .insert(SessionAccessToken::from_claims(token.to_string(), &claims));
                 req.extensions_mut().insert(claims);
+                metrics::auth_outcome(AuthOutcome::CookieAccepted);
                 next.run(req).await
             }
             Err(reason) => {
+                metrics::auth_outcome(AuthOutcome::CookieRejected);
                 tracing::warn!(reason, "browser access token rejected");
                 let jar = sessions.clear_session(jar);
                 (jar, (StatusCode::UNAUTHORIZED, reason)).into_response()
@@ -115,6 +122,7 @@ pub async fn auth_middleware(
     // Access token is absent, expired, or close to expiry. A complete refresh
     // session can recover even after a long-idle browser has dropped `auth`.
     let Some(refresh_token) = refresh_token else {
+        metrics::auth_outcome(AuthOutcome::Missing);
         let jar = sessions.clear_session(jar);
         return (jar, (StatusCode::UNAUTHORIZED, "missing refresh token")).into_response();
     };
@@ -128,6 +136,7 @@ pub async fn auth_middleware(
                 session.access_token.clone(),
                 &claims,
             ));
+            metrics::auth_outcome(AuthOutcome::Refreshed);
             req.extensions_mut().insert(claims);
             let response = next.run(req).await;
             let jar = if sessions
@@ -141,6 +150,7 @@ pub async fn auth_middleware(
             (jar, response).into_response()
         }
         Err(error) => {
+            metrics::auth_outcome(AuthOutcome::RefreshFailed);
             tracing::warn!(error = %error, "browser token refresh failed");
             let jar = sessions.clear_session(jar);
             (jar, (StatusCode::UNAUTHORIZED, "session refresh failed")).into_response()

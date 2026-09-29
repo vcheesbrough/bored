@@ -17,7 +17,9 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+use crate::observability::metrics;
 use crate::routes::boards::AppState;
 
 /// How many undelivered events a slow receiver can queue up before
@@ -108,6 +110,36 @@ pub struct BroadcastEvent {
     pub event: BoardEvent,
 }
 
+/// One open SSE connection, for telemetry: its span, and its place in the
+/// `bored.sse.subscribers` count.
+///
+/// Subscribe and unsubscribe are state changes worth a log line each (card
+/// #415 §4); they are written inside the stream span so they carry its trace
+/// id. The unsubscribe line and the counter decrement both happen in `Drop`,
+/// which runs however the stream ends — the client closing the tab, a network
+/// drop, or the server shutting down.
+struct SseConnection {
+    span: tracing::Span,
+    /// Never read: held for its `Drop`, which decrements the counter.
+    _subscription: metrics::SseSubscription,
+}
+
+impl SseConnection {
+    fn open(span: tracing::Span) -> Self {
+        span.in_scope(|| tracing::info!("sse subscribed"));
+        Self {
+            span,
+            _subscription: metrics::SseSubscription::new(),
+        }
+    }
+}
+
+impl Drop for SseConnection {
+    fn drop(&mut self) {
+        self.span.in_scope(|| tracing::info!("sse unsubscribed"));
+    }
+}
+
 /// Query parameters accepted by `GET /api/events`.
 #[derive(Deserialize)]
 pub struct SseQuery {
@@ -140,21 +172,53 @@ pub async fn sse_handler(
     // Move the optional board filter into the stream combinator.
     let board_filter = query.board_id;
 
+    // The stream outlives this handler by as long as the tab stays open, so it
+    // gets a span of its own: a child of the request span (whose trace it
+    // belongs to), covering exactly the stream's life. The board id is a span
+    // attribute — never a metric label. `Empty` would be wrong for "no
+    // filter"; the field is simply left unset then.
+    let stream_span = tracing::info_span!("sse stream", bored.board.id = board_filter.as_deref(),);
+    // Counts this subscriber in `bored.sse.subscribers` until it is dropped,
+    // and logs the unsubscribe then. Moved into the stream below, so it lives
+    // exactly as long as the connection.
+    let connection = SseConnection::open(stream_span.clone());
+
     // `BroadcastStream` converts the `Receiver` into a `Stream`. It yields
     // `Ok(T)` for each message and `Err(BroadcastStreamRecvError::Lagged(n))`
     // when the receiver fell behind and n messages were dropped.
     let stream = BroadcastStream::new(rx)
-        // Skip lagged errors — the client's next full-page reload will reconcile.
-        .filter_map(|result| result.ok())
+        // A lagged receiver skips what it missed — the client's next full-page
+        // reload reconciles. The skip used to be silent; it is the event
+        // channel's saturation signal, so it is now counted (the metric) and
+        // said (a warning inside the stream's span, so it names the board).
+        .filter_map(move |result| match result {
+            Ok(event) => Some(event),
+            Err(BroadcastStreamRecvError::Lagged(dropped)) => {
+                metrics::sse_lagged(dropped);
+                connection.span.in_scope(|| {
+                    tracing::warn!(dropped, "sse subscriber lagged; events skipped");
+                });
+                None
+            }
+        })
         // Drop events that don't belong to the client's board. If no board_id
         // was supplied (e.g. an admin client), all events pass through.
         .filter(move |b| board_filter.as_ref().is_none_or(|bid| bid == &b.board_id))
         // Serialize the inner event (not the wrapper) to JSON and wrap in an SSE `Event`.
         .map(|b| {
+            metrics::sse_event_delivered();
             let data = serde_json::to_string(&b.event)
                 .unwrap_or_else(|_| r#"{"type":"error"}"#.to_string());
             Ok::<Event, Infallible>(Event::default().data(data))
         });
+    // End the stream when the server starts shutting down (card #415). An SSE
+    // stream never ends by itself, so without this every open tab would hold
+    // the graceful drain for its whole timeout; ended, the response completes,
+    // the connection closes, and the browser's EventSource reconnects to the
+    // next container. `take_until` yields items until the future resolves,
+    // then ends the stream — dropping `SseConnection` with it, which ends the
+    // stream span and logs the unsubscribe before telemetry is flushed.
+    let stream = futures_util::StreamExt::take_until(stream, state.draining.started());
 
     Sse::new(stream).keep_alive(
         // Send a comment ": ping" every 15 seconds to prevent idle disconnects.

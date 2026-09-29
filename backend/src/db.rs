@@ -40,6 +40,190 @@ use surrealdb::{
 const HEARTBEAT_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Database spans (card #415)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What a database call does, as semconv's `db.operation.name`.
+///
+/// A small enum rather than a string at each call site so the value set is
+/// fixed in code. `Define` is the schema and index statements run at startup.
+/// Add a verb here (and its label below) the day a query needs one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DbOperation {
+    Select,
+    Create,
+    Update,
+    Delete,
+    Define,
+}
+
+impl DbOperation {
+    /// Every variant, for the every-variant label test.
+    #[cfg(test)]
+    pub(crate) const ALL: [DbOperation; 5] = [
+        DbOperation::Select,
+        DbOperation::Create,
+        DbOperation::Update,
+        DbOperation::Delete,
+        DbOperation::Define,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            DbOperation::Select => "SELECT",
+            DbOperation::Create => "CREATE",
+            DbOperation::Update => "UPDATE",
+            DbOperation::Delete => "DELETE",
+            DbOperation::Define => "DEFINE",
+        }
+    }
+}
+
+/// What a traced call's result must do before the span can say whether it
+/// failed.
+///
+/// A `db.query(..)` resolves to a [`surrealdb::Response`] *even when a
+/// statement inside it failed* — the error waits inside the response until
+/// `.check()` or `.take(n)`. So for a `Response` the span calls `check()`
+/// itself, which turns a statement error into the `Err` it would have become
+/// one step later at the call site anyway; the caller's own `.check()` /
+/// `.take(n)` then runs on a response already known to be clean. Every other
+/// result (`select`, `create`, `update`, `delete` builders) has already
+/// failed or succeeded by the time it resolves.
+pub(crate) trait Settle: Sized {
+    fn settle(self) -> surrealdb::Result<Self>;
+}
+
+impl Settle for surrealdb::Response {
+    fn settle(self) -> surrealdb::Result<Self> {
+        self.check()
+    }
+}
+
+impl<T> Settle for Option<T> {
+    fn settle(self) -> surrealdb::Result<Self> {
+        Ok(self)
+    }
+}
+
+impl<T> Settle for Vec<T> {
+    fn settle(self) -> surrealdb::Result<Self> {
+        Ok(self)
+    }
+}
+
+impl Settle for () {
+    fn settle(self) -> surrealdb::Result<Self> {
+        Ok(self)
+    }
+}
+
+/// The identity of one database call site, for its span.
+///
+/// Every field is a `&'static str` or an enum, so nothing computed at run time
+/// — and in particular no SQL text and no bound value — can reach a span
+/// attribute through it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DbQuery {
+    /// The call site: `<module>.<function>`, e.g. `cards.create_card`.
+    name: &'static str,
+    operation: DbOperation,
+    /// The table the call is about (`cards`, `audit_log`, …).
+    table: &'static str,
+}
+
+impl DbQuery {
+    pub(crate) const fn new(
+        name: &'static str,
+        operation: DbOperation,
+        table: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            operation,
+            table,
+        }
+    }
+}
+
+/// `.traced(DbQuery::new(..))` on any SurrealDB call, before its `.await`:
+///
+/// ```ignore
+/// let card: Option<DbCard> = state
+///     .db
+///     .select(("cards", id))
+///     .traced(DbQuery::new("cards.get_card", DbOperation::Select, "cards"))
+///     .await?;
+/// ```
+///
+/// Opens a `client` span per call — the database is embedded, but a call into
+/// it is still where a request's time goes, and the skill asks for a child
+/// span per call that leaves the handler's own code. The span is named, as
+/// semconv asks, by its summary (`SELECT cards`) and carries the call site as
+/// `bored.db.query.name`; never SQL text or a bound value (skill §6:
+/// telemetry is published). A failure sets `error.type` from the same
+/// classification the request's `ApiError` will use, marks the span as an
+/// error, and counts `bored.db.errors`.
+///
+/// A trait with a blanket impl, rather than a free function, so the call site
+/// reads as one more step in the builder chain.
+pub(crate) trait Traced<T>: Sized {
+    fn traced(
+        self,
+        query: DbQuery,
+    ) -> impl std::future::Future<Output = surrealdb::Result<T>> + Send;
+}
+
+impl<F, T> Traced<T> for F
+where
+    // `IntoFuture` is what SurrealDB's builders implement: they become a
+    // future only when awaited. `Send` because axum handler futures must be.
+    F: std::future::IntoFuture<Output = surrealdb::Result<T>> + Send,
+    F::IntoFuture: Send,
+    T: Settle + Send,
+{
+    fn traced(
+        self,
+        query: DbQuery,
+    ) -> impl std::future::Future<Output = surrealdb::Result<T>> + Send {
+        use tracing::Instrument as _;
+        // semconv's low-cardinality summary: `{operation} {table}`.
+        let summary = format!("{} {}", query.operation.label(), query.table);
+        // Literal keys, as the `tracing` macros require; each is a semconv
+        // name or `bored.`-prefixed (`observability::tests` checks what the
+        // exporter received). `db.system.name` is not one of semconv's listed
+        // values — SurrealDB has none — which the convention allows.
+        let span = tracing::info_span!(
+            "db",
+            otel.name = %summary,
+            otel.kind = "client",
+            otel.status_code = tracing::field::Empty,
+            db.system.name = "surrealdb",
+            db.namespace = "bored",
+            db.operation.name = query.operation.label(),
+            db.collection.name = query.table,
+            db.query.summary = %summary,
+            bored.db.query.name = query.name,
+            error.type = tracing::field::Empty,
+        );
+        // `clone` so the span can be both the one the future runs inside and
+        // the one this function records the outcome on.
+        let recorder = span.clone();
+        async move {
+            let result = self.await.and_then(Settle::settle);
+            if let Err(error) = &result {
+                let error_type = crate::error::database_error_type(error);
+                recorder.record("error.type", error_type.as_str());
+                recorder.record("otel.status_code", "ERROR");
+                crate::observability::metrics::db_error(error_type);
+            }
+            result
+        }
+        .instrument(span)
+    }
+}
+
 // Called at startup in production. `path` is a filesystem path like `/data/bored.db`.
 // Returns a `Surreal<Db>` — the generic `Db` type erases the concrete backend so
 // the rest of the app doesn't need to know whether storage is on-disk or in-memory.
@@ -83,13 +267,17 @@ async fn init(db: &Surreal<Db>) -> surrealdb::Result<()> {
     // startup — SurrealDB's `DEFINE ... IF NOT EXISTS` semantics make it idempotent
     // (safe to run multiple times without duplicating anything).
     // `.check()` turns any SurrealDB-level errors in the response into a Rust `Err`.
-    db.query(include_str!("schema.surql")).await?.check()?;
+    db.query(include_str!("schema.surql"))
+        .traced(DbQuery::new("db.init", DbOperation::Define, "schema"))
+        .await?
+        .check()?;
     // Sanitize existing board names into slug format (lowercase, hyphens only)
     // and deduplicate before enforcing the unique index below.
     migrate_board_names(db).await?;
     crate::audit::migrate_audit_baselines(db).await?;
     // Now safe to add the uniqueness constraint — all names are already clean.
     db.query("DEFINE INDEX IF NOT EXISTS board_name_unique ON TABLE boards FIELDS name UNIQUE")
+        .traced(DbQuery::new("db.init", DbOperation::Define, "boards"))
         .await?
         .check()?;
     Ok(())
@@ -142,6 +330,11 @@ async fn migrate_board_names(db: &Surreal<Db>) -> surrealdb::Result<()> {
     // take() deserializes only the fields declared in RawBoard.
     let boards: Vec<RawBoard> = db
         .query("SELECT * FROM boards ORDER BY created_at ASC")
+        .traced(DbQuery::new(
+            "db.migrate_board_names",
+            DbOperation::Select,
+            "boards",
+        ))
         .await?
         .take(0)?;
 
@@ -169,6 +362,11 @@ async fn migrate_board_names(db: &Surreal<Db>) -> surrealdb::Result<()> {
             db.query("UPDATE $id SET name = $name")
                 .bind(("id", board.id))
                 .bind(("name", final_name))
+                .traced(DbQuery::new(
+                    "db.migrate_board_names",
+                    DbOperation::Update,
+                    "boards",
+                ))
                 .await?
                 .check()?;
         }
@@ -180,6 +378,94 @@ async fn migrate_board_names(db: &Surreal<Db>) -> surrealdb::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every SurrealDB call in product code goes through `.traced(..)`, so a
+    /// call added later cannot quietly miss its span (card #415).
+    ///
+    /// A source scan, like the telemetry module's SDK allowlist test: for each
+    /// `db.<query|select|create|update|delete|upsert|insert>(` outside test
+    /// code, the text up to the next `.await` must contain `.traced(`. Only
+    /// code before a file's `#[cfg(test)] mod tests` is scanned, and comment
+    /// lines are skipped.
+    #[test]
+    fn every_database_call_is_traced() {
+        const METHODS: [&str; 7] = [
+            "query", "select", "create", "update", "delete", "upsert", "insert",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut pending = vec![root];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    // Test-only trees.
+                    if name != "tests" {
+                        pending.push(path);
+                    }
+                } else if name.ends_with(".rs") && name != "tests.rs" {
+                    files.push(path);
+                }
+            }
+        }
+
+        let mut calls = 0;
+        let mut untraced = Vec::new();
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("read source");
+            // Product code only: stop at the test module.
+            let product = source
+                .find("#[cfg(test)]\nmod tests")
+                .map_or(source.as_str(), |cut| &source[..cut]);
+            // Blank out comment lines so a doc example is not counted.
+            let code: String = product
+                .lines()
+                .map(|line| {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") { "" } else { line }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let bytes = code.as_bytes();
+            let mut index = 0;
+            while let Some(found) = code[index..].find("db") {
+                let start = index + found;
+                index = start + 2;
+                // `db` must be a whole word (not `self.dbx` or `Db`).
+                if start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+                {
+                    continue;
+                }
+                let rest = code[index..].trim_start();
+                let Some(after_dot) = rest.strip_prefix('.') else {
+                    continue;
+                };
+                let after_dot = after_dot.trim_start();
+                if !METHODS
+                    .iter()
+                    .any(|method| after_dot.starts_with(&format!("{method}(")))
+                {
+                    continue;
+                }
+                calls += 1;
+                let chain = &code[index..];
+                let until_await = chain.find(".await").map_or(chain, |end| &chain[..end]);
+                if !until_await.contains(".traced(") {
+                    let line = code[..start].lines().count() + 1;
+                    untraced.push(format!("{}:{line}", path.display()));
+                }
+            }
+        }
+        // Non-degenerate: the scan must be finding the product's calls.
+        assert!(calls > 50, "only {calls} database calls found");
+        assert!(
+            untraced.is_empty(),
+            "database calls without `.traced(..)`:\n{}",
+            untraced.join("\n")
+        );
+    }
 
     // Exercises the real `connect_persistent` path (on-disk SurrealKv + tuned
     // `Config`), rather than the in-memory `connect_mem` used elsewhere. The goal
