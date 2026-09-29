@@ -762,7 +762,12 @@ fn announce(decision: &Decision) {
                 .collect();
             tracing::info!(
                 signals = %signals.join(","),
-                endpoint = enabled.endpoint.as_deref().unwrap_or("per-signal"),
+                // Scheme, host, port and path only: an endpoint could carry
+                // userinfo or a query-string token (#366).
+                endpoint = %enabled
+                    .endpoint
+                    .as_deref()
+                    .map_or_else(|| "per-signal".to_string(), crate::redact::url),
                 service_name = %enabled.service_name,
                 environment = %enabled.environment,
                 "telemetry on (OTLP http/protobuf)"

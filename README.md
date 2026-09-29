@@ -129,8 +129,8 @@ APP_BRANCH                       # dev only: the branch this deploy was built fr
 APP_VERSION                      # optional override; leave unset (see "Version and reload" below)
 SOVEREIGN_CONFIG_ACCESS_URL_FILE # sourced from bored_{dev,prod}_sovereign_access_url,
                                   # materialised as a file (not left in the container's process env)
-OTEL_*                           # passed through by name only; rendered from
-                                  # /bored/devops/<env>/otel at deploy time (see "Telemetry")
+OTEL_*                           # handed to the container via deploy/otel.env (env_file), never
+                                  # in docker's own env; rendered from /bored/devops/<env>/otel (see "Telemetry")
 ```
 
 Everything else — OIDC settings, the session cookie key, log level, the database

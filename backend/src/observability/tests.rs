@@ -417,6 +417,47 @@ async fn a_request_with_traceparent_yields_a_server_span_parented_on_it() {
     );
 }
 
+/// The startup line names the collector without any credential or token the
+/// endpoint URL might carry.
+#[tokio::test]
+async fn the_startup_line_redacts_the_endpoint() {
+    let stdout = CapturedWriter::default();
+    let variables = [
+        TEST_VARIABLES[0],
+        TEST_VARIABLES[1],
+        (
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "http://user:hunter2@collector.invalid:4318/otlp?token=sekrit",
+        ),
+    ];
+    let (_telemetry, subscriber, announce) =
+        prepare_for_test(&variables, stdout.clone()).expect("valid");
+    tracing::subscriber::with_default(subscriber, announce);
+    let line = stdout
+        .line("telemetry on (OTLP http/protobuf)")
+        .expect("startup line");
+    let endpoint = line["endpoint"].as_str().expect("endpoint field");
+    assert_eq!(endpoint, "http://collector.invalid:4318/otlp");
+    let text = stdout.text();
+    assert!(
+        !text.contains("hunter2") && !text.contains("sekrit"),
+        "{text}"
+    );
+}
+
+/// With auth disabled (local runs, e2e) every protected request is counted as
+/// `anonymous` — the one outcome the auth-enabled test in
+/// `tests/outbound_http.rs` cannot reach.
+#[tokio::test]
+async fn auth_disabled_requests_are_counted_as_anonymous() {
+    use super::metrics::BORED_AUTH_OUTCOME;
+    use super::test_support::counter_value;
+    let before = counter_value(AUTH_OUTCOMES, BORED_AUTH_OUTCOME, "anonymous");
+    let server = TestServer::new(router().await).unwrap();
+    server.get("/api/boards").await.assert_status_ok();
+    assert!(counter_value(AUTH_OUTCOMES, BORED_AUTH_OUTCOME, "anonymous") > before);
+}
+
 /// Numeric handler fields are exported as numbers. The span bridge turns a
 /// `u64`/`usize` field into a *string* attribute, so they are recorded as
 /// `i64`.
