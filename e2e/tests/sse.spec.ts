@@ -255,10 +255,11 @@ test.describe('returning to a board', () => {
 // run on the pre-#452 image). The other suspect — several events in one chunk
 // overwriting each other in the board's single `sse_event` signal — was ruled
 // out: Chromium runs a microtask checkpoint after every message event of a
-// coalesced chunk, so the effects run per event. This spec still drives that
-// shape — a burst of mutations fired the moment the stream answers, while the
-// column and card snapshots may still be in flight — and requires every one
-// of them to land.
+// coalesced chunk, so the effects run per event. That browser property is
+// pinned by its own spec below. This spec does not force or detect
+// coalescing; it drives a burst of mutations fired the moment the stream
+// answers, while the column and card snapshots may still be in flight, and
+// requires every one of them to land (the #452 race).
 test.describe('a burst of events right after load', () => {
   test('every event of a burst fired as the stream opens is applied', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `sse-burst-${Date.now()}`);
@@ -322,5 +323,49 @@ test.describe('a burst of events right after load', () => {
     await search.fill('');
     await expect(cards).toHaveCount(TOTAL);
     expect(panics).toEqual([]);
+  });
+});
+
+// Card #449. The board keeps the latest SSE event in one signal
+// (`sse_event` in `board_view.rs`) and its effects read it from there, so it
+// relies on the effects running between two message events — including two
+// that reached the browser in the same network chunk, as an HTTP/2 edge may
+// deliver them. Leptos runs effects in microtasks, so this holds exactly as
+// long as the browser performs a microtask checkpoint after each message
+// event. This pins that property on the suite's browser: a stream whose three
+// events arrive in one response body must interleave each message with its
+// own microtask. If it ever fails, the single signal can lose events and must
+// become a queue.
+test.describe('the browser the SSE plumbing relies on', () => {
+  test('runs microtasks between the message events of one chunk', async ({ page }) => {
+    // Both routes are served by Playwright, never by the app: the whole
+    // stream body is delivered at once, which is the coalesced case.
+    await page.route('**/__sse-probe/page', route =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: `<!doctype html><script>
+          window.LOG = [];
+          const es = new EventSource('/__sse-probe/stream');
+          es.onmessage = m => {
+            window.LOG.push('msg ' + m.data);
+            queueMicrotask(() => window.LOG.push('micro ' + m.data));
+          };
+        </script>`,
+      })
+    );
+    await page.route('**/__sse-probe/stream', route =>
+      route.fulfill({
+        contentType: 'text/event-stream',
+        body: 'data: a\n\ndata: b\n\ndata: c\n\n',
+      })
+    );
+    await page.goto('/__sse-probe/page');
+    // The stream ends after one body and EventSource reconnects, so only the
+    // first delivery's six entries are compared.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const read = () => page.evaluate(() => (window as any).LOG as string[]);
+    await expect.poll(async () => (await read()).length).toBeGreaterThanOrEqual(6);
+    const log = (await read()).slice(0, 6);
+    expect(log).toEqual(['msg a', 'micro a', 'msg b', 'micro b', 'msg c', 'micro c']);
   });
 });
