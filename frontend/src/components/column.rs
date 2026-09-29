@@ -161,17 +161,14 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
             else {
                 return;
             };
-            match result {
-                Ok(fetched) => {
-                    let _ = cards.try_set(fetched.into_iter().map(RwSignal::new).collect());
+            let snapshot = match result {
+                Ok(fetched) => Some(fetched),
+                Err(e) => {
+                    crate::telemetry::error("failed to fetch cards", &e);
+                    None
                 }
-                // No snapshot, so the buffered events go onto whatever the
-                // column holds — what applying them live would have done.
-                Err(e) => crate::telemetry::error("failed to fetch cards", &e),
-            }
-            for event in buffered {
-                apply_card_event(cards, &col_id_replay, event, Inserts::Now);
-            }
+            };
+            land_snapshot(cards, &col_id_replay, snapshot, buffered);
         });
     });
 
@@ -806,12 +803,27 @@ fn renumbered_order(
     order
 }
 
-/// Apply a `CardsRenumbered` event to `cards`: every named card takes its new
-/// position, and the column is re-sorted to match — all in one update.
+/// A column's card fetch has answered: install its `snapshot` and replay on
+/// top of it the events `held` while it was in flight, in arrival order.
 ///
-/// The existing signals are reused, for the same reason as in
-/// [`apply_server_order`]: a keyed `<For>` would remount fresh ones, losing
-/// focus and collapsing anything expanded.
+/// `None` (the fetch failed) keeps whatever the column holds and still
+/// replays onto it — what applying those events live would have done.
+/// Inserts are immediate ([`Inserts::Now`]): this runs in the fetch's own
+/// task, and a deferred insert would reorder the replay.
+fn land_snapshot(
+    cards: RwSignal<Vec<RwSignal<shared::Card>>>,
+    col_id: &str,
+    snapshot: Option<Vec<shared::Card>>,
+    held: Vec<BoardSseEvent>,
+) {
+    if let Some(fetched) = snapshot {
+        let _ = cards.try_set(fetched.into_iter().map(RwSignal::new).collect());
+    }
+    for event in held {
+        apply_card_event(cards, col_id, event, Inserts::Now);
+    }
+}
+
 /// How [`apply_card_event`] inserts a card.
 #[derive(Clone, Copy)]
 enum Inserts {
@@ -974,6 +986,12 @@ impl<E> SnapshotGate<E> {
     }
 }
 
+/// Apply a `CardsRenumbered` event to `cards`: every named card takes its new
+/// position, and the column is re-sorted to match — all in one update.
+///
+/// The existing signals are reused, for the same reason as in
+/// [`apply_server_order`]: a keyed `<For>` would remount fresh ones, losing
+/// focus and collapsing anything expanded.
 fn apply_renumbering(
     cards: RwSignal<Vec<RwSignal<shared::Card>>>,
     renumbered: &[shared::CardPosition],
@@ -1077,6 +1095,138 @@ mod tests {
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    // ── land_snapshot: the replay itself (card #452) ────────────────────────
+    //
+    // Driven with real signals on the host target: the replay's inserts are
+    // immediate (`Inserts::Now`), so nothing here needs a wasm task queue.
+
+    use super::land_snapshot;
+    use crate::events::BoardSseEvent;
+    use leptos::prelude::*;
+
+    fn card(id: &str, column: &str, position: i32, body: &str) -> shared::Card {
+        shared::Card {
+            id: id.to_string(),
+            column_id: column.to_string(),
+            body: body.to_string(),
+            position,
+            number: 0,
+            tags: Vec::new(),
+            last_edited_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// `(id, body)` per card, in list order: what the column shows.
+    fn shown(cards: RwSignal<Vec<RwSignal<shared::Card>>>) -> Vec<(String, String)> {
+        cards
+            .get_untracked()
+            .iter()
+            .map(|s| s.with_untracked(|c| (c.id.clone(), c.body.clone())))
+            .collect()
+    }
+
+    fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|(id, body)| ((*id).to_string(), (*body).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn an_update_held_for_the_snapshot_is_applied_to_it() {
+        // The lost-update case: `CardUpdated` for a card the column had not
+        // loaded yet used to be dropped, and the older snapshot kept.
+        let cards = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::CardUpdated {
+            card: card("a", "col", 10, "tagged"),
+        }];
+        land_snapshot(cards, "col", Some(vec![card("a", "col", 10, "old")]), held);
+        assert_eq!(shown(cards), pairs(&[("a", "tagged")]));
+    }
+
+    #[test]
+    fn a_card_created_during_the_fetch_survives_an_older_snapshot() {
+        // The overwrite case: the snapshot was read before the card existed.
+        let cards = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::CardCreated {
+            card: card("new", "col", 20, "fresh"),
+        }];
+        land_snapshot(cards, "col", Some(vec![card("a", "col", 10, "a")]), held);
+        assert_eq!(shown(cards), pairs(&[("a", "a"), ("new", "fresh")]));
+    }
+
+    #[test]
+    fn a_created_then_updated_pair_replays_in_order() {
+        // A deferred insert would land after the update, which would then
+        // find no card and be dropped.
+        let cards = RwSignal::new(Vec::new());
+        let held = vec![
+            BoardSseEvent::CardCreated {
+                card: card("n", "col", 5, "v1"),
+            },
+            BoardSseEvent::CardUpdated {
+                card: card("n", "col", 5, "v2"),
+            },
+        ];
+        land_snapshot(cards, "col", Some(Vec::new()), held);
+        assert_eq!(shown(cards), pairs(&[("n", "v2")]));
+    }
+
+    #[test]
+    fn replaying_what_the_snapshot_already_holds_changes_nothing() {
+        // The snapshot may have been read after the change, so it already
+        // reflects it: no duplicate insert, no resurrected card.
+        let cards = RwSignal::new(Vec::new());
+        let held = vec![
+            BoardSseEvent::CardCreated {
+                card: card("a", "col", 10, "a"),
+            },
+            BoardSseEvent::CardDeleted {
+                card_id: "gone".to_string(),
+            },
+        ];
+        land_snapshot(cards, "col", Some(vec![card("a", "col", 10, "a")]), held);
+        assert_eq!(shown(cards), pairs(&[("a", "a")]));
+    }
+
+    #[test]
+    fn events_for_other_columns_are_not_replayed_into_this_one() {
+        let cards = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::CardCreated {
+            card: card("x", "other", 1, "x"),
+        }];
+        land_snapshot(cards, "col", Some(Vec::new()), held);
+        assert!(shown(cards).is_empty());
+    }
+
+    #[test]
+    fn a_failed_fetch_keeps_the_list_and_still_replays() {
+        let cards = RwSignal::new(vec![RwSignal::new(card("a", "col", 10, "a"))]);
+        let held = vec![BoardSseEvent::CardCreated {
+            card: card("b", "col", 20, "b"),
+        }];
+        land_snapshot(cards, "col", None, held);
+        assert_eq!(shown(cards), pairs(&[("a", "a"), ("b", "b")]));
+    }
+
+    #[test]
+    fn a_move_out_during_the_fetch_removes_the_card_from_the_snapshot() {
+        let cards = RwSignal::new(Vec::new());
+        let held = vec![BoardSseEvent::CardMoved {
+            card: card("a", "elsewhere", 1, "a"),
+            from_column_id: "col".to_string(),
+        }];
+        land_snapshot(
+            cards,
+            "col",
+            Some(vec![card("a", "col", 10, "a"), card("b", "col", 20, "b")]),
+            held,
+        );
+        assert_eq!(shown(cards), pairs(&[("b", "b")]));
     }
 
     // ── SnapshotGate (card #452) ───────────────────────────────────────────
