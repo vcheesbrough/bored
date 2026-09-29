@@ -279,7 +279,7 @@ README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
 - **The unload flush is a `keepalive` fetch**, not `sendBeacon` (D3): a beacon
   cannot carry `Authorization`.
 - **e2e reaches the ingest cross-origin** (CORS on) rather than through a
-  Traefik edge; see the follow-up card on SSE events lost behind Traefik.
+  Traefik edge; see card #449 (SSE events lost behind Traefik).
 
 **Rules:**
 

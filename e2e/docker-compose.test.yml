@@ -58,7 +58,7 @@ services:
       # it cross-origin, with CORS allowed for https://app on the ingest. A
       # Traefik edge in this rig was tried and dropped: it exposed a
       # pre-existing loss of SSE events that made unrelated specs flaky
-      # (follow-up card), and same-origin routing is Traefik's contract, not
+      # (card #449), and same-origin routing is Traefik's contract, not
       # bored's.
       BORED__CLIENT_TELEMETRY__ENDPOINT: https://collector:4318
       # The server's own export (card #415), to the same fake receiver, so the
