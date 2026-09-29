@@ -24,7 +24,7 @@ tracing.workspace = true
 # `json` on top of the workspace features: the backend emits structured logs.
 tracing-subscriber = { workspace = true, features = ["json"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace", "fs"] }
+tower-http = { version = "0.6", features = ["trace", "fs", "catch-panic"] }
 # BroadcastStream wraps a broadcast::Receiver as a futures Stream so we can
 # feed it directly into axum's Sse response type.
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -60,7 +60,58 @@ config = "0.15"
 # makes call sites easier to read and guarantees a consistent version.
 time = "0.3"
 
+# ── Telemetry (card #415) ────────────────────────────────────────────────────
+# One set, moved together. `tracing-opentelemetry` sets the pace: it lags the
+# core crates and each release requires exactly one core version, so the core
+# family below is whatever the newest `tracing-opentelemetry` asks for — read
+# from its crates.io requirement, never inferred from the version numbers
+# (they look paired and are not: 0.34 here needs core 0.33).
+#
+# Only `observability.rs` may import `opentelemetry_sdk`, `opentelemetry_otlp`,
+# `tracing_opentelemetry` or `opentelemetry_appender_tracing` — a test scans
+# `src/` for them. `opentelemetry` (the API crate, no SDK inside) and
+# `opentelemetry-semantic-conventions` are the façade and may appear anywhere;
+# `opentelemetry-http` belongs to the transport layer (`app.rs`, the outbound
+# client).
+opentelemetry = "0.33"
+opentelemetry_sdk = "0.33"
+# http/protobuf — the spec's default transport, and the one the collector's
+# `:4318` listener speaks. No tonic/gRPC stack, and no HTTP client feature: the
+# exporter's own client would bring reqwest 0.13 beside the workspace's 0.12,
+# so `observability.rs` hands it an adapter over the workspace client instead
+# (`OtlpHttpClient`, which needs `async-trait`, `bytes` and `http` below).
+opentelemetry-otlp = { version = "0.33", default-features = false, features = [
+    "trace",
+    "metrics",
+    "logs",
+    "http-proto",
+    "internal-logs",
+] }
+opentelemetry-http = "0.33"
+opentelemetry-semantic-conventions = { version = "0.33", features = [
+    "semconv_experimental",
+] }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
+# `service.instance.id` is a version-5 UUID of the container hostname, so it is
+# stable across restarts and does not publish the hostname itself.
+uuid = { version = "1", features = ["v5"] }
+async-trait = "0.1"
+bytes = "1"
+http = "1"
+
 [dev-dependencies]
+# In-memory span, log and metric exporters, so the telemetry tests assert on
+# what an exporter actually received rather than on configuration.
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
+# A throwaway self-signed certificate for the TLS listener's shutdown tests
+# (`listen::serve_tls`), made at test time so no key is committed. `ring`,
+# the crypto provider the backend already uses, rather than rcgen's default.
+rcgen = { version = "0.14", default-features = false, features = [
+    "crypto",
+    "pem",
+    "ring",
+] }
 axum-test = "15"
 serial_test = "3"
 tempfile = "3"

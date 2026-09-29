@@ -9,6 +9,17 @@ services:
     # here has no ssl_client applet), and each orphaned openssl leaks a
     # permanent defunct process. tini reaps them regardless of the TLS helper.
     init: true
+    # A stable host name — the container name, which survives restarts *and*
+    # redeploys, unlike the container id Docker would otherwise use. The
+    # backend derives its `service.instance.id` telemetry attribute from it (a
+    # v5 UUID of the host name), so each deploy does not start a new set of
+    # metric series. Card #415.
+    hostname: ${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}
+    # Docker's default is 10s. On SIGTERM the backend drains connections for up
+    # to 4s and flushes telemetry for up to 6s more (backend/src/listen.rs,
+    # observability.rs); this leaves headroom so it is never SIGKILLed while
+    # flushing.
+    stop_grace_period: 15s
     environment:
       # Container-internal key stays `BORED__OBSERVABILITY__ENVIRONMENT`; the
       # deploy-script-facing variable name stays `APP_ENV` (`.woodpecker/build.yml`
@@ -40,6 +51,23 @@ services:
       # rather than left in the container's process env. A blank/absent value
       # disables the sovereign layer cleanly (config.rs falls back to defaults+env).
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
+    # Telemetry: the standard OTEL_* variables, from a file the deploy writes
+    # and deletes around `docker compose up` (scripts/compose-up-with-otel.sh,
+    # fed by `sovereign-config render /bored/devops/<env>/otel` in
+    # .woodpecker/build.yml). This compose file never holds a value, and the
+    # variables never pass through docker's own environment — the docker CLI
+    # is OpenTelemetry-instrumented and would both export its own spans under
+    # them and rewrite OTEL_RESOURCE_ATTRIBUTES. No file — the layer left off
+    # the render, e2e, a local `docker compose up` — means telemetry off
+    # (backend/src/observability.rs). Card #415.
+    #
+    # `format: raw` hands each value over byte for byte: no `$` interpolation,
+    # no quote stripping, no `#` comments. A header value (a credential) could
+    # contain any of those, and compose's default parsing would mangle it.
+    env_file:
+      - path: otel.env
+        required: false
+        format: raw
     secrets:
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE
     volumes:

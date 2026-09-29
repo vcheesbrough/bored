@@ -4,7 +4,7 @@ default-members = ["shared", "backend"]
 resolver = "3"
 
 [workspace.package]
-version = "1.62.0"
+version = "1.63.0"
 edition = "2024"
 rust-version = "1.98"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -47,6 +47,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 #     pays ~nothing (+528 bytes) — hyper/axum/tonic already compile `h2` in.
 # Revisit if a member starts issuing concurrent requests to one origin (an
 # HTTP exporter or fan-out client added under #415 would be the trigger).
+#
+# Revisited under #415, which added exactly that trigger — the OTLP exporter
+# (backend/src/observability.rs, `OtlpHttpClient`) — and the answer is still
+# HTTP/1.1. Each signal's SDK processor exports one batch at a time, so the
+# collector sees at most three requests in flight (traces, logs, metrics),
+# every few seconds, over plain `http://` inside the Docker network (no TLS,
+# so no ALPN and no h2 without prior knowledge). Three kept-alive HTTP/1.1
+# connections serve that as well as one multiplexed h2 connection would.
+# Revisit if a batch processor is configured with concurrent exports
+# (`with_max_concurrent_exports`) or export latency to the collector shows up.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",

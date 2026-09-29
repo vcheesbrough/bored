@@ -5,10 +5,12 @@ use axum::{
 
 use crate::audit;
 use crate::auth::Claims;
+use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::models::DbColumn;
 use crate::routes::boards::{AppState, find_board_by_slug};
 
+#[tracing::instrument(skip_all, fields(bored.board.slug = %slug))]
 pub async fn board_history(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -22,11 +24,20 @@ pub async fn board_history(
     Ok(Json(rows))
 }
 
+#[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
 pub async fn column_history(
     State(state): State<AppState>,
     Path(col_id): Path<String>,
 ) -> Result<Json<Vec<shared::AuditLogEntry>>, ApiError> {
-    let col: Option<DbColumn> = state.db.select(("columns", &col_id)).await?;
+    let col: Option<DbColumn> = state
+        .db
+        .select(("columns", &col_id))
+        .traced(DbQuery::new(
+            "audit.column_history",
+            DbOperation::Select,
+            "columns",
+        ))
+        .await?;
     let Some(col) = col else {
         return Err(ApiError::NotFound);
     };
@@ -35,17 +46,31 @@ pub async fn column_history(
     Ok(Json(rows))
 }
 
+#[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> Result<Json<Vec<shared::AuditLogEntry>>, ApiError> {
-    let card: Option<crate::models::DbCard> = state.db.select(("cards", &card_id)).await?;
+    let card: Option<crate::models::DbCard> = state
+        .db
+        .select(("cards", &card_id))
+        .traced(DbQuery::new(
+            "audit.card_history",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
     let Some(card) = card else {
         return Err(ApiError::NotFound);
     };
     let col: Option<DbColumn> = state
         .db
         .select(("columns", card.column.id.to_raw()))
+        .traced(DbQuery::new(
+            "audit.card_history",
+            DbOperation::Select,
+            "columns",
+        ))
         .await?;
     // The column is normally still there; if it is not (mid-cascade), the
     // card's own history rows still come back and only the link half narrows
@@ -55,6 +80,7 @@ pub async fn card_history(
     Ok(Json(rows))
 }
 
+#[tracing::instrument(skip_all, fields(bored.audit.id = %audit_id))]
 pub async fn restore_audit(
     State(state): State<AppState>,
     Path(audit_id): Path<String>,

@@ -204,3 +204,21 @@ async fn api_unknown_route_returns_404_not_spa_fallback() {
     let resp = server.get("/api/nonexistent").await;
     resp.assert_status(StatusCode::NOT_FOUND);
 }
+
+/// A panic during startup or serving is still a logged failure (card #415):
+/// `guarded` turns it into `StartupError::Panicked` and writes the one
+/// `startup failed` line, so `main` goes on to flush telemetry instead of
+/// unwinding past it. The panic's own message stays out of that line.
+#[tokio::test]
+async fn a_panic_in_run_becomes_a_logged_startup_error() {
+    let (outcome, logs) = capture_logs_async(async {
+        crate::guarded(async {
+            panic!("secret-startup-detail");
+        })
+        .await
+    })
+    .await;
+    assert!(matches!(outcome, Err(crate::StartupError::Panicked)));
+    assert!(logs.contains("startup failed"), "{logs}");
+    assert!(!logs.contains("secret-startup-detail"), "{logs}");
+}
