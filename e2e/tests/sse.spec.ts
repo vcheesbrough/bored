@@ -286,8 +286,11 @@ test.describe('a burst of events right after load', () => {
     await page.goto(`/boards/${board.name}`);
     await eventsReady;
 
-    // Card, column and audit events interleaved, back to back, so the edge
-    // is free to put several in one frame. The edits and the rename go
+    // Card and column events back to back, interleaved with the audit event
+    // every mutation also broadcasts. The audit events are not asserted: the
+    // only reader is the history drawer, which ignores them while closed, and
+    // it stays closed here. What must land is every card and column change.
+    // The edits and the rename go
     // concurrently; the creates are sequential (every create bumps the global
     // `card_counter` and computes a top-of-column position, and concurrent
     // creates fail with a 500 — card #456; that holds across boards, so this
