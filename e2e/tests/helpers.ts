@@ -54,6 +54,11 @@ export async function apiDeleteCard(request: APIRequestContext, cardId: string) 
   if (!res.ok()) throw new Error(`DELETE /api/cards/${cardId} failed: ${res.status()} ${await res.text()}`);
 }
 
+export async function apiDeleteColumn(request: APIRequestContext, columnId: string) {
+  const res = await request.delete(`/api/columns/${columnId}`);
+  if (!res.ok()) throw new Error(`DELETE /api/columns/${columnId} failed: ${res.status()} ${await res.text()}`);
+}
+
 export async function apiUpdateCard(
   request: APIRequestContext,
   cardId: string,

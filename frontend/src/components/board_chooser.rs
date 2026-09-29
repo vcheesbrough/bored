@@ -83,6 +83,13 @@ pub fn BoardChooser(
         requested_position.set(None);
     });
 
+    // A second handle on `column_owner` for the column delete below. `Owner`
+    // is `Clone` but not `Copy`, and `delete_col` is invoked from a closure
+    // per rendered column, so it must itself be `Copy`: capturing the owner in
+    // a `StoredValue` (a `Copy` handle into the reactive arena) keeps it so.
+    // `submit_new_col` takes the original by move.
+    let delete_owner = StoredValue::new(column_owner.clone());
+
     // Creates a column from whatever is currently typed, if anything. Whether
     // the input row stays open afterwards is the caller's decision: Enter keeps
     // it open for the next column, losing focus closes it.
@@ -198,9 +205,16 @@ pub fn BoardChooser(
             return;
         }
         let col_id = col.id.clone();
+        // Taken out now, while the chooser is certainly mounted (this runs
+        // from its click handler), so the task below holds a plain `Owner`
+        // rather than reading the arena after its `await`.
+        let owner = delete_owner.get_value();
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::delete_column(&col_id).await {
-                Ok(()) => columns.update(|cs| cs.retain(|s| s.get_untracked().id != col_id)),
+                // Apply the delete here rather than waiting for SSE to relay
+                // it — and that includes pruning the links of the cards the
+                // column took with it (card #371), which `remove` does.
+                Ok(()) => crate::columns::remove(&owner, columns, &col_id),
                 Err(e) => crate::telemetry::error("failed to delete column", &e),
             }
         });

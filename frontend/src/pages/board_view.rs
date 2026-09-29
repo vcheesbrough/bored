@@ -1229,8 +1229,13 @@ fn apply_column_event(
                 }
             });
         }
+        // Also prunes the links of the column's cards, which heals a tab that
+        // missed the `CardLinkDeleted` broadcasts sent ahead of this event
+        // (card #371). During a load replay (`land_columns`) the column's
+        // cards are generally not indexed yet, so there only the column goes
+        // and the links snapshot (fetched after this event) settles the rest.
         BoardSseEvent::ColumnDeleted { column_id } => {
-            columns.update(|cs| cs.retain(|s| s.get_untracked().id != column_id));
+            crate::columns::remove(owner, columns, &column_id);
         }
         BoardSseEvent::ColumnsReordered { columns: reordered }
             if reordered.first().is_some_and(|c| c.board_id == ulid) =>
