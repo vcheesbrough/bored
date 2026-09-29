@@ -47,10 +47,13 @@ services:
       - observability.service.name=otlp-collector-oidc
       - observability.deployment.environment=${APP_ENV:?APP_ENV is required}
       - traefik.enable=true
-      # OTLP's own paths on bored's hostname, unprefixed (bored's API lives
-      # under /api, so /v1/ is free). The rule is longer than the app's
-      # `Host(...)` rule, so Traefik gives it priority for these paths.
-      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.rule=Host(`${BORED_HOST:?BORED_HOST is required}`) && (PathPrefix(`/v1/`) || PathPrefix(`/opentelemetry.proto.collector`))
+      # OTLP/HTTP's own paths on bored's hostname, unprefixed (bored's API
+      # lives under /api, so /v1/ is free) — exactly the two the SPA posts
+      # to. Not /v1/metrics (client metrics are refused anyway) and not the
+      # gRPC service paths (no browser client speaks gRPC): nothing is public
+      # that nothing uses. The rule is longer than the app's `Host(...)` rule,
+      # so Traefik gives it priority for these paths.
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.rule=Host(`${BORED_HOST:?BORED_HOST is required}`) && (Path(`/v1/traces`) || Path(`/v1/logs`))
       - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.entrypoints=websecure
       - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.tls=true
       - traefik.http.routers.${BORED_CONTAINER_NAME}-ingest.tls.certresolver=myresolver

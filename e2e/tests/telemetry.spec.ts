@@ -249,6 +249,43 @@ test.describe('client telemetry', () => {
     expect(rotated).toBeDefined();
   });
 
+  test('a column added after the load is its own trace, not a child of the finished load', async ({
+    page,
+    request,
+  }) => {
+    const board = await boardWithCard(request, 'otel-after-load');
+    const since = Date.now();
+    await gotoBoardView(page, board.name);
+    await waitFor(
+      () =>
+        readReceiver().spans.find(
+          (s) => service(s.resource) === 'bored-spa' && s.name === 'screen board' && after(s.startTimeUnixNano, since),
+        ),
+      'the board load',
+    );
+    // A column arriving over SSE mounts a new column view, which fetches its
+    // cards — long after the load span ended.
+    const later = await apiCreateColumn(request, board.name, 'Later', 1);
+    await expect(page.locator('.column-header', { hasText: 'Later' })).toBeVisible();
+    const fetch = await waitFor(
+      () =>
+        readReceiver().spans.find(
+          (s) =>
+            service(s.resource) === 'bored-spa' &&
+            s.name === 'GET /api/columns/{id}/cards' &&
+            // The request's own URL is not exported; the server span under it
+            // names the column in `url.path`.
+            readReceiver().spans.some(
+              (child) =>
+                child.parentSpanId === s.spanId &&
+                String(attr(child.attributes, 'url.path') ?? '').includes(later.id),
+            ),
+        ),
+      "the new column's card fetch",
+    );
+    expect(fetch.parentSpanId ?? '').toBe('');
+  });
+
   test('a service.name outside the allowed set is dropped by the ingest', async ({ page }) => {
     // A real session token, as the SPA would get it.
     const tokenRes = await page.request.get('/api/telemetry/token');

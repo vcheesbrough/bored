@@ -262,7 +262,7 @@ weaken them.**
 The SPA exports its own traces and logs (`service.name=bored-spa`) over
 OTLP/HTTP JSON to the environment's ingest — the released
 `otlp-collector-oidc` image, one per environment, same-origin behind Traefik
-(`/v1/`). Contract: the skill's `references/client-export.md`. Wiring:
+(`/v1/traces`, `/v1/logs`). Contract: the skill's `references/client-export.md`. Wiring:
 README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
 `backend/src/routes/telemetry.rs`, `e2e/tests/telemetry.spec.ts`.
 

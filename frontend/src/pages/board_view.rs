@@ -888,6 +888,18 @@ pub fn BoardView() -> AnyView {
             if board_slug() == slug {
                 loading.set(false);
             }
+            // The load is over, so stop offering its context: a column
+            // created later, or an SSE reconnect, is its own trace rather than
+            // a child of a load that finished long ago. The columns this load
+            // rendered have already read it — they mounted while the links
+            // request above was in flight. Only this load's own value is
+            // cleared; a newer load may have replaced it.
+            // `try_update_value`: the view may be gone by now.
+            let _ = board_load_trace.0.try_update_value(|current| {
+                if *current == load {
+                    *current = None;
+                }
+            });
         });
     });
 

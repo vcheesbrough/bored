@@ -260,8 +260,9 @@ record and in the stdout JSON); `http.server.request.duration`, `bored.sse.*`, `
 
 The SPA sends its **own traces and logs** (`service.name=bored-spa`, OTLP/HTTP JSON) to the
 environment's **ingest**: the released [`otlp-collector-oidc`](https://github.com/vcheesbrough/otlp-collector-oidc)
-image, unmodified, one instance per environment, on bored's own hostname — Traefik routes `/v1/`
-(and `/opentelemetry.proto.collector`) to it and everything else to the app. The ingest
+image, unmodified, one instance per environment, on bored's own hostname — Traefik routes
+`/v1/traces` and `/v1/logs` (the only paths the SPA uses; no gRPC, no client metrics) to it and
+everything else to the app. The ingest
 authenticates the bearer, stamps `user.id`/`user.name`, `deployment.environment.name` and
 `telemetry_source=client`, drops any `service.name` other than `bored-spa`, and forwards to
 `monitor-alloy` like the server's own export. Frontend code: [`frontend/src/telemetry/`](frontend/src/telemetry/mod.rs).
