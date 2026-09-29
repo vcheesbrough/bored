@@ -133,13 +133,44 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     // trace (card #416). Absent outside a board view — the fetch is then a
     // trace of its own.
     let board_load = use_context::<crate::pages::board_view::BoardLoadTrace>();
+    // SSE events that reach this column while its card snapshot is in flight
+    // (card #452). The stream opens as soon as the board is known, in parallel
+    // with this fetch, so events can land first: applied then, a `CardUpdated`
+    // finds no card to update and is dropped, and a `CardCreated` is inserted
+    // only for the snapshot — read before the change — to replace the list
+    // without it. Either way the column shows stale data until a reload. The
+    // gate holds such events back and replays them on top of the snapshot.
+    let snapshot_gate = StoredValue::new(SnapshotGate::<BoardSseEvent>::new());
+    let col_id_replay = col_id.clone();
     Effect::new(move |_| {
         let id = col_id_fetch.clone();
+        let col_id_replay = col_id_replay.clone();
         let parent = board_load.and_then(|load| load.get());
+        // Opened synchronously, so an event handled after this effect but
+        // before the response is buffered rather than applied.
+        let fetch = snapshot_gate
+            .try_update_value(SnapshotGate::begin)
+            .unwrap_or_default();
         wasm_bindgen_futures::spawn_local(async move {
-            match crate::api::fetch_cards(&id, parent).await {
-                Ok(fetched) => cards.set(fetched.into_iter().map(RwSignal::new).collect()),
+            let result = crate::api::fetch_cards(&id, parent).await;
+            // `None`: a newer fetch has started (its own response will
+            // replay the buffer), or the column is gone.
+            let Some(buffered) = snapshot_gate
+                .try_update_value(|gate| gate.land(fetch))
+                .flatten()
+            else {
+                return;
+            };
+            match result {
+                Ok(fetched) => {
+                    let _ = cards.try_set(fetched.into_iter().map(RwSignal::new).collect());
+                }
+                // No snapshot, so the buffered events go onto whatever the
+                // column holds — what applying them live would have done.
                 Err(e) => crate::telemetry::error("failed to fetch cards", &e),
+            }
+            for event in buffered {
+                apply_card_event(cards, &col_id_replay, event, Inserts::Now);
             }
         });
     });
@@ -147,97 +178,14 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     // ── SSE card events ────────────────────────────────────────────────────
     Effect::new(move |_| {
         let Some(event) = sse_event.get() else { return };
-        match event {
-            BoardSseEvent::CardCreated { card } if card.column_id == col_id_sse => {
-                // Guard against double-insert: `on_card_created` (below) may have
-                // already inserted this card as an optimistic update.
-                // Also insert at the correct sorted position — the backend now
-                // assigns top-of-column positions, so `card.position` is small.
-                wasm_bindgen_futures::spawn_local(async move {
-                    cards.update(|cs| {
-                        if cs.iter().any(|s| s.get_untracked().id == card.id) {
-                            return;
-                        }
-                        let insert_at = cs
-                            .iter()
-                            .position(|s| s.get_untracked().position > card.position)
-                            .unwrap_or(cs.len());
-                        cs.insert(insert_at, RwSignal::new(card));
-                    });
-                });
-            }
-            BoardSseEvent::CardUpdated { card } if card.column_id == col_id_sse => {
-                // Update the matching signal in-place so only that card re-renders.
-                cards.with_untracked(|cs| {
-                    if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == card.id) {
-                        sig.set(card);
-                    }
-                });
-            }
-            BoardSseEvent::CardDeleted { card_id } => {
-                let owned =
-                    cards.with_untracked(|cs| cs.iter().any(|s| s.get_untracked().id == card_id));
-                if owned {
-                    cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
-                }
-            }
-            BoardSseEvent::CardMoved {
-                ref card,
-                ref from_column_id,
-            } => {
-                if *from_column_id == col_id_sse && card.column_id == col_id_sse {
-                    // Within-column reorder: remove the existing signal from its old
-                    // slot, update its data, and re-insert at the correct sorted
-                    // position.  Reusing the same RwSignal keeps the `For` component
-                    // from remounting the card component.
-                    // NOTE: `card.position` is a sparse integer (e.g. 512, 1024),
-                    // NOT an array index — find insertion point by comparing positions.
-                    let card = card.clone();
-                    cards.update(|cs| {
-                        if let Some(idx) = cs.iter().position(|s| s.get_untracked().id == card.id) {
-                            let sig = cs.remove(idx);
-                            sig.set(card.clone());
-                            let insert_at = cs
-                                .iter()
-                                .position(|s| s.get_untracked().position > card.position)
-                                .unwrap_or(cs.len());
-                            cs.insert(insert_at, sig);
-                        }
-                    });
-                } else if *from_column_id == col_id_sse {
-                    // Cross-column move — this column is the source: remove.
-                    let id = card.id.clone();
-                    cards.update(|cs| cs.retain(|s| s.get_untracked().id != id));
-                } else if card.column_id == col_id_sse {
-                    // Cross-column move — this column is the destination: insert at
-                    // the correct sorted position.
-                    let card = card.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        cards.update(|cs| {
-                            if cs.iter().any(|s| s.get_untracked().id == card.id) {
-                                return;
-                            }
-                            let insert_at = cs
-                                .iter()
-                                .position(|s| s.get_untracked().position > card.position)
-                                .unwrap_or(cs.len());
-                            cs.insert(insert_at, RwSignal::new(card));
-                        });
-                    });
-                }
-            }
-            BoardSseEvent::CardsRenumbered {
-                column_id,
-                positions,
-            } if column_id == col_id_sse => {
-                // Adopt the server's new positions (card #393). Every later
-                // `CardMoved` above is slotted by comparing positions, so a
-                // renumbering left unapplied puts the next moved card in the
-                // wrong place until a reload.
-                apply_renumbering(cards, &positions);
-            }
-            _ => {}
-        }
+        // Held back while the snapshot is in flight; see `snapshot_gate`.
+        let Some(event) = snapshot_gate
+            .try_update_value(|gate| gate.offer(event))
+            .flatten()
+        else {
+            return;
+        };
+        apply_card_event(cards, &col_id_sse, event, Inserts::Deferred);
     });
 
     // ── Card callbacks ─────────────────────────────────────────────────────
@@ -864,6 +812,168 @@ fn renumbered_order(
 /// The existing signals are reused, for the same reason as in
 /// [`apply_server_order`]: a keyed `<For>` would remount fresh ones, losing
 /// focus and collapsing anything expanded.
+/// How [`apply_card_event`] inserts a card.
+#[derive(Clone, Copy)]
+enum Inserts {
+    /// On a later task. The live path runs inside the SSE effect, and has
+    /// always deferred inserts out of it.
+    Deferred,
+    /// At once. The replay runs in the fetch's own task, outside any effect,
+    /// and must keep the buffered order: a deferred `CardCreated` would land
+    /// after the `CardUpdated` replayed behind it, which would then find no
+    /// card and be dropped.
+    Now,
+}
+
+/// Apply one SSE event to the column `col_id`'s card list. Events for other
+/// columns fall through the guards and change nothing. Idempotent on replay:
+/// inserts skip a card already present, updates and removals are by id.
+fn apply_card_event(
+    cards: RwSignal<Vec<RwSignal<shared::Card>>>,
+    col_id: &str,
+    event: BoardSseEvent,
+    inserts: Inserts,
+) {
+    match event {
+        BoardSseEvent::CardCreated { card } if card.column_id == col_id => {
+            // Guard against double-insert: `on_card_created` may have already
+            // inserted this card as an optimistic update, and a replayed event
+            // may describe a card the snapshot already holds.
+            insert_sorted(cards, card, inserts);
+        }
+        BoardSseEvent::CardUpdated { card } if card.column_id == col_id => {
+            // Update the matching signal in-place so only that card re-renders.
+            cards.with_untracked(|cs| {
+                if let Some(sig) = cs.iter().find(|s| s.get_untracked().id == card.id) {
+                    sig.set(card);
+                }
+            });
+        }
+        BoardSseEvent::CardDeleted { card_id } => {
+            let owned =
+                cards.with_untracked(|cs| cs.iter().any(|s| s.get_untracked().id == card_id));
+            if owned {
+                cards.update(|cs| cs.retain(|s| s.get_untracked().id != card_id));
+            }
+        }
+        BoardSseEvent::CardMoved {
+            card,
+            from_column_id,
+        } => {
+            if from_column_id == col_id && card.column_id == col_id {
+                // Within-column reorder: remove the existing signal from its old
+                // slot, update its data, and re-insert at the correct sorted
+                // position.  Reusing the same RwSignal keeps the `For` component
+                // from remounting the card component.
+                // NOTE: `card.position` is a sparse integer (e.g. 512, 1024),
+                // NOT an array index — find insertion point by comparing positions.
+                cards.update(|cs| {
+                    if let Some(idx) = cs.iter().position(|s| s.get_untracked().id == card.id) {
+                        let sig = cs.remove(idx);
+                        sig.set(card.clone());
+                        let insert_at = cs
+                            .iter()
+                            .position(|s| s.get_untracked().position > card.position)
+                            .unwrap_or(cs.len());
+                        cs.insert(insert_at, sig);
+                    }
+                });
+            } else if from_column_id == col_id {
+                // Cross-column move — this column is the source: remove.
+                cards.update(|cs| cs.retain(|s| s.get_untracked().id != card.id));
+            } else if card.column_id == col_id {
+                // Cross-column move — this column is the destination.
+                insert_sorted(cards, card, inserts);
+            }
+        }
+        BoardSseEvent::CardsRenumbered {
+            column_id,
+            positions,
+        } if column_id == col_id => {
+            // Adopt the server's new positions (card #393). Every later
+            // `CardMoved` above is slotted by comparing positions, so a
+            // renumbering left unapplied puts the next moved card in the
+            // wrong place until a reload.
+            apply_renumbering(cards, &positions);
+        }
+        _ => {}
+    }
+}
+
+/// Insert `card` at its sorted position unless the column already holds it
+/// (the backend assigns sparse positions, so compare them, not indices).
+fn insert_sorted(cards: RwSignal<Vec<RwSignal<shared::Card>>>, card: shared::Card, when: Inserts) {
+    let insert = move || {
+        cards.update(|cs| {
+            if cs.iter().any(|s| s.get_untracked().id == card.id) {
+                return;
+            }
+            let insert_at = cs
+                .iter()
+                .position(|s| s.get_untracked().position > card.position)
+                .unwrap_or(cs.len());
+            cs.insert(insert_at, RwSignal::new(card));
+        });
+    };
+    match when {
+        Inserts::Deferred => wasm_bindgen_futures::spawn_local(async move { insert() }),
+        Inserts::Now => insert(),
+    }
+}
+
+/// Buffers events that arrive while a column's card snapshot is in flight,
+/// so they can be replayed on top of it rather than lost to it (card #452).
+///
+/// Generic over the event so its rules can be tested without Leptos or
+/// real events. A fresh gate is closed: nothing has loaded yet, so an event
+/// seen before the first fetch starts is held for it too.
+#[derive(Debug)]
+struct SnapshotGate<E> {
+    /// The latest fetch started; only its response may open the gate.
+    fetch: u64,
+    /// `Some` while a snapshot is awaited — the events held for it, in order.
+    pending: Option<Vec<E>>,
+}
+
+impl<E> SnapshotGate<E> {
+    fn new() -> Self {
+        Self {
+            fetch: 0,
+            pending: Some(Vec::new()),
+        }
+    }
+
+    /// A fetch is starting: close the gate (keeping anything already held,
+    /// which the new snapshot may predate) and return its ticket.
+    fn begin(&mut self) -> u64 {
+        self.fetch += 1;
+        self.pending.get_or_insert_with(Vec::new);
+        self.fetch
+    }
+
+    /// An event arrived. `Some` gives it back to apply now; `None` means it
+    /// was held for the snapshot.
+    fn offer(&mut self, event: E) -> Option<E> {
+        match &mut self.pending {
+            Some(held) => {
+                held.push(event);
+                None
+            }
+            None => Some(event),
+        }
+    }
+
+    /// Fetch `fetch` has answered. For the latest fetch, open the gate and
+    /// return the held events to replay; for a superseded one, `None` — its
+    /// snapshot is older than the one still coming, and must not be applied.
+    fn land(&mut self, fetch: u64) -> Option<Vec<E>> {
+        if fetch != self.fetch {
+            return None;
+        }
+        Some(self.pending.take().unwrap_or_default())
+    }
+}
+
 fn apply_renumbering(
     cards: RwSignal<Vec<RwSignal<shared::Card>>>,
     renumbered: &[shared::CardPosition],
@@ -963,10 +1073,62 @@ fn apply_server_order(
 
 #[cfg(test)]
 mod tests {
-    use super::{SortNotice, plan_sort, server_order};
+    use super::{SnapshotGate, SortNotice, plan_sort, server_order};
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    // ── SnapshotGate (card #452) ───────────────────────────────────────────
+
+    #[test]
+    fn events_during_the_fetch_are_held_and_handed_back_in_order() {
+        let mut gate = SnapshotGate::new();
+        let fetch = gate.begin();
+        assert_eq!(gate.offer("created"), None);
+        assert_eq!(gate.offer("updated"), None);
+        assert_eq!(gate.land(fetch), Some(vec!["created", "updated"]));
+    }
+
+    #[test]
+    fn once_landed_events_pass_straight_through() {
+        let mut gate = SnapshotGate::new();
+        let fetch = gate.begin();
+        assert_eq!(gate.land(fetch), Some(Vec::<&str>::new()));
+        assert_eq!(gate.offer("live"), Some("live"));
+    }
+
+    #[test]
+    fn an_event_before_the_first_fetch_starts_is_held_for_it() {
+        // The SSE effect can run before the fetch effect; a fresh gate is
+        // closed so that event is not applied to an empty, unloaded list.
+        let mut gate = SnapshotGate::new();
+        assert_eq!(gate.offer("early"), None);
+        let fetch = gate.begin();
+        assert_eq!(gate.land(fetch), Some(vec!["early"]));
+    }
+
+    #[test]
+    fn a_superseded_fetch_neither_opens_the_gate_nor_takes_the_events() {
+        let mut gate = SnapshotGate::new();
+        let first = gate.begin();
+        assert_eq!(gate.offer("a"), None);
+        let second = gate.begin();
+        assert_eq!(gate.offer("b"), None);
+        // The first response is older than the one still coming.
+        assert_eq!(gate.land(first), None);
+        assert_eq!(gate.offer("c"), None, "still closed for the second fetch");
+        assert_eq!(gate.land(second), Some(vec!["a", "b", "c"]));
+    }
+
+    #[test]
+    fn a_refetch_closes_an_open_gate_again() {
+        let mut gate = SnapshotGate::new();
+        let first = gate.begin();
+        assert_eq!(gate.land(first), Some(Vec::<&str>::new()));
+        let second = gate.begin();
+        assert_eq!(gate.offer("during refetch"), None);
+        assert_eq!(gate.land(second), Some(vec!["during refetch"]));
     }
 
     #[test]
