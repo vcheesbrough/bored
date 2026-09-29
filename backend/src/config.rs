@@ -538,7 +538,7 @@ impl ValidatedConfig for ServerConfig {
 /// In sovereign-config it lives beside the other groups
 /// (`/bored/{env}/server/client-telemetry/endpoint`); `BORED__CLIENT_TELEMETRY__ENDPOINT`
 /// overrides it (e2e). The value is the ingest's base URL — bored's own
-/// origin in production, where Traefik routes OTLP's `/v1/` paths to the
+/// origin in production, where Traefik routes `/v1/traces` and `/v1/logs` to the
 /// environment's `otlp-collector-oidc`. It is handed to the browser as-is, so
 /// it is never a secret.
 #[derive(Debug, Clone, Default, Deserialize)]

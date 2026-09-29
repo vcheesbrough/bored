@@ -603,15 +603,6 @@ fn start_fetch(
 
 // ── The unload flush ─────────────────────────────────────────────────────
 
-/// Send what is buffered now, without waiting for an answer, on requests the
-/// browser keeps alive past page unload.
-///
-/// `fetch(…, { keepalive: true })` rather than `navigator.sendBeacon`: a beacon
-/// cannot carry an `Authorization` header, and the ingest reads nothing else,
-/// so every beacon would be `401 no token` (card #416, decision D3).
-///
-/// Only with a token already in hand: there is no time to fetch one while the
-/// page is going away, and never before the session has proved itself.
 /// Why the outbox is being flushed on a keepalive request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flush {
@@ -625,12 +616,22 @@ pub enum Flush {
     Hidden,
 }
 
+/// The final flush — `pagehide`, and the panic hook. See [`flush`].
 pub fn flush_now() {
     flush(Flush::Final);
 }
 
-/// Send what is buffered now on keepalive requests, without awaiting them.
-/// See [`Flush`] for the two occasions.
+/// Send what is buffered now, without waiting for an answer, on requests the
+/// browser keeps alive past page unload.
+///
+/// `fetch(…, { keepalive: true })` rather than `navigator.sendBeacon`: a beacon
+/// cannot carry an `Authorization` header, and the ingest reads nothing else,
+/// so every beacon would be `401 no token` (card #416, decision D3).
+///
+/// Only with a token already in hand: there is no time to fetch one while the
+/// page is going away, and never before the session has proved itself.
+///
+/// See [`Flush`] for the two occasions and how they differ.
 pub fn flush(kind: Flush) {
     let now = platform::now_ms();
     let requests = with_state(|state| {
