@@ -93,8 +93,13 @@ pub fn insert_absent(
 /// reactive write landing on a component mid-unmount is exactly the shape of
 /// the disposal panics iteration 54 chased.
 ///
-/// Pruning by card id can never discard a link the server still holds — a
-/// link cannot outlive either of its cards — and it is idempotent, so in a
+/// Pruning by card id discards only links the server has also dropped — a
+/// link cannot outlive either of its cards — *as long as this tab's view of
+/// which cards are in the column is current*. A lagged tab that also missed a
+/// `CardMoved` can mis-attribute a card: one moved out of the column keeps its
+/// links on the server but loses them here, and one moved in keeps stale
+/// links here. Either way that card is already wrong on this tab's screen,
+/// and a reload heals both. The prune is idempotent, so in a
 /// healthy stream, where the `CardLinkDeleted` events have already emptied
 /// the index of these links, it finds nothing and writes nothing. Likewise a
 /// second call for the same column (the local delete *and* its broadcast)
@@ -373,6 +378,74 @@ mod tests {
         remove(&owner, columns, "doomed");
         assert_eq!(column_ids(columns), ["kept"]);
         assert_eq!(link_ids(links), ["z-w"]);
+    }
+
+    /// A reader of `links` that counts how often it has had to recompute.
+    ///
+    /// A `Memo` is lazy: a write to a signal it read only marks it stale, and
+    /// the next `get` re-runs its closure. So "the closure ran again" is
+    /// exactly "`links` notified its subscribers since the last read" — the
+    /// thing every `LinkBadges` and `LinkChip` on the board would react to —
+    /// observed synchronously, with no effect scheduler needed on the host.
+    /// The counter is an `Arc<AtomicUsize>` because a `Memo` closure must be
+    /// `Send + Sync`.
+    fn notification_counter(
+        owner: &Owner,
+        links: BoardLinkIndex,
+    ) -> (Memo<usize>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let memo = owner.with(|| {
+            Memo::new(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                links.links.with(|l| l.len())
+            })
+        });
+        // The first read subscribes the memo and runs it once.
+        memo.get_untracked();
+        (memo, runs)
+    }
+
+    #[test]
+    fn a_prune_that_finds_nothing_notifies_no_link_reader() {
+        // The healthy-stream case: `CardLinkDeleted` has already emptied the
+        // index of the column's links, so the prune must not write at all — a
+        // no-op write would still wake every link reader on the board, just as
+        // the column is unmounting.
+        use std::sync::atomic::Ordering;
+        let owner = Owner::new();
+        let (columns, _, links) = board(&owner, vec![link("z-w", "z", "w")]);
+        let (memo, runs) = notification_counter(&owner, links);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        remove(&owner, columns, "doomed");
+        memo.get_untracked();
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "no link was removed, so no reader may be woken"
+        );
+    }
+
+    #[test]
+    fn a_prune_that_removes_links_notifies_once() {
+        // And the positive side, which shows the counter can see a write at
+        // all: two doomed links go in a single notification, not one per card.
+        use std::sync::atomic::Ordering;
+        let owner = Owner::new();
+        let (columns, _, links) = board(
+            &owner,
+            vec![
+                link("z-x", "z", "x"),
+                link("y-w", "y", "w"),
+                link("z-w", "z", "w"),
+            ],
+        );
+        let (memo, runs) = notification_counter(&owner, links);
+        remove(&owner, columns, "doomed");
+        assert_eq!(memo.get_untracked(), 1, "the memo saw the pruned list");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]

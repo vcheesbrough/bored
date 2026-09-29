@@ -809,18 +809,24 @@ test.describe('card links', () => {
       expect(panics).toEqual([]);
     });
 
-    test('deleting the board being viewed leaves nothing of it behind', async ({
+    test('deleting the board being viewed navigates away without a panic', async ({
       page,
       request,
     }) => {
-      // The board half of the card, confirmed rather than fixed: links never
-      // cross boards (the server refuses them), and leaving a board — which a
-      // delete of the board on screen always does — reloads the next board's
-      // links from scratch. So there is no stale index to heal; this guards
-      // that it stays so, with the stream silenced as above.
+      // The board half of the card needed no fix, and this test does **not**
+      // prove that — no e2e can: every card at either end of the deleted
+      // board's links goes with it, and the server refuses cross-board links,
+      // so no card on any other board could ever show one of them, stale
+      // index or not. The "no bug" verdict rests on the code: links are
+      // board-scoped, and deleting the board on screen always navigates, which
+      // re-runs `BoardView`'s load effect and empties `board_links` first.
+      //
+      // What this does check is the unmount the delete causes, with linked
+      // cards on screen and the stream silenced as above: no disposal panic,
+      // and a tab that still reacts afterwards.
       const b = await linkedBoard(request, 'links-board-del');
       // Somewhere to land that is not the deleted board.
-      await apiCreateBoard(request, `links-board-del-landing-${Date.now()}`);
+      const landing = await apiCreateBoard(request, `links-board-del-landing-${Date.now()}`);
       const panics = watchForPanics(page);
       await page.route('**/api/events*', route => {
         const url = new URL(route.request().url());
@@ -840,13 +846,15 @@ test.describe('card links', () => {
 
       await expect(page).not.toHaveURL(`/boards/${b.board.name}`);
       await page.waitForSelector('.columns-row');
-      // Whatever board we landed on, no pill or chip names a card of the
-      // deleted one. Card numbers are global, so they cannot collide.
-      // A trailing `(?!\d)` so `#12` does not match a surviving `#123`.
-      const numbers = [b.a, b.b, b.p, b.q, b.r].map(c => new RegExp(`#${c.number}(?!\\d)`));
-      for (const text of await page.locator('.link-badge, .link-chip').allTextContents()) {
-        for (const n of numbers) expect(text).not.toMatch(n);
-      }
+      // Liveness: the chooser opens again and lists the boards as they now
+      // are — two repaints a wedged executor could not make.
+      await openChooser(page);
+      await expect(
+        page.locator('.chooser-board-row').filter({ hasText: landing.name })
+      ).toHaveCount(1);
+      await expect(
+        page.locator('.chooser-board-row').filter({ hasText: b.board.name })
+      ).toHaveCount(0);
       expect(panics).toEqual([]);
     });
   });
