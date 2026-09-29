@@ -36,7 +36,7 @@ use axum::http::Method;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge, UpDownCounter};
 use opentelemetry_semantic_conventions::attribute::{
-    ERROR_TYPE, HTTP_REQUEST_METHOD, HTTP_RESPONSE_STATUS_CODE, HTTP_ROUTE,
+    ERROR_TYPE, HTTP_REQUEST_METHOD, HTTP_RESPONSE_STATUS_CODE, HTTP_ROUTE, URL_SCHEME,
 };
 use opentelemetry_semantic_conventions::metric::HTTP_SERVER_REQUEST_DURATION;
 
@@ -159,6 +159,7 @@ impl Instruments {
         &self,
         method: HttpMethod,
         route: Option<&str>,
+        scheme: Option<&'static str>,
         status: u16,
         error: Option<RequestError>,
         seconds: f64,
@@ -168,6 +169,10 @@ impl Instruments {
         attributes.push(KeyValue::new(HTTP_REQUEST_METHOD, method.label()));
         if let Some(route) = route {
             attributes.push(KeyValue::new(HTTP_ROUTE, route.to_string()));
+        }
+        // `http` or `https`, from the listener (a fixed pair of values).
+        if let Some(scheme) = scheme {
+            attributes.push(KeyValue::new(URL_SCHEME, scheme));
         }
         // semconv types the status code as an int.
         attributes.push(KeyValue::new(HTTP_RESPONSE_STATUS_CODE, i64::from(status)));
@@ -224,12 +229,13 @@ pub(crate) fn ensure_installed() {
 pub(crate) fn http_request(
     method: HttpMethod,
     route: Option<&str>,
+    scheme: Option<&'static str>,
     status: u16,
     error: Option<RequestError>,
     seconds: f64,
 ) {
     if let Some(instruments) = instruments() {
-        instruments.record_http_request(method, route, status, error, seconds);
+        instruments.record_http_request(method, route, scheme, status, error, seconds);
     }
 }
 

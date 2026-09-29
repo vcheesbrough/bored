@@ -132,6 +132,9 @@ pub(crate) async fn serve_tls(
         draining.start();
         stopper.graceful_shutdown(Some(DRAIN_TIMEOUT));
     });
+    // Tag every request with the scheme it arrived over, for `url.scheme`
+    // (server_span.rs). Added last, so it runs before the telemetry layers.
+    let app = app.layer(axum::Extension(crate::server_span::Scheme::Https));
     if let Err(error) = axum_server::from_tcp_rustls(listener, tls_config)
         .handle(handle)
         .serve(app.into_make_service())
@@ -151,6 +154,8 @@ pub(crate) async fn serve_plain(
 ) {
     // axum's graceful shutdown waits on this future: once `draining` is
     // raised it stops accepting and waits for open connections to finish.
+    // Tag every request with the scheme it arrived over (see `serve_tls`).
+    let app = app.layer(axum::Extension(crate::server_span::Scheme::Http));
     let server = axum::serve(listener, app).with_graceful_shutdown(draining.started());
     // Run the server as its own task so this function can stop waiting for it
     // after the drain timeout, rather than for as long as the slowest client.

@@ -28,6 +28,30 @@ use crate::error::ErrorType;
 use crate::observability::metrics::{HttpMethod, RequestError};
 use crate::observability::{self, metrics};
 
+/// The scheme a request arrived over, as semconv's `url.scheme`. Set by the
+/// listener that accepted it (`listen::serve_tls` / `serve_plain`), which is
+/// the only place that knows. An enum, so the metric label it also becomes is
+/// bounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+        }
+    }
+}
+
+/// The scheme tag the listener put on the request, if any.
+fn request_scheme(extensions: &axum::http::Extensions) -> Option<Scheme> {
+    extensions.get::<Scheme>().copied()
+}
+
 /// `TraceLayer`'s span factory: one `server` span per request.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ServerSpan;
@@ -71,11 +95,11 @@ impl<B> MakeSpan<B> for ServerSpan {
             http.request.method = method.label(),
             http.route = route,
             url.path = %request.uri().path(),
-            // Only when the request says so. A server sees an origin-form URI
-            // (`/api/…`) with no scheme, and this span factory cannot tell the
-            // TLS listener from the plain-HTTP one, so it records nothing
-            // rather than a guess.
-            url.scheme = request.uri().scheme_str(),
+            // The listener's own scheme (`listen.rs` tags each request with
+            // it): a server sees an origin-form URI (`/api/…`) with no scheme
+            // of its own. Absent only when no listener tagged the request (the
+            // in-process router tests).
+            url.scheme = request_scheme(request.extensions()).map(Scheme::label),
             http.response.status_code = Empty,
             error.type = Empty,
         );
@@ -113,6 +137,7 @@ pub(crate) async fn record_response(request: Request, next: Next) -> Response {
         .extensions()
         .get::<MatchedPath>()
         .map(|path| path.as_str().to_owned());
+    let scheme = request_scheme(request.extensions()).map(Scheme::label);
 
     let response = next.run(request).await;
 
@@ -139,6 +164,7 @@ pub(crate) async fn record_response(request: Request, next: Next) -> Response {
     metrics::http_request(
         method,
         route.as_deref(),
+        scheme,
         status,
         error,
         started.elapsed().as_secs_f64(),

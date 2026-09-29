@@ -74,7 +74,7 @@ time = "0.3"
 # `opentelemetry-http` belongs to the transport layer (`app.rs`, the outbound
 # client).
 opentelemetry = "0.33"
-opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
+opentelemetry_sdk = "0.33"
 # http/protobuf — the spec's default transport, and the one the collector's
 # `:4318` listener speaks. No tonic/gRPC stack, and no HTTP client feature: the
 # exporter's own client would bring reqwest 0.13 beside the workspace's 0.12,

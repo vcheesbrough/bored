@@ -106,6 +106,11 @@ test.describe('Card context menu', () => {
     // card number and any badges, so match on the name rather than compare it.
     const order = async () =>
       (await cards.allInnerTexts()).map(t => names.find(n => t.includes(n)) ?? t);
+    // Wait for the board to render its cards before reading their order.
+    // `allInnerTexts` does not wait: read too early it returns [], `bottom`
+    // is then `undefined`, and `hasText: undefined` matches every card — the
+    // strict-mode failure this test hit intermittently in CI.
+    await expect(cards).toHaveCount(3);
 
     // 14 moves is comfortably past the ~10 that force a rebalance (pinned by
     // the backend's `bisecting_the_same_slot_survives_about_ten_inserts`), and

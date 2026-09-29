@@ -1519,6 +1519,68 @@ async fn start_tls(
     (format!("https://localhost:{port}"), client, stop_tx, server)
 }
 
+/// `url.scheme` on the server span and the duration metric is the scheme of
+/// the listener the request arrived on — `https` on the TLS listener both
+/// deployments run, `http` on the plain one.
+#[tokio::test]
+async fn url_scheme_comes_from_the_listener() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let scheme_of = |spans: &[opentelemetry_sdk::trace::SpanData], route: &str| {
+        spans
+            .iter()
+            .find(|span| span.span_kind == SpanKind::Server && span.name == format!("GET {route}"))
+            .and_then(|span| {
+                span.attributes
+                    .iter()
+                    .find(|kv| kv.key.as_str() == semconv::attribute::URL_SCHEME)
+                    .map(|kv| kv.value.to_string())
+            })
+    };
+
+    // TLS listener.
+    let tls_router = crate::app::with_request_telemetry(
+        axum::Router::new().route("/over-tls", axum::routing::get(|| async { "ok" })),
+    );
+    let (base, client, stop_tx, server) =
+        start_tls(tls_router, crate::listen::Draining::new()).await;
+    client.get(format!("{base}/over-tls")).send().await.unwrap();
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+
+    // Plain listener.
+    let plain_router = crate::app::with_request_telemetry(
+        axum::Router::new().route("/over-plain", axum::routing::get(|| async { "ok" })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (plain_stop, plain_rx) = tokio::sync::oneshot::channel::<()>();
+    let plain = tokio::spawn(crate::listen::serve_plain(
+        listener,
+        plain_router,
+        crate::listen::Draining::new(),
+        async move {
+            let _ = plain_rx.await;
+        },
+    ));
+    reqwest::get(format!("http://{address}/over-plain"))
+        .await
+        .unwrap();
+    plain_stop.send(()).unwrap();
+    plain.await.unwrap();
+
+    let spans = pipeline.finished_spans();
+    assert_eq!(scheme_of(&spans, "/over-tls").as_deref(), Some("https"));
+    assert_eq!(scheme_of(&spans, "/over-plain").as_deref(), Some("http"));
+    let series = all_series(&collect_metrics());
+    assert!(series.iter().any(|(name, attributes)| {
+        name == semconv::metric::HTTP_SERVER_REQUEST_DURATION
+            && attributes.iter().any(|kv| {
+                kv.key.as_str() == semconv::attribute::URL_SCHEME && kv.value.to_string() == "https"
+            })
+    }));
+}
+
 /// The TLS listener (what both deployments run) ends open SSE streams on
 /// shutdown and returns promptly, with the stream closed first.
 #[tokio::test]
