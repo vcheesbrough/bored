@@ -781,8 +781,10 @@ test.describe('card links', () => {
     test('a healthy stream deletes a linked column cleanly', async ({ page, request }) => {
       // The regression guard for the two above: with SSE working, the link
       // events, the column event and the chooser's own delete all prune the
-      // same links. Every pass after the first must find nothing to do — and
-      // must not panic on the column unmounting between them.
+      // same links, and the column unmounting between those passes must not
+      // panic. (That the later passes write nothing is pinned by the host test
+      // `a_prune_that_finds_nothing_notifies_no_link_reader`, not here: this
+      // end state is the same either way.)
       const b = await linkedBoard(request, 'links-col-del-sse-ok');
       const panics = watchForPanics(page);
       const eventsReady = page.waitForResponse(
