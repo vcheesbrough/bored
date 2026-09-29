@@ -312,7 +312,7 @@ pub async fn create_board(name: String) -> Result<shared::Board, ApiError> {
 pub async fn delete_board(board_id: &str) -> Result<(), ApiError> {
     offline_guard()?;
     send(
-        "DELETE /api/boards/{id}",
+        "DELETE /api/boards/{slug}",
         None,
         Request::delete(&format!("/api/boards/{board_id}")).build(),
         |r, _| expect_ok("delete_board", r),
