@@ -1695,6 +1695,26 @@ async fn the_real_exporters_deliver_spans_and_logs_to_a_collector() {
     }
 }
 
+/// At `log-level = warn` the product's INFO spans are below the stdout
+/// layer's own filter, yet a WARN line inside one must still carry its ids —
+/// the same ones the OTLP record carries.
+#[test]
+fn a_warning_inside_an_info_span_keeps_its_ids_at_warn_level() {
+    let stdout = CapturedWriter::default();
+    let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "warn");
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info_span!("request").in_scope(|| tracing::warn!("something odd"));
+    });
+    let spans = pipeline.finished_spans();
+    let span = spans
+        .iter()
+        .find(|span| span.name == "request")
+        .expect("span");
+    let line = stdout.line("something odd").expect("stdout line");
+    assert_eq!(line["trace_id"], span.span_context.trace_id().to_string());
+    assert_eq!(line["span_id"], span.span_context.span_id().to_string());
+}
+
 /// Stdout names the same span the OTLP record does when the innermost span is
 /// a dependency's (surrealdb opens `debug` spans the span layer filters out).
 #[test]
