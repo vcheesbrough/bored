@@ -248,3 +248,76 @@ test.describe('returning to a board', () => {
     await expect(shown).not.toContainText('Version two');
   });
 });
+
+// Card #449. Behind a Traefik edge (HTTP/2 to the browser) the board missed
+// events that arrived right after it loaded. Two suspects: events racing the
+// snapshots they apply to (fixed by card #452's gates), and several events
+// reaching the page in one chunk and overwriting each other in the board's
+// single `sse_event` signal before the effects ran. This drives both at once
+// — a burst of mutations fired the moment the stream answers, while the
+// column and card snapshots may still be in flight — and requires every one
+// of them to land.
+test.describe('a burst of events right after load', () => {
+  test('every event of a burst fired as the stream opens is applied', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `sse-burst-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Burst');
+    const EXISTING = 5;
+    const existing = [];
+    for (let i = 0; i < EXISTING; i++) {
+      existing.push(await apiCreateCard(request, col.id, `# Existing ${i}`));
+    }
+
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    const eventsReady = page.waitForResponse(
+      response =>
+        response.request().method() === 'GET' &&
+        response.url().includes(`/api/events?board_id=${board.id}`) &&
+        response.ok()
+    );
+    // Not `gotoBoardView`: the burst must not wait for the columns to render.
+    await page.goto(`/boards/${board.name}`);
+    await eventsReady;
+
+    // Card, column and audit events interleaved, back to back, so the edge
+    // is free to put several in one frame. The edits and the rename go
+    // concurrently; the creates are sequential (creates allocate the board's
+    // next card number, and concurrent ones conflict in the database — card
+    // #456), but run alongside the edits without waiting on the
+    // page.
+    const CREATED = 5;
+    await Promise.all([
+      ...existing.map((card, i) => apiUpdateCard(request, card.id, { body: `# Edited ${i}` })),
+      request
+        .put(`/api/columns/${col.id}`, { data: { name: 'Burst renamed' } })
+        .then(res => expect(res.ok()).toBe(true)),
+      (async () => {
+        for (let i = 0; i < CREATED; i++) await apiCreateCard(request, col.id, `# Created ${i}`);
+      })(),
+    ]);
+
+    const TOTAL = EXISTING + CREATED;
+    const cards = page.locator('.card-item');
+    await expect(cards).toHaveCount(TOTAL, { timeout: 5000 });
+    for (let i = 0; i < EXISTING; i++) {
+      await expect(cards.filter({ hasText: `Edited ${i}` })).toHaveCount(1);
+    }
+    for (let i = 0; i < CREATED; i++) {
+      await expect(cards.filter({ hasText: `Created ${i}` })).toHaveCount(1);
+    }
+    await expect(page.locator('.column-name')).toHaveText('Burst renamed');
+    await expect(page.locator('.card-count-badge').first()).toHaveText(String(TOTAL));
+
+    // Still alive: the search repaints the list both ways.
+    const search = page.locator('.navbar-search-input');
+    await search.fill('Created 3');
+    await expect(cards).toHaveCount(1);
+    await search.fill('');
+    await expect(cards).toHaveCount(TOTAL);
+    expect(panics).toEqual([]);
+  });
+});

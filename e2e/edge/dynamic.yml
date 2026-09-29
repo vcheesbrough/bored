@@ -1,0 +1,17 @@
+# The e2e rig's edge (card #449): what production's Traefik does on bored's
+# hostname — terminate TLS (HTTP/2 to the browser) and forward everything to
+# the app over HTTPS, as the `loadbalancer.server.scheme=https` label in
+# deploy/docker-compose.yml does. The telemetry ingest is reached directly
+# (cross-origin) in this rig, so it has no route here.
+http:
+  routers:
+    app:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [websecure]
+      tls: {}
+      service: app
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: https://bored:443
