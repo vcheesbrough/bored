@@ -250,11 +250,13 @@ test.describe('returning to a board', () => {
 });
 
 // Card #449. Behind a Traefik edge (HTTP/2 to the browser) the board missed
-// events that arrived right after it loaded. Two suspects: events racing the
-// snapshots they apply to (fixed by card #452's gates), and several events
-// reaching the page in one chunk and overwriting each other in the board's
-// single `sse_event` signal before the effects ran. This drives both at once
-// — a burst of mutations fired the moment the stream answers, while the
+// events that arrived right after it loaded. Cause: events racing the
+// snapshots they apply to, fixed by card #452's gates (this spec fails every
+// run on the pre-#452 image). The other suspect — several events in one chunk
+// overwriting each other in the board's single `sse_event` signal — was ruled
+// out: Chromium runs a microtask checkpoint after every message event of a
+// coalesced chunk, so the effects run per event. This spec still drives that
+// shape — a burst of mutations fired the moment the stream answers, while the
 // column and card snapshots may still be in flight — and requires every one
 // of them to land.
 test.describe('a burst of events right after load', () => {
@@ -285,10 +287,11 @@ test.describe('a burst of events right after load', () => {
 
     // Card, column and audit events interleaved, back to back, so the edge
     // is free to put several in one frame. The edits and the rename go
-    // concurrently; the creates are sequential (creates allocate the board's
-    // next card number, and concurrent ones conflict in the database — card
-    // #456), but run alongside the edits without waiting on the
-    // page.
+    // concurrently; the creates are sequential (every create bumps the global
+    // `card_counter` and computes a top-of-column position, and concurrent
+    // creates fail with a 500 — card #456; that holds across boards, so this
+    // also relies on the suite's single worker), but run alongside the edits
+    // without waiting on the page.
     const CREATED = 5;
     await Promise.all([
       ...existing.map((card, i) => apiUpdateCard(request, card.id, { body: `# Edited ${i}` })),
