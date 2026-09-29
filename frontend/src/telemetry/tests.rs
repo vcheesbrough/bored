@@ -344,6 +344,32 @@ fn a_retryable_answer_keeps_the_batch_for_later() {
 }
 
 #[test]
+fn a_hidden_tab_flush_honours_backoff_but_the_final_flush_does_not() {
+    use super::runtime::Flush;
+    test_support::reset();
+    configure(Some(&enabled()));
+    // A batch the ingest answered 503 to: it waits for its backoff.
+    start_span("waiting", SpanKind::Internal, None).end();
+    let _ = test_support::respond(Signal::Traces, 503, 1);
+    assert!(test_support::has_retry(Signal::Traces));
+    // Something newer arrives meanwhile.
+    start_span("newer", SpanKind::Internal, None).end();
+
+    // Hidden: neither the waiting retry nor the newer item goes.
+    assert_eq!(test_support::unload(Signal::Traces, Flush::Hidden), None);
+    assert!(
+        test_support::has_retry(Signal::Traces),
+        "the retry keeps its place"
+    );
+
+    // Final (pagehide, panic): there is no later — the retry goes first.
+    assert_eq!(test_support::unload(Signal::Traces, Flush::Final), Some(1));
+    assert!(!test_support::has_retry(Signal::Traces));
+    // With no retry waiting, a hidden flush sends the fresh items.
+    assert_eq!(test_support::unload(Signal::Traces, Flush::Hidden), Some(1));
+}
+
+#[test]
 fn transition_lines_name_the_endpoint_and_the_dropped_count() {
     test_support::reset();
     configure(Some(&enabled()));

@@ -48,7 +48,8 @@ const OUTBOX_LIMITS: Limits = Limits {
     max_items: 1_000,
     max_bytes: 512 * 1024,
     // Must fit the smallest batch taken (the keepalive one), or an item could
-    // never leave. The panic message is truncated well below this.
+    // never leave. Nothing the SPA records comes near it: attributes are
+    // bounded and the panic record carries a location, never a message.
     max_item_bytes: 16 * 1024,
 };
 
@@ -313,9 +314,18 @@ impl State {
     /// request. A waiting retry goes first whether or not it is due — there is
     /// no later — provided it fits the keepalive budget (it was taken for an
     /// ordinary request, which may be far larger); otherwise fresh items go.
-    fn unload_batch(&mut self, signal: Signal) -> Option<Vec<String>> {
+    fn unload_batch(&mut self, signal: Signal, flush: Flush, now_ms: f64) -> Option<Vec<String>> {
         let index = signal_index(signal);
         let version = self.version;
+        if let Some(retry) = &self.retry[index]
+            && flush == Flush::Hidden
+            && retry.not_before_ms > now_ms
+        {
+            // A hidden tab may well come back. The ingest asked us to wait
+            // (or our own backoff did), so honour it: send nothing for this
+            // signal — not even fresh items, which would jump the queue.
+            return None;
+        }
         if let Some(retry) = &self.retry[index] {
             let size = retry.items.iter().map(String::len).sum::<usize>()
                 + otlp::envelope_overhead(signal, version, retry.items.len());
@@ -602,7 +612,26 @@ fn start_fetch(
 ///
 /// Only with a token already in hand: there is no time to fetch one while the
 /// page is going away, and never before the session has proved itself.
+/// Why the outbox is being flushed on a keepalive request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flush {
+    /// The page is going away (`pagehide`) or about to trap (a panic): there
+    /// is no later, so a waiting retry goes now whatever its backoff said.
+    Final,
+    /// The tab was hidden (`visibilitychange`) — the dependable signal on
+    /// mobile, where `pagehide` often never fires, but a tab that may come
+    /// back. Backoff is honoured: a retry not yet due waits, and nothing
+    /// newer overtakes it.
+    Hidden,
+}
+
 pub fn flush_now() {
+    flush(Flush::Final);
+}
+
+/// Send what is buffered now on keepalive requests, without awaiting them.
+/// See [`Flush`] for the two occasions.
+pub fn flush(kind: Flush) {
     let now = platform::now_ms();
     let requests = with_state(|state| {
         let Phase::Enabled { endpoint } = &state.phase else {
@@ -622,7 +651,7 @@ pub fn flush_now() {
         let version = state.version;
         let mut requests = Vec::new();
         for signal in [Signal::Traces, Signal::Logs] {
-            if let Some(items) = state.unload_batch(signal) {
+            if let Some(items) = state.unload_batch(signal, kind, now) {
                 requests.push((
                     format!("{endpoint}{}", signal.path()),
                     otlp::envelope(signal, &items, version),
@@ -669,7 +698,7 @@ fn install_unload_flush() {
         let doc = document.clone();
         let on_visibility = wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
             if doc.visibility_state() == web_sys::VisibilityState::Hidden {
-                flush_now();
+                flush(Flush::Hidden);
             }
         });
         let _ = document.add_event_listener_with_callback(
@@ -740,5 +769,16 @@ pub mod test_support {
 
     pub fn has_retry(signal: Signal) -> bool {
         with_state(|state| state.retry[signal_index(signal)].is_some()).unwrap_or(false)
+    }
+
+    /// What a keepalive flush of `kind` would take for `signal` right now:
+    /// the number of items, or `None` for nothing.
+    pub fn unload(signal: Signal, kind: Flush) -> Option<usize> {
+        with_state(|state| {
+            state
+                .unload_batch(signal, kind, platform::now_ms())
+                .map(|items| items.len())
+        })
+        .flatten()
     }
 }
