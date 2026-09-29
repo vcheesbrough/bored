@@ -1434,6 +1434,83 @@ async fn shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() 
     assert!(rest.is_ok(), "the client's stream did not end");
 }
 
+/// Open `/api/events` on a real listener and return the first bytes the stream
+/// sends within `wait`, then shut the server down (which ends and so exports
+/// the stream's span). An `EventSource` gets exactly these bytes.
+async fn first_sse_bytes(wait: Duration) -> String {
+    let db = crate::db::connect_mem().await.expect("mem db");
+    let state = AppState::new(db);
+    let draining = state.draining.clone();
+    let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(
+        crate::listen::serve_plain(listener, router, draining, async move {
+            let _ = stop_rx.await;
+        })
+        .in_current_span(),
+    );
+    let mut stream = reqwest::get(format!("http://{address}/api/events"))
+        .await
+        .expect("stream opens");
+    let first = tokio::time::timeout(wait, stream.chunk())
+        .await
+        .ok()
+        .and_then(|chunk| chunk.ok().flatten())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+    first
+}
+
+/// Card #416: the browser cannot parent the stream span (an `EventSource`
+/// sends no `traceparent`), so the stream's first event names that span, for
+/// the browser's connect span to link to. Asserted against the span the
+/// exporter actually received.
+#[tokio::test]
+async fn the_sse_stream_names_its_span_in_a_first_trace_event() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let first = first_sse_bytes(Duration::from_secs(2)).await;
+    assert!(
+        first.starts_with("event: trace\n"),
+        "first bytes: {first:?}"
+    );
+    let data = first
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("a data line");
+    let named: serde_json::Value = serde_json::from_str(data).unwrap();
+
+    let spans = pipeline.finished_spans();
+    let stream_span = spans
+        .iter()
+        .find(|span| span.name == "sse stream")
+        .expect("the stream span is exported once the stream ends");
+    assert_eq!(
+        named["trace_id"],
+        stream_span.span_context.trace_id().to_string()
+    );
+    assert_eq!(
+        named["span_id"],
+        stream_span.span_context.span_id().to_string()
+    );
+}
+
+/// With telemetry off there is no span to name, and the stream sends nothing
+/// until a real event — exactly as before card #416.
+#[tokio::test]
+async fn with_telemetry_off_the_sse_stream_sends_no_trace_event() {
+    let (_telemetry, subscriber, _announce) =
+        prepare_for_test(&[], CapturedWriter::default()).expect("off");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let first = first_sse_bytes(Duration::from_millis(500)).await;
+    assert!(!first.contains("event: trace"), "first bytes: {first:?}");
+}
+
 /// A request that ignores the drain signal cannot hold shutdown: after
 /// `DRAIN_TIMEOUT`, `serve_plain` stops waiting and returns.
 #[tokio::test]

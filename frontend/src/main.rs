@@ -10,6 +10,7 @@ mod pages;
 mod panic_banner;
 mod recent;
 mod search;
+mod telemetry;
 
 use leptos::prelude::*;
 use leptos_router::{
@@ -25,6 +26,10 @@ fn main() {
     // to its own events. The hook logs the panic to the console and puts up a
     // "reload to continue" banner outside the Leptos tree — see `panic_banner`.
     panic_banner::install();
+    // Client telemetry's export tick and unload flush (card #416). It stays
+    // inert — buffering a bounded launch sequence and sending nothing — until
+    // the first `/api/info` says whether and where to export.
+    telemetry::start();
     panic_banner::install_test_trigger();
     mount_to_body(App);
 }

@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::{Claims, session::access_needs_refresh, validate_jwt};
+use super::{Claims, SessionAccessToken, session::access_needs_refresh, validate_jwt};
 use crate::observability::metrics::{self, AuthOutcome};
 
 /// Axum middleware that extracts a token from the request, validates it, and
@@ -102,6 +102,10 @@ pub async fn auth_middleware(
     {
         return match validate_jwt(token, auth, jwks).await {
             Ok(claims) => {
+                // A cookie session, so the one handler that needs the raw
+                // token (`/api/telemetry/token`, card #416) may see it.
+                req.extensions_mut()
+                    .insert(SessionAccessToken::from_claims(token.to_string(), &claims));
                 req.extensions_mut().insert(claims);
                 metrics::auth_outcome(AuthOutcome::CookieAccepted);
                 next.run(req).await
@@ -126,6 +130,12 @@ pub async fn auth_middleware(
 
     match sessions.refresh(auth, jwks, &refresh_token, id_token).await {
         Ok((session, claims)) => {
+            // The freshly rotated token — the one the browser is about to be
+            // given in its cookie — is the one the telemetry route hands out.
+            req.extensions_mut().insert(SessionAccessToken::from_claims(
+                session.access_token.clone(),
+                &claims,
+            ));
             metrics::auth_outcome(AuthOutcome::Refreshed);
             req.extensions_mut().insert(claims);
             let response = next.run(req).await;

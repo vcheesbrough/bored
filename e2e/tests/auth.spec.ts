@@ -221,6 +221,8 @@ test.describe('auth — public routes', () => {
     expect(location).toContain('client_id=');
     expect(location).toContain('state=');
     expect(new URL(location).searchParams.get('scope')).toContain('offline_access');
+    // The telemetry ingest refuses a bearer without it (card #416).
+    expect(new URL(location).searchParams.get('scope')?.split(' ')).toContain('telemetry:write');
     await ctx.dispose();
   });
 

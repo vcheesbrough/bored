@@ -24,11 +24,20 @@ pub fn Home() -> impl IntoView {
     // On mount, fetch boards and redirect to the first one if any exist.
     Effect::new(move |_| {
         let nav = navigate.clone();
+        // The home screen's load span (card #416): the boards fetch is its
+        // child, and it ends when this task finishes.
+        let mut screen =
+            crate::telemetry::start_span("screen home", crate::telemetry::SpanKind::Internal, None);
+        screen.set_attribute(crate::telemetry::otlp::keys::BORED_SCREEN, "home");
+        let load = screen.context();
+        crate::telemetry::set_current_screen(load);
         // `spawn_local` schedules an async block on the WASM event loop.
         // WASM is single-threaded so there's no real concurrency — the async
         // block runs after the current synchronous code yields.
         wasm_bindgen_futures::spawn_local(async move {
-            match crate::api::fetch_boards().await {
+            // Moved in so the span covers the load and ends with it.
+            let _screen = screen;
+            match crate::api::fetch_boards(load).await {
                 Ok(boards) => {
                     // `.into_iter().next()` consumes the Vec and returns `Some(first)` or `None`.
                     if let Some(first) = boards.into_iter().next() {
@@ -41,7 +50,7 @@ pub fn Home() -> impl IntoView {
                         no_boards.set(true);
                     }
                 }
-                Err(e) => leptos::logging::error!("failed to fetch boards: {e}"),
+                Err(e) => crate::telemetry::error("failed to fetch boards", &e),
             }
         });
     });
@@ -61,7 +70,7 @@ pub fn Home() -> impl IntoView {
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::create_board(name).await {
                 Ok(board) => nav(&format!("/boards/{}", board.name), Default::default()),
-                Err(e) => leptos::logging::error!("failed to create board: {e}"),
+                Err(e) => crate::telemetry::error("failed to create board", &e),
             }
         });
     };

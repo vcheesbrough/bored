@@ -23,6 +23,24 @@ entries:
       expression: |
         return {}
 
+  # The scope bored's telemetry ingest (otlp-collector-oidc) requires — card
+  # #416, decision D1. It adds no claim: being granted it is the permission.
+  # On bored's own browser provider, so the session's access token carries it
+  # and the SPA can present that token to the ingest. Identified by name, not
+  # scope_name, because another product's instance of the collector's
+  # reference blueprint may define its own `telemetry:write` mapping.
+  # Kept identical to the entry in blueprint.yaml.
+  - model: authentik_providers_oauth2.scopemapping
+    state: present
+    identifiers:
+      name: "bored: telemetry:write"
+    attrs:
+      name: "bored: telemetry:write"
+      scope_name: "telemetry:write"
+      description: "Send client telemetry to bored's ingest"
+      expression: |
+        return {}
+
   - model: authentik_providers_oauth2.oauth2provider
     state: present
     identifiers:
@@ -47,6 +65,7 @@ entries:
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, profile]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, offline_access]]
         - !Find [authentik_providers_oauth2.scopemapping, [scope_name, "bored:dev:access"]]
+        - !Find [authentik_providers_oauth2.scopemapping, [name, "bored: telemetry:write"]]
 
   - model: authentik_core.application
     state: present

@@ -19,7 +19,7 @@ use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-use crate::observability::metrics;
+use crate::observability::{self, metrics};
 use crate::routes::boards::AppState;
 
 /// How many undelivered events a slow receiver can queue up before
@@ -218,6 +218,21 @@ pub async fn sse_handler(
     // next container. `take_until` yields items until the future resolves,
     // then ends the stream — dropping `SseConnection` with it, which ends the
     // stream span and logs the unsubscribe before telemetry is flushed.
+    // The stream's first event names its span (card #416). The browser's
+    // `EventSource` cannot send `traceparent`, so this span is not a child of
+    // the browser's connect span; the browser records it as a *link* instead,
+    // which joins the two traces in Tempo. A named `trace` event, so the
+    // page's ordinary `onmessage` never sees it. Absent when telemetry is off.
+    let hello = observability::span_ids(&stream_span).map(|(trace_id, span_id)| {
+        Ok::<Event, Infallible>(
+            Event::default()
+                .event("trace")
+                .data(serde_json::json!({ "trace_id": trace_id, "span_id": span_id }).to_string()),
+        )
+    });
+    // `iter` over an `Option` yields its one value, or nothing; `chain` puts
+    // it ahead of every board event.
+    let stream = tokio_stream::iter(hello).chain(stream);
     let stream = futures_util::StreamExt::take_until(stream, state.draining.started());
 
     Sse::new(stream).keep_alive(

@@ -36,8 +36,18 @@ pub fn BoardChooser(
 
     Effect::new(move |_| {
         if show.get() {
+            // Opening the chooser is a screen of its own (card #416): its span
+            // is the root, the boards fetch its child.
+            let mut screen = crate::telemetry::start_span(
+                "screen board chooser",
+                crate::telemetry::SpanKind::Internal,
+                None,
+            );
+            screen.set_attribute(crate::telemetry::otlp::keys::BORED_SCREEN, "board_chooser");
+            let load = screen.context();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(fetched) = crate::api::fetch_boards().await {
+                let _screen = screen;
+                if let Ok(fetched) = crate::api::fetch_boards(load).await {
                     boards.set(fetched);
                 }
             });
@@ -60,7 +70,7 @@ pub fn BoardChooser(
                     // Board name is the slug; navigate by name.
                     nav(&format!("/boards/{}", board.name), Default::default());
                 }
-                Err(e) => leptos::logging::error!("failed to create board: {e}"),
+                Err(e) => crate::telemetry::error("failed to create board", &e),
             }
         });
     });
@@ -103,7 +113,7 @@ pub fn BoardChooser(
             match crate::api::create_column(&board_id, name.clone(), position).await {
                 Ok(col) => crate::columns::insert_absent(&owner, columns, col),
                 Err(e) => {
-                    leptos::logging::error!("failed to create column: {e}");
+                    crate::telemetry::error("failed to create column", &e);
                     // Hand the name back so the attempt can be retried, unless
                     // the user has already started typing the next one.
                     new_col_name.update(|current| {
@@ -136,7 +146,7 @@ pub fn BoardChooser(
             };
             match crate::api::update_column(&col_id, req).await {
                 Ok(updated) => sig.set(updated),
-                Err(e) => leptos::logging::error!("failed to update column: {e}"),
+                Err(e) => crate::telemetry::error("failed to update column", &e),
             }
         });
     };
@@ -171,7 +181,7 @@ pub fn BoardChooser(
                             }
                         }
                     }
-                    Err(e) => leptos::logging::error!("failed to delete board: {e}"),
+                    Err(e) => crate::telemetry::error("failed to delete board", &e),
                 }
             });
         });
@@ -191,7 +201,7 @@ pub fn BoardChooser(
         wasm_bindgen_futures::spawn_local(async move {
             match crate::api::delete_column(&col_id).await {
                 Ok(()) => columns.update(|cs| cs.retain(|s| s.get_untracked().id != col_id)),
-                Err(e) => leptos::logging::error!("failed to delete column: {e}"),
+                Err(e) => crate::telemetry::error("failed to delete column", &e),
             }
         });
     };

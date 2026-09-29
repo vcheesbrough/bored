@@ -937,6 +937,22 @@ pub(crate) fn link_to(span: &tracing::Span, from: &tracing::Span) {
     }
 }
 
+/// `span`'s trace and span ids as lowercase hex, or `None` when telemetry is
+/// off (the span then has no valid OpenTelemetry context).
+///
+/// For the SSE stream (card #416): an `EventSource` cannot send `traceparent`,
+/// so the browser cannot parent the stream's span; instead the server names the
+/// span in the stream's first event, and the browser records it as a link.
+pub(crate) fn span_ids(span: &tracing::Span) -> Option<(String, String)> {
+    let context = span.context().span().span_context().clone();
+    context.is_valid().then(|| {
+        (
+            context.trace_id().to_string(),
+            context.span_id().to_string(),
+        )
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test support
 // ─────────────────────────────────────────────────────────────────────────────

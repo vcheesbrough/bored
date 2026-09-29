@@ -303,7 +303,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                     error.set(None);
                 }
                 Err(e) => {
-                    leptos::logging::error!("link reason save failed: {e}");
+                    crate::telemetry::error("link reason save failed", &e);
                     error.set(Some(e.message));
                 }
             }
@@ -328,7 +328,7 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
                     error.set(None);
                 }
                 Err(e) => {
-                    leptos::logging::error!("unlink failed: {e}");
+                    crate::telemetry::error("unlink failed", &e);
                     error.set(Some(e.message));
                     removing.set(false);
                 }
@@ -567,7 +567,7 @@ fn LinkPicker(
                     error.set(None);
                 }
                 Err(e) => {
-                    leptos::logging::error!("link create failed: {e}");
+                    crate::telemetry::error("link create failed", &e);
                     error.set(Some(e.message));
                 }
             }

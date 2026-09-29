@@ -172,6 +172,8 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
         .then(|| config::load_group::<config::SessionConfig>(&cfg, "session"))
         .transpose()?;
     let server = config::load_group::<config::ServerConfig>(&cfg, "server")?;
+    // Optional: absent means the SPA is told telemetry is off (card #416).
+    let client_telemetry = config::load_client_telemetry(&cfg)?;
     drop(cfg);
 
     // Now that config is known: narrow the log level (it filters log lines,
@@ -205,7 +207,8 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
     let app = app(
         state,
         &server.static_dir,
-        DeploymentInfo::new(&observability.environment, observability.branch.clone()),
+        DeploymentInfo::new(&observability.environment, observability.branch.clone())
+            .with_client_telemetry(client_telemetry.endpoint),
     )
     .await;
 

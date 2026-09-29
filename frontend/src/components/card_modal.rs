@@ -73,7 +73,7 @@ pub fn CardModal(
                 }
                 Err(e) => {
                     save_status.set(SaveStatus::Failed);
-                    leptos::logging::error!("modal auto-save failed: {e}");
+                    crate::telemetry::error("modal auto-save failed", &e);
                 }
             }
         });
@@ -126,7 +126,7 @@ pub fn CardModal(
                     }
                     Err(e) => {
                         save_status.set(SaveStatus::Failed);
-                        leptos::logging::error!("modal flush save failed: {e}");
+                        crate::telemetry::error("modal flush save failed", &e);
                     }
                 }
             });
@@ -152,7 +152,7 @@ pub fn CardModal(
                         on_close.run(());
                         on_delete.run(card_id_cb);
                     }
-                    Err(e) => leptos::logging::error!("modal delete failed: {e}"),
+                    Err(e) => crate::telemetry::error("modal delete failed", &e),
                 }
             });
         }
@@ -191,7 +191,7 @@ pub fn CardModal(
                 .is_none_or(|current| current.tags != next);
             if superseded {
                 if let Err(e) = result {
-                    leptos::logging::error!("superseded modal tag save failed: {e}");
+                    crate::telemetry::error("superseded modal tag save failed", &e);
                 }
                 return;
             }
@@ -206,7 +206,7 @@ pub fn CardModal(
                             c.tags = previous;
                         }
                     });
-                    leptos::logging::error!("modal tag save failed: {e}");
+                    crate::telemetry::error("modal tag save failed", &e);
                 }
             }
         });

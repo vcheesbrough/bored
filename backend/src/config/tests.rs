@@ -759,3 +759,59 @@ fn app_version_override_falls_back_to_none_when_unset_or_blank() {
 
     unsafe { std::env::remove_var("APP_VERSION") };
 }
+
+// ── client-telemetry (card #416) ───────────────────────────────────────────
+
+#[test]
+fn client_telemetry_is_off_when_the_group_is_absent() {
+    // No key at all — local dev, unit tests, an environment without an ingest.
+    let config = cfg(&[]);
+    let telemetry = load_client_telemetry(&config).expect("absent group is not an error");
+    assert_eq!(telemetry.endpoint, None);
+}
+
+#[test]
+fn client_telemetry_blank_endpoint_is_off() {
+    let config = cfg(&[("BORED__CLIENT_TELEMETRY__ENDPOINT", "  ")]);
+    let telemetry = load_client_telemetry(&config).expect("blank is off, not an error");
+    assert_eq!(telemetry.endpoint, None);
+}
+
+#[test]
+fn client_telemetry_endpoint_is_read_from_env_and_sovereign() {
+    let config = cfg(&[(
+        "BORED__CLIENT_TELEMETRY__ENDPOINT",
+        "https://bored-dev.example",
+    )]);
+    assert_eq!(
+        load_client_telemetry(&config).unwrap().endpoint.as_deref(),
+        Some("https://bored-dev.example")
+    );
+    // The canonical dotted path the sovereign-config source emits.
+    let config = cfg_with_sovereign(
+        &[("client-telemetry.endpoint", "https://bored.example")],
+        &[],
+    );
+    assert_eq!(
+        load_client_telemetry(&config).unwrap().endpoint.as_deref(),
+        Some("https://bored.example")
+    );
+}
+
+#[test]
+fn client_telemetry_rejects_an_endpoint_the_spa_could_not_use() {
+    for bad in [
+        "bored.example",
+        "/v1",
+        "ftp://bored.example",
+        "https://bored.example/?x=1",
+        "https://bored.example/#top",
+    ] {
+        let config = cfg(&[("BORED__CLIENT_TELEMETRY__ENDPOINT", bad)]);
+        let error = load_client_telemetry(&config).expect_err(bad);
+        assert!(
+            error.to_string().contains("client-telemetry.endpoint"),
+            "{bad}: {error}"
+        );
+    }
+}

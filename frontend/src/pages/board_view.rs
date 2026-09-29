@@ -112,6 +112,25 @@ fn ColumnGhost(
     .into_any()
 }
 
+/// The span of the board load in progress, if telemetry is recording, shared
+/// through Leptos context so each column's initial card fetch lands in the same
+/// trace as the board, columns and links fetches (card #416).
+///
+/// Leptos context is passed down the component tree when a component is
+/// created, not picked up from whatever async task happens to be running, so
+/// this is still explicit parenting — not the ambient span stack the telemetry
+/// module refuses to keep.
+#[derive(Clone, Copy)]
+pub struct BoardLoadTrace(pub StoredValue<Option<crate::telemetry::SpanContext>>);
+
+impl BoardLoadTrace {
+    /// The current load's context. `try_get_value`, because a column's fetch
+    /// can outlive the board view that provided this.
+    pub fn get(self) -> Option<crate::telemetry::SpanContext> {
+        self.0.try_get_value().flatten()
+    }
+}
+
 #[component]
 pub fn BoardView() -> AnyView {
     // caps monomorphization at this boundary — see CardVersionActions doc comment in history_panel.rs
@@ -199,6 +218,11 @@ pub fn BoardView() -> AnyView {
     let recent = RecentPicks::new(board_ulid);
     Effect::new(move |_| recent.load());
     provide_context(recent);
+    // The current board load's span (card #416), for the columns' own card
+    // fetches to be parented to. A `StoredValue` rather than a signal: nothing
+    // should re-run because a trace id changed.
+    let board_load_trace = BoardLoadTrace(StoredValue::new(None));
+    provide_context(board_load_trace);
 
     // ── A query change releases the expanded-card pin — card #375 ──────────
     // The column filter keeps the expanded card on screen even when it fails
@@ -436,7 +460,7 @@ pub fn BoardView() -> AnyView {
             let slug = board_name.get_untracked();
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(err) = crate::api::reorder_columns(&slug, order).await {
-                    leptos::logging::error!("reorder_columns failed: {err}");
+                    crate::telemetry::error("reorder_columns failed", &err);
                     // The list was reordered above, before the server had a
                     // say. It said no — refused outright while the tab is
                     // disconnected, or failed — so the board must not keep
@@ -454,12 +478,13 @@ pub fn BoardView() -> AnyView {
                     // be asked either — which is the offline refusal. Nothing
                     // can have been accepted since while offline, so there the
                     // snapshot *is* the server's order.
-                    let server_order = crate::api::fetch_columns(&slug).await.map(|fetched| {
-                        fetched
-                            .into_iter()
-                            .map(|column| column.id)
-                            .collect::<Vec<_>>()
-                    });
+                    let server_order =
+                        crate::api::fetch_columns(&slug, None).await.map(|fetched| {
+                            fetched
+                                .into_iter()
+                                .map(|column| column.id)
+                                .collect::<Vec<_>>()
+                        });
                     let order = server_order.as_deref().unwrap_or(&previous_order);
                     crate::columns::restore_order(columns, order);
                 }
@@ -479,9 +504,9 @@ pub fn BoardView() -> AnyView {
     Effect::new(move |_| match maximised_card_number() {
         Some(num) => {
             wasm_bindgen_futures::spawn_local(async move {
-                match crate::api::fetch_card_by_number(num).await {
+                match crate::api::fetch_card_by_number(num, None).await {
                     Ok(card) => maximised_card.set(Some(card)),
-                    Err(e) => leptos::logging::error!("fetch maximised card failed: {e}"),
+                    Err(e) => crate::telemetry::error("fetch maximised card failed", &e),
                 }
             });
         }
@@ -621,10 +646,50 @@ pub fn BoardView() -> AnyView {
         }
         let url = format!("/api/events?board_id={ulid}");
         let Ok(es) = web_sys::EventSource::new(&url) else {
-            leptos::logging::error!("EventSource: failed to open {url}");
+            crate::telemetry::error_detail("EventSource: failed to open", &url, "sse_open");
             return;
         };
         let es_for_cleanup = es.clone();
+
+        // The connect span (card #416), under the board load that caused it.
+        // An `EventSource` cannot send `traceparent`, so the server's stream
+        // span starts a trace of its own — two traces by design (parenting it
+        // needs a ticket handshake, out of scope). Instead the server names
+        // its stream span in a first `trace` event, and this span records it
+        // as a *link* and ends there. It ends early on `onerror`, and a few
+        // seconds after `onopen` if the server never names its span (an older
+        // server during a deploy).
+        //
+        // `Rc<RefCell<Option<…>>>` because three closures may end it and
+        // whichever fires first takes it: `Rc` shares ownership between them
+        // (single-threaded), `RefCell` allows the `take`, `Option` records
+        // that it is gone.
+        let connect_span =
+            std::rc::Rc::new(std::cell::RefCell::new(Some(crate::telemetry::start_span(
+                "sse connect",
+                crate::telemetry::SpanKind::Internal,
+                board_load_trace.get(),
+            ))));
+        let connect_span_open = connect_span.clone();
+        let connect_span_trace = connect_span.clone();
+        let connect_span_error = connect_span;
+
+        let trace_cb =
+            Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |msg: web_sys::MessageEvent| {
+                let server = msg
+                    .data()
+                    .as_string()
+                    .and_then(|data| crate::telemetry::otlp::parse_stream_trace(&data));
+                // `try_borrow_mut`, so an unexpected re-entrant call can never
+                // panic the tab over a span.
+                if let Ok(mut slot) = connect_span_trace.try_borrow_mut()
+                    && let Some(mut span) = slot.take()
+                    && let Some(server) = server
+                {
+                    span.add_link(server);
+                }
+            });
+        let _ = es.add_event_listener_with_callback("trace", trace_cb.as_ref().unchecked_ref());
 
         let cb =
             Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |msg: web_sys::MessageEvent| {
@@ -643,6 +708,17 @@ pub fn BoardView() -> AnyView {
         // check is *not* here — it belongs to the heartbeat, which runs whether
         // or not this stream ever comes back.
         let onopen_cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
+            // Connected. The server's `trace` event normally follows at once
+            // and ends the connect span with its link; if it never comes, end
+            // the span anyway after a grace period rather than leave it open
+            // for as long as the board is.
+            let pending = connect_span_open.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(5_000).await;
+                if let Ok(mut slot) = pending.try_borrow_mut() {
+                    drop(slot.take());
+                }
+            });
             // A stream that comes back after failing is live, but the board it
             // feeds is not current: every event broadcast during the gap is
             // lost. Marking the tab connected here would lift the offline guard
@@ -673,6 +749,13 @@ pub fn BoardView() -> AnyView {
             // heartbeat probe immediately, since a redeploy is one reason a
             // stream dies.
             crate::connection::stream_down();
+            // A stream that failed before it ever opened fails its connect
+            // span; one that had opened has already ended it.
+            if let Ok(mut slot) = connect_span_error.try_borrow_mut()
+                && let Some(mut span) = slot.take()
+            {
+                span.fail("sse_error");
+            }
             // From here the board has missed events it can never recover, so
             // the next `onopen` must reload rather than resume.
             let _ = sse_lost.try_set(true);
@@ -732,7 +815,7 @@ pub fn BoardView() -> AnyView {
         // `SendWrapper` because `on_cleanup` demands `Send + Sync` and a
         // `Closure` is neither. It panics if touched from another thread, which
         // cannot happen: a wasm SPA has exactly one.
-        let handlers = send_wrapper::SendWrapper::new((cb, onopen_cb, onerror_cb));
+        let handlers = send_wrapper::SendWrapper::new((cb, trace_cb, onopen_cb, onerror_cb));
         on_cleanup(move || {
             es_for_cleanup.close();
             drop(handlers);
@@ -759,23 +842,39 @@ pub fn BoardView() -> AnyView {
         board_links.set(Vec::new());
         board_links_loaded.set(false);
         loading.set(true);
+        // One root span per screen load (card #416): the board, columns and
+        // links requests below — and each column's card fetch, through
+        // `BoardLoadTrace` — are its children, so opening a board is one trace
+        // from the browser through the server. It ends when this task does;
+        // the columns' fetches may finish after it, which OTLP allows.
+        let mut screen = crate::telemetry::start_span(
+            "screen board",
+            crate::telemetry::SpanKind::Internal,
+            None,
+        );
+        screen.set_attribute(crate::telemetry::otlp::keys::BORED_SCREEN, "board");
+        let load = screen.context();
+        board_load_trace.0.set_value(load);
+        crate::telemetry::set_current_screen(load);
         wasm_bindgen_futures::spawn_local(async move {
-            if let Ok(board) = crate::api::fetch_board(&slug).await
+            // Moved in so the span lives exactly as long as the load.
+            let _screen = screen;
+            if let Ok(board) = crate::api::fetch_board(&slug, load).await
                 && board_slug() == slug
             {
                 board_name.set(board.name);
                 // Set the ULID after fetch — triggers the SSE effect to connect.
                 board_ulid.set(board.id);
             }
-            match crate::api::fetch_columns(&slug).await {
+            match crate::api::fetch_columns(&slug, load).await {
                 Ok(fetched) => {
                     if board_slug() == slug {
                         columns.set(fetched.into_iter().map(RwSignal::new).collect());
                     }
                 }
-                Err(e) => leptos::logging::error!("failed to fetch columns: {e}"),
+                Err(e) => crate::telemetry::error("failed to fetch columns", &e),
             }
-            match crate::api::fetch_board_links(&slug).await {
+            match crate::api::fetch_board_links(&slug, load).await {
                 Ok(fetched) => {
                     if board_slug() == slug {
                         board_links.set(fetched);
@@ -784,11 +883,23 @@ pub fn BoardView() -> AnyView {
                 }
                 // Left false on failure: the index is genuinely unknown, and a
                 // sort computed from no edges would silently do nothing.
-                Err(e) => leptos::logging::error!("failed to fetch links: {e}"),
+                Err(e) => crate::telemetry::error("failed to fetch links", &e),
             }
             if board_slug() == slug {
                 loading.set(false);
             }
+            // The load is over, so stop offering its context: a column
+            // created later, or an SSE reconnect, is its own trace rather than
+            // a child of a load that finished long ago. The columns this load
+            // rendered have already read it — they mounted while the links
+            // request above was in flight. Only this load's own value is
+            // cleared; a newer load may have replaced it.
+            // `try_update_value`: the view may be gone by now.
+            let _ = board_load_trace.0.try_update_value(|current| {
+                if *current == load {
+                    *current = None;
+                }
+            });
         });
     });
 

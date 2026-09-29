@@ -1,0 +1,28 @@
+# The e2e rig's fake OTLP receiver (card #416): a stock OpenTelemetry
+# Collector that accepts OTLP and writes every export it receives, as one OTLP
+# JSON line, to a file the Playwright container reads. It stands where the
+# homelab's shared Alloy stands in production — upstream of the ingest
+# (otlp-collector-oidc) and of the server's own export — so tests assert on
+# what actually arrived, not on configuration. Deliberately not Tempo/Loki.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  file:
+    path: /otlp/otlp.jsonl
+    flush_interval: 100ms
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file]
+    logs:
+      receivers: [otlp]
+      exporters: [file]
+    metrics:
+      receivers: [otlp]
+      exporters: [file]
