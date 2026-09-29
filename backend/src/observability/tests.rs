@@ -1384,6 +1384,7 @@ async fn detached_work_starts_its_own_trace_linked_to_the_request() {
 /// its span ended and its "sse unsubscribed" line written — *before* it
 /// returns, so `main`'s telemetry flush that follows includes it.
 #[tokio::test]
+#[serial_test::serial(sse_subscribers)]
 async fn shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() {
     let stdout = CapturedWriter::default();
     let (_telemetry, subscriber, _announce) = prepare_for_test(&[], stdout.clone()).expect("off");
@@ -1470,6 +1471,7 @@ async fn first_sse_bytes(wait: Duration) -> String {
 /// the browser's connect span to link to. Asserted against the span the
 /// exporter actually received.
 #[tokio::test]
+#[serial_test::serial(sse_subscribers)]
 async fn the_sse_stream_names_its_span_in_a_first_trace_event() {
     let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
     let _guard = tracing::subscriber::set_default(subscriber);
@@ -1503,6 +1505,7 @@ async fn the_sse_stream_names_its_span_in_a_first_trace_event() {
 /// With telemetry off there is no span to name, and the stream sends nothing
 /// until a real event — exactly as before card #416.
 #[tokio::test]
+#[serial_test::serial(sse_subscribers)]
 async fn with_telemetry_off_the_sse_stream_sends_no_trace_event() {
     let (_telemetry, subscriber, _announce) =
         prepare_for_test(&[], CapturedWriter::default()).expect("off");
@@ -1674,9 +1677,146 @@ async fn url_scheme_comes_from_the_listener() {
     assert_eq!(metric_scheme("/over-plain").as_deref(), Some("http"));
 }
 
+/// `TCP_NODELAY` as the **server** sees it, on the socket it accepted for the
+/// client connection whose local address is `client` and which reached the
+/// listener at `server` (card #452).
+///
+/// The client end's own option says nothing about the server's, and neither
+/// listener hands its accepted streams out — so find the socket the way the
+/// kernel lists it: the test runs the server in this process, so the accepted
+/// socket is one of this process's file descriptors. For each socket fd in
+/// `/proc/self/fd`, view it as a `std::net::TcpStream` without taking
+/// ownership (`ManuallyDrop`: dropping it would close a descriptor the server
+/// still owns) and match on its address pair, which is the client's mirrored.
+///
+/// The server accepts and sets the option on its own task, so poll: this
+/// returns as soon as the socket is found with the option set, and otherwise,
+/// after a bounded wait, what it last saw — `Some(false)` if the socket
+/// exists without the option, `None` if it never appeared.
+#[cfg(target_os = "linux")]
+async fn server_side_nodelay(
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+) -> Option<bool> {
+    use std::mem::ManuallyDrop;
+    use std::os::fd::FromRawFd as _;
+
+    let look = || -> Option<bool> {
+        let entries = std::fs::read_dir("/proc/self/fd").ok()?;
+        for entry in entries.flatten() {
+            // Only sockets: the link target of a socket fd is `socket:[inode]`.
+            let is_socket = std::fs::read_link(entry.path())
+                .is_ok_and(|target| target.to_string_lossy().starts_with("socket:"));
+            let Some(fd) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+                continue;
+            };
+            if !is_socket {
+                continue;
+            }
+            // SAFETY: `fd` is open in this process (just listed), and the
+            // `ManuallyDrop` means it is never closed here; the calls below
+            // only read socket state. A non-TCP socket (or one another test
+            // closes meanwhile) just fails the address calls and is skipped.
+            let stream = ManuallyDrop::new(unsafe { std::net::TcpStream::from_raw_fd(fd) });
+            if stream.local_addr().ok() == Some(server) && stream.peer_addr().ok() == Some(client) {
+                return stream.nodelay().ok();
+            }
+        }
+        None
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let seen = look();
+        if seen == Some(true) || Instant::now() >= deadline {
+            return seen;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The TLS listener — what both deployments run — sets `TCP_NODELAY` on the
+/// connections it accepts, so a response split across TLS records is not
+/// held back by the peer's delayed ACK (card #452). It still serves after.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn tls_listener_sets_tcp_nodelay_on_accepted_connections() {
+    let router = axum::Router::new().route("/nodelay", axum::routing::get(|| async { "ok" }));
+    let (base, client, stop_tx, server) = start_tls(router, crate::listen::Draining::new()).await;
+    let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+    let listener_addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+
+    // A bare TCP connection: the TCP acceptor runs before the TLS handshake,
+    // so the option is set on accept whether or not the client ever speaks TLS.
+    let connection = tokio::net::TcpStream::connect(listener_addr).await.unwrap();
+    let nodelay = server_side_nodelay(connection.local_addr().unwrap(), listener_addr).await;
+    assert_eq!(
+        nodelay,
+        Some(true),
+        "server-side TCP_NODELAY on the TLS listener"
+    );
+
+    // Liveness: the listener built with the new acceptor still serves HTTPS.
+    let response = client.get(format!("{base}/nodelay")).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.text().await.unwrap(), "ok");
+
+    drop(connection);
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
+/// …and so does the plain-HTTP listener (dev mode, e2e), so the two shapes
+/// behave alike. The request is served over the very connection checked.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn plain_listener_sets_tcp_nodelay_on_accepted_connections() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let router = axum::Router::new().route("/nodelay", axum::routing::get(|| async { "ok" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(crate::listen::serve_plain(
+        listener,
+        router,
+        crate::listen::Draining::new(),
+        async move {
+            let _ = stop_rx.await;
+        },
+    ));
+
+    let mut connection = tokio::net::TcpStream::connect(listener_addr).await.unwrap();
+    // Checked before the request: once served, `Connection: close` has the
+    // server close its end, and the socket is gone from the fd table.
+    let nodelay = server_side_nodelay(connection.local_addr().unwrap(), listener_addr).await;
+    assert_eq!(
+        nodelay,
+        Some(true),
+        "server-side TCP_NODELAY on the plain listener"
+    );
+
+    // Liveness: that same connection is served. `Connection: close` so the
+    // server ends the response by closing, and `read_to_end` knows when it
+    // has all of it.
+    connection
+        .write_all(b"GET /nodelay HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    connection.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("ok"), "{response}");
+
+    stop_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
 /// The TLS listener (what both deployments run) ends open SSE streams on
 /// shutdown and returns promptly, with the stream closed first.
 #[tokio::test]
+#[serial_test::serial(sse_subscribers)]
 async fn tls_shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() {
     let stdout = CapturedWriter::default();
     let (_telemetry, subscriber, _announce) = prepare_for_test(&[], stdout.clone()).expect("off");
@@ -1916,7 +2056,12 @@ fn a_log_inside_a_dependency_span_carries_the_enclosing_product_span_ids() {
 /// behind has the skipped events counted in `bored.sse.lagged` (they used to be
 /// dropped silently); delivered events count in `bored.sse.events`. Driven
 /// through the real handler on a real socket.
+///
+/// The gauge is process-wide, so any other test with a stream open at the same
+/// moment moves it too (seen in the image build: `+2`, not `+1`). Every test
+/// that opens `/api/events` therefore shares the `sse_subscribers` serial key.
 #[tokio::test]
+#[serial_test::serial(sse_subscribers)]
 async fn sse_streams_count_subscribers_delivered_and_lagged_events() {
     use super::test_support::sum_value;
     use crate::events::{BROADCAST_CAPACITY, BoardEvent, BroadcastEvent};

@@ -1,5 +1,12 @@
 import { test, expect, Browser } from '@playwright/test';
-import { apiCreateBoard, apiCreateColumn, apiCreateCard, gotoBoardView } from './helpers';
+import {
+  apiCreateBoard,
+  apiCreateColumn,
+  apiCreateCard,
+  apiUpdateCard,
+  gotoBoardView,
+  openChooser,
+} from './helpers';
 
 // All SSE tests use two independent browser contexts (A and B) connected to the
 // same board. Context A performs a mutation; context B must reflect it without
@@ -192,3 +199,52 @@ async function openBoardInBoth(
   await gotoBoardView(pageB, boardSlug);
   return [pageA, pageB] as const;
 }
+
+// Card #452. `BoardView` stays mounted across `/boards/:slug`, and its
+// `sse_event` signal keeps the last event it saw. A column mounting on a
+// return visit must not replay that event over the fresh snapshot: the board
+// may have changed while this tab was elsewhere and could not hear about it.
+test.describe('returning to a board', () => {
+  test('an event from an earlier visit does not overwrite fresher data', async ({ page, request }) => {
+    const boardA = await apiCreateBoard(request, `stale-a-${Date.now()}`);
+    const boardB = await apiCreateBoard(request, `stale-b-${Date.now()}`);
+    const col = await apiCreateColumn(request, boardA.name, 'Col');
+    await apiCreateColumn(request, boardB.name, 'Col B');
+    const card = await apiCreateCard(request, col.id, '# Version one');
+
+    const eventsReady = page.waitForResponse(
+      response =>
+        response.request().method() === 'GET' &&
+        response.url().includes(`/api/events?board_id=${boardA.id}`) &&
+        response.ok()
+    );
+    await gotoBoardView(page, boardA.name);
+    await eventsReady;
+    const shown = page.locator('.card-item').first();
+    await expect(shown).toContainText('Version one');
+
+    // The last event the view hears for board A.
+    await apiUpdateCard(request, card.id, { body: '# Version two' });
+    await expect(shown).toContainText('Version two', { timeout: 5000 });
+
+    // Away to B without a reload. B broadcasts nothing, so the view still
+    // holds A's `CardUpdated` for version two.
+    await openChooser(page);
+    await page.locator('.chooser-board-row').filter({ hasText: boardB.name }).click();
+    await expect(page.locator('.navbar-board-btn')).toContainText(boardB.name);
+
+    // Changed while this tab is on B and hears nothing from A.
+    await apiUpdateCard(request, card.id, { body: '# Version three' });
+
+    // Back to A without a reload: the snapshot has version three.
+    await openChooser(page);
+    await page.locator('.chooser-board-row').filter({ hasText: boardA.name }).click();
+    await expect(page.locator('.navbar-board-btn')).toContainText(boardA.name);
+    await expect(shown).toContainText('Version three', { timeout: 5000 });
+    // …and keeps it: a replayed stale event would land right after the
+    // snapshot, so give it the chance.
+    await page.waitForTimeout(1000);
+    await expect(shown).toContainText('Version three');
+    await expect(shown).not.toContainText('Version two');
+  });
+});

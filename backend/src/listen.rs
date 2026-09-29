@@ -135,7 +135,22 @@ pub(crate) async fn serve_tls(
     // Tag every request with the scheme it arrived over, for `url.scheme`
     // (server_span.rs). Added last, so it runs before the telemetry layers.
     let app = app.layer(axum::Extension(crate::server_span::Scheme::Https));
-    if let Err(error) = axum_server::from_tcp_rustls(listener, tls_config)
+    // TCP_NODELAY on every accepted connection (card #452). axum-server's
+    // default acceptor leaves Nagle's algorithm on, and rustls often writes a
+    // response as more than one TLS record: the last segment then waits for
+    // the peer to ACK the first, and Linux delays that ACK by ~40 ms — which
+    // is what Traefik's spans showed on warm connections. hyper already
+    // buffers each response into as few writes as it can, so Nagle has
+    // nothing left to coalesce and only adds the stall. SSE event writes,
+    // small by nature, are spared the same hold-back.
+    //
+    // `from_tcp_rustls` is `from_tcp(..).acceptor(RustlsAcceptor::new(..))`
+    // spelled out; spelling it out ourselves is how the inner (TCP) acceptor
+    // becomes `NoDelayAcceptor` instead of `DefaultAcceptor`.
+    let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls_config)
+        .acceptor(axum_server::accept::NoDelayAcceptor::new());
+    if let Err(error) = axum_server::from_tcp(listener)
+        .acceptor(acceptor)
         .handle(handle)
         .serve(app.into_make_service())
         .await
@@ -156,7 +171,13 @@ pub(crate) async fn serve_plain(
     // raised it stops accepting and waits for open connections to finish.
     // Tag every request with the scheme it arrived over (see `serve_tls`).
     let app = app.layer(axum::Extension(crate::server_span::Scheme::Http));
-    let server = axum::serve(listener, app).with_graceful_shutdown(draining.started());
+    // TCP_NODELAY on every accepted connection, for the same reason as the
+    // TLS listener (see `serve_tls`): without it a response split across
+    // segments can wait ~40 ms on the peer's delayed ACK. Set here too so the
+    // two deployment shapes behave alike.
+    let server = axum::serve(listener, app)
+        .tcp_nodelay(true)
+        .with_graceful_shutdown(draining.started());
     // Run the server as its own task so this function can stop waiting for it
     // after the drain timeout, rather than for as long as the slowest client.
     let mut task = tokio::spawn(async move { server.await });
