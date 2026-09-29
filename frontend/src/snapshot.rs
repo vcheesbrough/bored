@@ -12,8 +12,8 @@
 /// what was held so the caller replays it on the fresh list.
 ///
 /// Generic over the event so its rules can be tested without Leptos or
-/// real events. A fresh gate is closed: nothing has loaded yet, so an event
-/// seen before the first fetch starts is held for it too.
+/// real events. A fresh gate is closed: nothing has loaded yet, so nothing
+/// passes before the first fetch has landed.
 #[derive(Debug)]
 pub(crate) struct SnapshotGate<E> {
     /// The latest fetch started; only its response may open the gate.
@@ -30,11 +30,18 @@ impl<E> SnapshotGate<E> {
         }
     }
 
-    /// A fetch is starting: close the gate (keeping anything already held,
-    /// which the new snapshot may predate) and return its ticket.
+    /// A fetch is starting: close the gate, empty, and return its ticket.
+    ///
+    /// Whatever was held is dropped, not carried forward. Every such event
+    /// was broadcast after its change was committed and has already reached
+    /// this tab, so the request about to be sent reads a store that includes
+    /// it: the new snapshot already reflects it. Carrying it forward would
+    /// also carry it across a board switch — `BoardView` keeps its gates when
+    /// the route moves to another board — and replay one board's events
+    /// onto the next board's lists.
     pub(crate) fn begin(&mut self) -> u64 {
         self.fetch += 1;
-        self.pending.get_or_insert_with(Vec::new);
+        self.pending = Some(Vec::new());
         self.fetch
     }
 
@@ -83,15 +90,14 @@ mod tests {
     }
 
     #[test]
-    fn an_event_before_the_first_fetch_starts_is_held_for_it() {
-        // A fresh gate is closed: nothing has loaded, so an event offered
-        // before the first fetch starts waits for it rather than going onto
-        // an empty, unloaded list. (`ColumnView` itself ignores the stale
-        // value its SSE effect sees at mount; this is the gate's own rule.)
+    fn a_fresh_gate_is_closed_and_its_first_fetch_starts_empty() {
+        // Nothing has loaded, so nothing is applied to an empty, unloaded
+        // list; and an event seen before the request is sent is already in
+        // the snapshot it asks for, so the fetch does not replay it.
         let mut gate = SnapshotGate::new();
         assert_eq!(gate.offer("early"), None);
         let fetch = gate.begin();
-        assert_eq!(gate.land(fetch), Some(vec!["early"]));
+        assert_eq!(gate.land(fetch), Some(Vec::<&str>::new()));
     }
 
     #[test]
@@ -104,7 +110,9 @@ mod tests {
         // The first response is older than the one still coming.
         assert_eq!(gate.land(first), None);
         assert_eq!(gate.offer("c"), None, "still closed for the second fetch");
-        assert_eq!(gate.land(second), Some(vec!["a", "b", "c"]));
+        // `a` came before the second request, so its snapshot has it — and
+        // on a board switch `a` belongs to the board being left.
+        assert_eq!(gate.land(second), Some(vec!["b", "c"]));
     }
 
     #[test]
