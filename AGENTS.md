@@ -257,6 +257,43 @@ weaken them.**
 - **Dashboards and alerts are opt-in** (skill §8) and not yet opted into; card
   #437 is where that decision is made.
 
+### Client telemetry (the SPA, card #416)
+
+The SPA exports its own traces and logs (`service.name=bored-spa`) over
+OTLP/HTTP JSON to the environment's ingest — the released
+`otlp-collector-oidc` image, one per environment, same-origin behind Traefik
+(`/v1/`). Contract: the skill's `references/client-export.md`. Wiring:
+README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
+`backend/src/routes/telemetry.rs`, `e2e/tests/telemetry.spec.ts`.
+
+**Decisions and deviations, recorded:**
+
+- **The bearer is the session's own access token** (D1), handed to the page by
+  `GET /api/telemetry/token`. The browser providers carry a `telemetry:write`
+  scope mapping (`authentik/`), login requests it, and the ingest's audience is
+  the browser client id. Cost: the page can read a full bored API bearer for
+  ≤ 15 min, and "who may send" is "who may use bored" (`bored-{env}-users`) —
+  a per-user opt-out needs a separate telemetry provider.
+- **Identity is narrowed** to `user.id` and `user.name` (`CLAIM_ATTRIBUTES`,
+  D2); the ingest does not stamp email or full name.
+- **The unload flush is a `keepalive` fetch**, not `sendBeacon` (D3): a beacon
+  cannot carry `Authorization`.
+- **e2e reaches the ingest cross-origin** (CORS on) rather than through a
+  Traefik edge; see the follow-up card on SSE events lost behind Traefik.
+
+**Rules:**
+
+- **Frontend failures go through `telemetry::error`** (or `error_detail`), not
+  `leptos::logging::error!`. The console line is unchanged; the exported record
+  carries only the fixed message, `error.type`, status and trace — never the
+  error's text, which can quote user content.
+- **Parents are explicit.** A new span takes its parent as a `SpanContext`
+  argument; there is no ambient current span in the SPA. A REST call a screen
+  load makes passes the load's context; a user action passes `None`.
+- **New REST calls go through `api::send`**, which opens the `http.client`
+  span and sends `traceparent`. Polled requests (the heartbeat) are not traced.
+- **No client metrics**: the ingest's `ALLOWED_METRIC_NAMES` stays empty.
+
 ---
 
 ## 5. PR review — repo hooks

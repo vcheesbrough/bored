@@ -256,6 +256,51 @@ record and in the stdout JSON); `http.server.request.duration`, `bored.sse.*`, `
 `bored.auth.outcomes` and `bored.build.info` (version and revision, compiled in). See AGENTS.md
 § Observability for what is still short of the contract.
 
+### Client telemetry
+
+The SPA sends its **own traces and logs** (`service.name=bored-spa`, OTLP/HTTP JSON) to the
+environment's **ingest**: the released [`otlp-collector-oidc`](https://github.com/vcheesbrough/otlp-collector-oidc)
+image, unmodified, one instance per environment, on bored's own hostname — Traefik routes `/v1/`
+(and `/opentelemetry.proto.collector`) to it and everything else to the app. The ingest
+authenticates the bearer, stamps `user.id`/`user.name`, `deployment.environment.name` and
+`telemetry_source=client`, drops any `service.name` other than `bored-spa`, and forwards to
+`monitor-alloy` like the server's own export. Frontend code: [`frontend/src/telemetry/`](frontend/src/telemetry/mod.rs).
+
+**The bearer.** The ingest reads only `Authorization: Bearer <access JWT>` with `telemetry:write`
+and the browser client's audience. The SPA gets the session's current access token from
+`GET /api/telemetry/token` (cookie sessions only, `no-store`, refreshed through the normal session
+refresh), reads it per export, and on a `401` refreshes once; a second `401` stops export for the
+session. Sessions that began before the scope existed get `403` there until the next sign-in.
+
+**Configuration.** The app tells the SPA where to send in `/api/info`'s `telemetry` block, from
+the optional `client-telemetry` config group; no endpoint (or auth disabled) means the SPA never
+initialises OTLP:
+
+```
+/bored/{dev,prod}/server/client-telemetry/endpoint   # https://<bored host>
+```
+
+The ingest's own variables are a sibling of the `otel` layer, rendered the same way (by
+`scripts/compose-up-ingest.sh`, which passes an allowlist of collector variables through
+`deploy/ingest.env` and keeps every `OTEL_*` away from docker itself):
+
+```
+/bored/devops/{dev,prod}/ingest/OIDC_ISSUER_URL              # alias of server/oidc/issuer-url
+/bored/devops/{dev,prod}/ingest/OIDC_AUDIENCE                # alias of server/oidc/client-id
+/bored/devops/{dev,prod}/ingest/ALLOWED_SERVICE_NAMES        # bored-spa
+/bored/devops/{dev,prod}/ingest/CLAIM_ATTRIBUTES             # sub=user.id,preferred_username=user.name
+/bored/devops/{dev,prod}/ingest/CLIENT_RESOURCE_ATTRIBUTES   # deployment.environment.name=<env>,telemetry_source=client
+/bored/devops/{dev,prod}/ingest/OTEL_EXPORTER_OTLP_ENDPOINT  # alias of /observability/otlp-endpoint
+/bored/devops/{dev,prod}/ingest/OTEL_EXPORTER_OTLP_PROTOCOL  # http/protobuf
+/bored/devops/{dev,prod}/ingest/OTEL_RESOURCE_ATTRIBUTES     # the ingest's own: …,telemetry_source=otlp
+/bored/devops/{dev,prod}/ingest/LOG_OUTPUT                   # otlp
+```
+
+**Never in the deploy gate.** The ingest is its own compose project (`deploy/otlp-ingest.yml`,
+`<project>-ingest`), started after the app without `--wait`; a failure to start it is a warning in
+the deploy log. **Stopping that project is the emergency stop**: the SPA drops its telemetry and
+carries on. Client metrics are refused (`ALLOWED_METRIC_NAMES` empty).
+
 ## Local development
 
 ```bash
