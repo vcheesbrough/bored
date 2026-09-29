@@ -235,6 +235,20 @@ test.describe('client telemetry', () => {
     }
   });
 
+  test('a session refreshed by the request still gets its token', async ({ page }) => {
+    // Drop the access cookie but keep the refresh cookie: the middleware must
+    // take its refresh path, and the token it hands out is the rotated one.
+    await page.context().clearCookies({ name: 'auth' });
+    const res = await page.request.get('/api/telemetry/token');
+    expect(res.status()).toBe(200);
+    const { access_token: token, expires_in } = await res.json();
+    expect(token).toMatch(/^eyJ/);
+    expect(expires_in).toBeGreaterThan(30);
+    // …and it is the one the browser was just given in its cookie.
+    const rotated = (await page.context().cookies()).find((c) => c.name === 'auth');
+    expect(rotated).toBeDefined();
+  });
+
   test('a service.name outside the allowed set is dropped by the ingest', async ({ page }) => {
     // A real session token, as the SPA would get it.
     const tokenRes = await page.request.get('/api/telemetry/token');
@@ -437,6 +451,41 @@ test.describe('client telemetry', () => {
       for (const line of telemetryLines) expect(line).not.toMatch(/eyJ/); // never a JWT
     });
   }
+
+  test('a 401 on one signal refetches the token before the next signal is sent', async ({ page, request }) => {
+    const board = await boardWithCard(request, 'otel-refetch');
+    const cors = {
+      'Access-Control-Allow-Origin': 'https://app',
+      'Access-Control-Allow-Headers': 'authorization, content-type',
+      'Access-Control-Allow-Methods': 'POST',
+    };
+    // Traces are refused, logs accepted: the pass that meets the traces 401
+    // must fetch a token again before it sends the logs batch.
+    const order: string[] = [];
+    page.on('request', (req) => {
+      const path = new URL(req.url()).pathname;
+      if (path === '/api/telemetry/token') order.push('token');
+    });
+    await page.route(`${INGEST}/v1/**`, (route) => {
+      if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+      const logs = route.request().url().endsWith('/v1/logs');
+      order.push(logs ? 'logs' : 'traces');
+      return route.fulfill({
+        status: logs ? 200 : 401,
+        contentType: 'application/json',
+        headers: cors,
+        body: logs ? '{}' : JSON.stringify({ code: 16, message: 'invalid token: expired' }),
+      });
+    });
+    // A card number that does not exist: its failed fetch is an error log,
+    // so the first pass has both a traces and a logs batch.
+    await page.goto(`/boards/${board.name}?card=99999999`);
+    await expect.poll(() => order.includes('logs'), { timeout: 20_000 }).toBe(true);
+    const firstTraces = order.indexOf('traces');
+    const firstLogs = order.indexOf('logs');
+    expect(firstTraces).toBeGreaterThanOrEqual(0);
+    expect(order.slice(firstTraces + 1, firstLogs)).toContain('token');
+  });
 
   test('without telemetry configuration OTLP is never initialised', async ({ page, request }) => {
     const board = await boardWithCard(request, 'otel-off');

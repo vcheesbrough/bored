@@ -30,8 +30,18 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 
 /// Largest body per signal for the unload flush. A `keepalive` request shares
 /// a 64 KiB budget with every other keepalive request still in flight from the
-/// page, and the flush sends two (traces and logs), so each gets under half.
-const KEEPALIVE_BATCH_BYTES: usize = 28 * 1024;
+/// page: the flush sends two (traces and logs), and an ordinary export may be
+/// in flight as a keepalive request too (see [`ROUTINE_KEEPALIVE_BYTES`]), so
+/// 2 × 24 KiB + 16 KiB = 64 KiB at most. A request over the budget is refused
+/// by the browser outright, which would silently lose the panic's log.
+const KEEPALIVE_BATCH_BYTES: usize = 24 * 1024;
+
+/// Largest ordinary export sent as a keepalive request (so leaving the page
+/// mid-export does not cancel it). Larger ones are plain requests.
+const ROUTINE_KEEPALIVE_BYTES: usize = 16 * 1024;
+
+// The budget arithmetic above, checked at compile time.
+const _: () = assert!(2 * KEEPALIVE_BATCH_BYTES + ROUTINE_KEEPALIVE_BYTES <= 64 * 1024);
 
 /// The caps on each signal's outbox.
 const OUTBOX_LIMITS: Limits = Limits {
@@ -401,12 +411,16 @@ async fn tick() {
 }
 
 async fn export_pass(now: f64) {
-    // Nothing is sent before the session is known to be good: a token handed
-    // out by the product is that proof.
-    let Some(token) = ensure_token(now).await else {
-        return;
-    };
     for signal in [Signal::Traces, Signal::Logs] {
+        // The token is read per request, not once per pass: a `401` on the
+        // traces batch drops the cached token, and the logs batch must then
+        // go out with a fresh one — that is the one refresh a `401` gets.
+        // Reusing the refused token would spend it on a token that never
+        // changed. Nothing is sent before the session is known to be good: a
+        // token handed out by the product is that proof.
+        let Some(token) = ensure_token(now).await else {
+            return;
+        };
         let batch = with_state(|state| {
             let endpoint = match &state.phase {
                 Phase::Enabled { endpoint } => endpoint.clone(),
@@ -511,7 +525,7 @@ async fn post(endpoint: &str, signal: Signal, token: &str, body: String) -> (u16
     // taken from the outbox, which the unload flush can then no longer see.
     // Larger batches cannot (keepalive bodies share a 64 KiB budget) and take
     // that small risk.
-    let keepalive = body.len() <= KEEPALIVE_BATCH_BYTES;
+    let keepalive = body.len() <= ROUTINE_KEEPALIVE_BYTES;
     let Some(promise) = start_fetch(&url, &body, token, keepalive, signal_handle.as_ref()) else {
         return (0, None);
     };
