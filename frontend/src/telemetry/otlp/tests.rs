@@ -289,6 +289,7 @@ fn every_attribute_key_is_semconv_or_prefixed() {
         "url.",
         "error.",
         "exception.",
+        "code.",
     ];
     for key in keys::ALL {
         assert!(

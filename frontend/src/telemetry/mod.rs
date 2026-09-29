@@ -248,10 +248,14 @@ fn emit(
     runtime::with_state(|state| state.record_log(&record));
 }
 
-/// Longest panic message exported. Panic messages are the one free text the
-/// SPA sends; bounding it keeps a pathological message from evicting the
-/// outbox (and keeps it well under the keepalive flush's budget).
-const MAX_PANIC_MESSAGE: usize = 2_048;
+/// Where in the source a panic happened: file, line, column. The panic's own
+/// *message* is deliberately not part of it (see [`record_panic`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanicLocation<'a> {
+    pub file: &'a str,
+    pub line: u32,
+    pub column: u32,
+}
 
 /// Record a panic and send it immediately, before the module traps.
 ///
@@ -259,28 +263,29 @@ const MAX_PANIC_MESSAGE: usize = 2_048;
 /// and the module is about to hit `unreachable`. So: a zero-length `panic`
 /// span (child of the current screen's load span, which puts the panic in a
 /// trace with the screen it happened on), a log record inside it with
-/// `exception.type=panic`, then a keepalive flush — the one request that can
-/// still leave once the module has trapped.
-pub fn record_panic(message: &str) {
+/// `exception.type=panic` and the source location, then a keepalive flush —
+/// the one request that can still leave once the module has trapped.
+///
+/// **The panic message is not exported.** It is free text that can format a
+/// value the user typed (`expect("…{title}…")`, a failed `assert_eq!` on a
+/// card body), and every exported record is stamped with the user's identity
+/// by the ingest. The location — a compiled-in source path and line — says
+/// where to look; the message stays in the console for whoever reproduces it.
+pub fn record_panic(location: Option<PanicLocation<'_>>) {
     let screen = runtime::with_state(|state| state.current_screen).flatten();
     let mut span = start_span("panic", SpanKind::Internal, screen);
     span.fail("panic");
-    // Cut on a character boundary: slicing a `str` mid-character panics,
-    // which is the last thing a panic hook may do.
-    let mut end = message.len().min(MAX_PANIC_MESSAGE);
-    while !message.is_char_boundary(end) {
-        end -= 1;
+    let mut attributes = vec![KeyValue::new(otlp::keys::EXCEPTION_TYPE, "panic")];
+    if let Some(location) = location {
+        attributes.push(KeyValue::new(otlp::keys::CODE_FILE_PATH, location.file));
+        attributes.push(KeyValue::new(otlp::keys::CODE_LINE_NUMBER, location.line));
+        attributes.push(KeyValue::new(
+            otlp::keys::CODE_COLUMN_NUMBER,
+            location.column,
+        ));
     }
     let context = span.context();
-    emit(
-        Severity::Error,
-        "wasm panic",
-        vec![
-            KeyValue::new(otlp::keys::EXCEPTION_TYPE, "panic"),
-            KeyValue::new(otlp::keys::EXCEPTION_MESSAGE, &message[..end]),
-        ],
-        context,
-    );
+    emit(Severity::Error, "wasm panic", attributes, context);
     span.end();
     runtime::flush_now();
 }

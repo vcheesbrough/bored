@@ -268,9 +268,15 @@ authenticates the bearer, stamps `user.id`/`user.name`, `deployment.environment.
 
 **The bearer.** The ingest reads only `Authorization: Bearer <access JWT>` with `telemetry:write`
 and the browser client's audience. The SPA gets the session's current access token from
-`GET /api/telemetry/token` (cookie sessions only, `no-store`, refreshed through the normal session
-refresh), reads it per export, and on a `401` refreshes once; a second `401` stops export for the
-session. Sessions that began before the scope existed get `403` there until the next sign-in.
+`GET /api/telemetry/token` (cookie sessions only, `no-store`) and reads it per export. On a `401`
+it drops its cached token and **re-fetches it once**; a second `401` stops export for the session.
+The re-fetch is not a forced OIDC refresh: the route returns the session's current token, which
+the auth middleware rotates only inside its 60 s refresh window. So it recovers what a `401` most
+often is — a cached token that outlived the session's rotation, or one that expired in the
+browser's cache — and anything else (a provider or ingest misconfiguration) fails the second time
+too and stops export, which is the point of the rule. Sessions that began before the scope existed
+get `403` from the route until the next sign-in. The panic record carries the source location
+only, never the panic message (free text that can quote user content).
 
 **Configuration.** The app tells the SPA where to send in `/api/info`'s `telemetry` block, from
 the optional `client-telemetry` config group; no endpoint (or auth disabled) means the SPA never

@@ -243,9 +243,11 @@ fn a_panic_is_logged_inside_a_span_under_the_current_screen() {
     let screen_ctx = screen.context().unwrap();
     drop(screen);
 
-    // A multi-byte character straddling the cut must not panic the hook.
-    let long = "é".repeat(MAX_PANIC_MESSAGE);
-    record_panic(&long);
+    record_panic(Some(PanicLocation {
+        file: "src/components/card.rs",
+        line: 42,
+        column: 7,
+    }));
 
     let logs = test_support::drain(Signal::Logs);
     assert_eq!(logs.len(), 1);
@@ -253,18 +255,30 @@ fn a_panic_is_logged_inside_a_span_under_the_current_screen() {
     assert_eq!(log["body"]["stringValue"], "wasm panic");
     assert_eq!(log["traceId"], screen_ctx.trace_id.to_hex());
     let attrs = log["attributes"].as_array().unwrap();
-    assert!(
+    let value = |key: &str| {
         attrs
             .iter()
-            .any(|a| a["key"] == "exception.type" && a["value"]["stringValue"] == "panic")
+            .find(|a| a["key"] == key)
+            .map(|a| a["value"].clone())
+    };
+    assert_eq!(
+        value("exception.type"),
+        Some(serde_json::json!({"stringValue": "panic"}))
     );
-    let message = attrs
-        .iter()
-        .find(|a| a["key"] == "exception.message")
-        .unwrap()["value"]["stringValue"]
-        .as_str()
-        .unwrap();
-    assert!(message.len() <= MAX_PANIC_MESSAGE);
+    assert_eq!(
+        value("code.file.path"),
+        Some(serde_json::json!({"stringValue": "src/components/card.rs"}))
+    );
+    assert_eq!(
+        value("code.line.number"),
+        Some(serde_json::json!({"intValue": "42"}))
+    );
+    assert_eq!(
+        value("code.column.number"),
+        Some(serde_json::json!({"intValue": "7"}))
+    );
+    // The message is never exported, whatever it says.
+    assert_eq!(value("exception.message"), None);
 
     let spans = test_support::drain(Signal::Traces);
     let panic_span = spans

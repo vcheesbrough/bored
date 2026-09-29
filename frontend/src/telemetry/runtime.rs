@@ -497,7 +497,16 @@ async fn ensure_token(now: f64) -> Option<String> {
 /// navigate the page to the login route — that is the app's decision, made by
 /// its own requests.
 async fn fetch_token() -> Result<shared::TelemetryToken, u16> {
+    // The same 10 s deadline as an export: a backend that accepts the request
+    // and never answers must not hold `exporting` — and with it every later
+    // tick — for the browser's own multi-minute timeout. The body is covered
+    // too, since the signal stays attached until `json()` completes.
+    let controller = web_sys::AbortController::new().ok();
+    let signal = controller.as_ref().map(web_sys::AbortController::signal);
+    let _deadline = controller
+        .map(|controller| gloo_timers::callback::Timeout::new(10_000, move || controller.abort()));
     let response = gloo_net::http::Request::get("/api/telemetry/token")
+        .abort_signal(signal.as_ref())
         .send()
         .await
         .map_err(|_| 0u16)?;

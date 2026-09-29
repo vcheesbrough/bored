@@ -273,7 +273,13 @@ README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
   scope mapping (`authentik/`), login requests it, and the ingest's audience is
   the browser client id. Cost: the page can read a full bored API bearer for
   ≤ 15 min, and "who may send" is "who may use bored" (`bored-{env}-users`) —
-  a per-user opt-out needs a separate telemetry provider.
+  a per-user opt-out needs a separate telemetry provider. The "one refresh" a
+  `401` gets is a *re-fetch* of the session's current token, not a forced OIDC
+  refresh; it recovers a stale cached token, and a misconfiguration fails twice
+  and stops export for the session.
+- **Panics export their location only** (`code.file.path`, line, column), never
+  the panic message — the card first allowed the message as the one exception
+  to "no user content"; review withdrew it, since panics can format user data.
 - **Identity is narrowed** to `user.id` and `user.name` (`CLAIM_ATTRIBUTES`,
   D2); the ingest does not stamp email or full name.
 - **The unload flush is a `keepalive` fetch**, not `sendBeacon` (D3): a beacon

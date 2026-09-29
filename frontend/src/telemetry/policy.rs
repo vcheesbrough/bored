@@ -12,8 +12,11 @@
 //!   `413`, `500` too: drop it.
 //! - **`401` gets one refresh.** Every refusal of the token is `401`, so the
 //!   code cannot tell an expired token from a misconfigured provider: drop the
-//!   batch, fetch a fresh token, and if the next answer is `401` too, stop for
-//!   the session.
+//!   batch, fetch the token again, and if the next answer is `401` too, stop
+//!   for the session. "Again" is a re-fetch from `/api/telemetry/token`, which
+//!   hands out the session's *current* token (rotated by the auth middleware
+//!   inside its refresh window) — not a forced OIDC refresh. It recovers a
+//!   stale cached token; a misconfiguration fails twice and stops, by design.
 //! - **Assume you are a crowd**: after repeated failed batches, give up for the
 //!   rest of the session instead of retrying in lockstep with every other tab.
 //! - **Log transitions, not batches**: the verdicts carry at most one

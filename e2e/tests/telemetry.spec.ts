@@ -342,7 +342,10 @@ test.describe('client telemetry', () => {
       'the panic log record',
     );
     expect(panicLog.body?.stringValue).toBe('wasm panic');
-    expect(String(attr(panicLog.attributes, 'exception.message'))).toContain('deliberate panic');
+    // Where it happened — never the panic's message, which can quote user content.
+    expect(String(attr(panicLog.attributes, 'code.file.path'))).toContain('panic_banner.rs');
+    expect(Number(attr(panicLog.attributes, 'code.line.number'))).toBeGreaterThan(0);
+    expect(attr(panicLog.attributes, 'exception.message')).toBeUndefined();
     // Linked to its trace: the panic span, filed under the screen it hit.
     expect(panicLog.traceId).toBe(screen.traceId);
     const panicSpan = await waitFor(

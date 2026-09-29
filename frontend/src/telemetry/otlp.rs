@@ -50,9 +50,12 @@ pub mod keys {
     pub const ERROR_TYPE: &str = "error.type";
     /// `panic` on the panic hook's log record.
     pub const EXCEPTION_TYPE: &str = "exception.type";
-    /// The panic message — the one piece of free text the SPA ever exports,
-    /// accepted on the card as the exception to "no user content".
-    pub const EXCEPTION_MESSAGE: &str = "exception.message";
+    /// Where a panic happened: the source file, line and column compiled
+    /// into the bundle. Never the panic's message, which can quote user
+    /// content (see `telemetry::record_panic`).
+    pub const CODE_FILE_PATH: &str = "code.file.path";
+    pub const CODE_LINE_NUMBER: &str = "code.line.number";
+    pub const CODE_COLUMN_NUMBER: &str = "code.column.number";
     /// Which screen a screen-load span loaded (`board`, `home`).
     pub const BORED_SCREEN: &str = "bored.screen";
 
@@ -69,7 +72,9 @@ pub mod keys {
         HTTP_RESPONSE_STATUS_CODE,
         ERROR_TYPE,
         EXCEPTION_TYPE,
-        EXCEPTION_MESSAGE,
+        CODE_FILE_PATH,
+        CODE_LINE_NUMBER,
+        CODE_COLUMN_NUMBER,
         BORED_SCREEN,
     ];
 }
@@ -277,6 +282,12 @@ impl From<String> for AnyValue {
 
 impl From<u16> for AnyValue {
     fn from(value: u16) -> Self {
+        Self::Int(i64::from(value))
+    }
+}
+
+impl From<u32> for AnyValue {
+    fn from(value: u32) -> Self {
         Self::Int(i64::from(value))
     }
 }
