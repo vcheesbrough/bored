@@ -44,6 +44,10 @@ RUN sh /app/scripts/test-docker-git-credential.sh
 COPY scripts/compose-up-with-otel.sh scripts/compose-up-with-otel.sh
 COPY scripts/test-compose-up-with-otel.sh scripts/test-compose-up-with-otel.sh
 RUN sh /app/scripts/test-compose-up-with-otel.sh
+# And the client-telemetry ingest's launcher (card #416), tested the same way.
+COPY scripts/compose-up-ingest.sh scripts/compose-up-ingest.sh
+COPY scripts/test-compose-up-ingest.sh scripts/test-compose-up-ingest.sh
+RUN sh /app/scripts/test-compose-up-ingest.sh
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.

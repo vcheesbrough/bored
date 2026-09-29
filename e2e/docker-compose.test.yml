@@ -57,6 +57,16 @@ services:
       # Client telemetry (card #416): the SPA exports to its own origin, where
       # the edge routes OTLP's paths to the ingest.
       BORED__CLIENT_TELEMETRY__ENDPOINT: https://app
+      # The server's own export (card #415), to the same fake receiver, so the
+      # telemetry spec can see a browser span and the server span it caused
+      # in one trace. Literals here are safe: it is the host's docker CLI, not
+      # a compose file, that must never carry OTEL_* (see
+      # scripts/compose-up-with-otel.sh). The environment matches
+      # BORED__OBSERVABILITY__ENVIRONMENT below, as the backend requires.
+      OTEL_SERVICE_NAME: bored
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=test,telemetry_source=otlp
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://receiver:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       # No SOVEREIGN_CONFIG_ACCESS_URL[_FILE] here — the sovereign layer stays
       # off (config.rs falls back to defaults + env), proving the no-sovereign
       # fallback path e2e is meant to exercise.
@@ -79,6 +89,7 @@ services:
       BORED__OIDC__END_SESSION_URL: http://mock-oidc:8080/default/end-session
     depends_on:
       - mock-oidc
+      - receiver
     networks:
       - e2e-net
 

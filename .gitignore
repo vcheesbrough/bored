@@ -13,3 +13,4 @@ lcov.info
 /e2e/playwright-report/
 .cursor/mcp.json
 deploy/otel.env
+deploy/ingest.env

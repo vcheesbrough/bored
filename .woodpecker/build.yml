@@ -278,6 +278,18 @@ steps:
           BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
           sovereign-config render /bored/devops/dev/otel -- \
           ./scripts/compose-up-with-otel.sh -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
+        # The client-telemetry ingest (otlp-collector-oidc, card #416): its
+        # own compose project, started after the app and *never* part of the
+        # deploy gate — no `--wait`, and a failure (the store unreadable, the
+        # image unpullable) is a warning, not a failed deploy. Its settings are
+        # the /bored/devops/dev/ingest layer, handed to the container by
+        # scripts/compose-up-ingest.sh the same way the app's OTEL_* are.
+        # Stopping the `bored-dev-ingest` project is the emergency stop.
+        - |
+          APP_ENV=dev BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev \
+          sovereign-config render /bored/devops/dev/ingest -- \
+          ./scripts/compose-up-ingest.sh -p bored-dev-ingest -f deploy/otlp-ingest.yml up -d --pull always \
+          || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
@@ -321,6 +333,12 @@ steps:
         BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db \
         sovereign-config render /bored/devops/prod/otel -- \
         ./scripts/compose-up-with-otel.sh -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
+      # The client-telemetry ingest, exactly as on dev (see deploy-dev).
+      - |
+        APP_ENV=prod BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored \
+        sovereign-config render /bored/devops/prod/ingest -- \
+        ./scripts/compose-up-ingest.sh -p bored-ingest -f deploy/otlp-ingest.yml up -d --pull always \
+        || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
 
   auto-deploy-dev:
     # Same dev deploy as deploy-dev (via <<: *dev-deploy-base), fired on push.
