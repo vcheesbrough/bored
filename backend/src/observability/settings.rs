@@ -115,6 +115,15 @@ impl Signal {
         }
     }
 
+    /// `OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS` — extra headers for one signal.
+    fn headers_variable(self) -> &'static str {
+        match self {
+            Signal::Traces => "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            Signal::Metrics => "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+            Signal::Logs => "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        }
+    }
+
     /// The path the spec appends to the *shared* endpoint for this signal (a
     /// per-signal endpoint is used exactly as given).
     fn otlp_path(self) -> &'static str {
@@ -418,6 +427,25 @@ where
         }
     }
 
+    // ── Headers ──────────────────────────────────────────────────────────────
+    // Same `key=value,…` shape as the resource attributes. The exporter
+    // silently drops a malformed pair — which, for an `authorization` header,
+    // means exporting unauthenticated and being rejected — so a malformed set
+    // fails here instead. Values can be credentials: the error names the
+    // variable only, never an entry.
+    for variable in std::iter::once("OTEL_EXPORTER_OTLP_HEADERS")
+        .chain(Signal::ALL.iter().map(|signal| signal.headers_variable()))
+    {
+        if let Some(value) = get(variable)
+            && !headers_are_well_formed(value)
+        {
+            return Err(SettingsError::new(
+                variable,
+                "every entry must be `name=value` with a valid header name and percent-encoding",
+            ));
+        }
+    }
+
     // ── Endpoints ────────────────────────────────────────────────────────────
     // Every endpoint that is present must be a URL, whether or not its signal
     // exports — a typo is a typo.
@@ -586,6 +614,24 @@ fn parse_resource_attributes(raw: &str) -> Result<BTreeMap<String, String>, Sett
         }
     }
     Ok(attributes)
+}
+
+/// Whether an `OTEL_EXPORTER_OTLP_*HEADERS` value is a well-formed list:
+/// every non-empty entry is `name=value`, the name a valid HTTP header name,
+/// the value valid percent-encoding that decodes to a valid header value.
+fn headers_are_well_formed(raw: &str) -> bool {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .all(|entry| {
+            let Some((name, value)) = entry.split_once('=') else {
+                return false;
+            };
+            let name_ok = http::HeaderName::from_bytes(name.trim().as_bytes()).is_ok();
+            let value_ok = percent_decode(value.trim())
+                .is_some_and(|decoded| http::HeaderValue::from_str(&decoded).is_ok());
+            name_ok && value_ok
+        })
 }
 
 /// Decode `%XX` escapes. Returns `None` for a truncated or non-hex escape, or
@@ -861,6 +907,30 @@ mod tests {
         assert!(parse_resource_attributes("a=1,a=2").is_err());
         assert!(parse_resource_attributes("a=%zz").is_err());
         assert!(parse_resource_attributes("a=%2").is_err());
+    }
+
+    #[test]
+    fn malformed_headers_fail_startup_without_quoting_them() {
+        for (variable, value) in [
+            ("OTEL_EXPORTER_OTLP_HEADERS", "authorization"),
+            ("OTEL_EXPORTER_OTLP_HEADERS", "bad name=x"),
+            (
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+                "authorization=Bearer%zzsecret",
+            ),
+        ] {
+            let error = decide(with(variable, value))
+                .err()
+                .unwrap_or_else(|| panic!("{variable}={value} should fail"));
+            assert_eq!(error.variable, variable);
+            assert!(!error.to_string().contains("secret"), "{error}");
+            assert!(!error.to_string().contains("authorization"), "{error}");
+        }
+        let ok = with(
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "authorization=Bearer%20token,x-tenant=bored,",
+        );
+        assert!(matches!(decide(ok).unwrap(), Decision::On(_)));
     }
 
     #[test]

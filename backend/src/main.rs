@@ -54,6 +54,8 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 enum StartupError {
     Config(config::ConfigError),
     Telemetry(observability::TelemetryError),
+    /// `run` panicked; the panic hook has already printed where.
+    Panicked,
 }
 
 impl std::fmt::Debug for StartupError {
@@ -61,6 +63,7 @@ impl std::fmt::Debug for StartupError {
         match self {
             StartupError::Config(error) => write!(f, "{error}"),
             StartupError::Telemetry(error) => write!(f, "{error}"),
+            StartupError::Panicked => write!(f, "panicked (see the message above on stderr)"),
         }
     }
 }
@@ -97,20 +100,40 @@ fn main() -> Result<(), StartupError> {
         // sovereign-config call below has a span and every later line is
         // correlated. An invalid variable set stops the process here.
         let telemetry = observability::init()?;
-        let outcome = run(&telemetry).await;
-        if let Err(error) = &outcome {
-            // Said once on stdout (and exported) before the flush below, so the
-            // reason reaches Loki as well as `docker logs`.
-            tracing::error!(error = ?error, "startup failed");
-        }
-        // Always flush, whether we are here after a clean shutdown or a failed
-        // startup — the telemetry of a process going down is the most useful
-        // there is.
+        let outcome = guarded(run(&telemetry)).await;
+        // Always flush, whether we are here after a clean shutdown, a failed
+        // startup or a panic — the telemetry of a process going down is the
+        // most useful there is.
         telemetry.shutdown().await;
         outcome
     });
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     result
+}
+
+/// Run `work` (the process's whole life, `run`), turning a panic into
+/// [`StartupError::Panicked`] and logging any failure once — so `main` always
+/// reaches the telemetry flush, and the reason reaches Loki as well as
+/// `docker logs`.
+///
+/// `catch_unwind` turns a panic inside `run` — the database connect, OIDC
+/// discovery and the TLS listener still `expect` — into a value.
+/// `AssertUnwindSafe` tells the compiler nothing borrowed by `work` is used
+/// after a panic in a way that could observe a half-done update; the only
+/// thing used afterwards is the telemetry handle, whose providers are
+/// internally synchronised. For a panic the default panic hook has already
+/// written its message to stderr; it is not repeated in the log line, because
+/// a panic message is built from whatever the code had in hand (#366).
+async fn guarded(
+    work: impl std::future::Future<Output = Result<(), StartupError>>,
+) -> Result<(), StartupError> {
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(work))
+        .await
+        .unwrap_or(Err(StartupError::Panicked));
+    if let Err(error) = &outcome {
+        tracing::error!(error = ?error, "startup failed");
+    }
+    outcome
 }
 
 /// Load config, connect the database, build the app, serve until SIGTERM or

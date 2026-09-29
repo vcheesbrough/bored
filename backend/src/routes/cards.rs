@@ -292,7 +292,7 @@ pub async fn get_card(
 /// sequential number. Card numbers are globally unique (single counter), so no
 /// board scoping is needed. Used by the frontend when the URL carries
 /// `?card=<number>` instead of the internal ULID.
-#[tracing::instrument(skip_all, fields(bored.card.number = number))]
+#[tracing::instrument(skip_all, fields(bored.card.number = i64::from(number)))]
 pub async fn get_card_by_number(
     State(state): State<AppState>,
     Path(number): Path<u32>,

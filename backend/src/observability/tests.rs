@@ -417,6 +417,32 @@ async fn a_request_with_traceparent_yields_a_server_span_parented_on_it() {
     );
 }
 
+/// Numeric handler fields are exported as numbers. The span bridge turns a
+/// `u64`/`usize` field into a *string* attribute, so they are recorded as
+/// `i64`.
+#[tokio::test]
+async fn numeric_span_fields_are_exported_as_integers() {
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let server = TestServer::new(router().await).unwrap();
+    server
+        .get("/api/cards/by-number/41")
+        .await
+        .assert_status_not_found();
+
+    let spans = pipeline.finished_spans();
+    let handler = spans
+        .iter()
+        .find(|span| span.name == "get_card_by_number")
+        .expect("handler span");
+    let number = handler
+        .attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == "bored.card.number")
+        .map(|kv| kv.value.clone());
+    assert_eq!(number, Some(Value::I64(41)));
+}
+
 #[tokio::test]
 async fn a_request_without_traceparent_starts_its_own_trace() {
     let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");

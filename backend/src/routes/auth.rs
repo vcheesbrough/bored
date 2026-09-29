@@ -289,7 +289,8 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: Cook
         let revocation_span = tracing::info_span!(
             parent: None,
             "logout revocation",
-            bored.revocations = refresh_chain.len(),
+            // As `i64`: the span bridge exports a `usize`/`u64` field as a string.
+            bored.revocations = i64::try_from(refresh_chain.len()).unwrap_or(i64::MAX),
         );
         crate::observability::link_to(&revocation_span, &tracing::Span::current());
         let _revocation_task = tokio::spawn(
