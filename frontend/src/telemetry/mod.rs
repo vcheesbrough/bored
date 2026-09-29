@@ -113,8 +113,17 @@ impl ActiveSpan {
     }
 
     /// The `traceparent` header for a request made inside this span, or `None`
-    /// when telemetry is off — the server then starts its own trace, exactly
-    /// as it did before this module existed.
+    /// once telemetry is known to be off — the server then starts its own
+    /// trace, exactly as it did before this module existed.
+    ///
+    /// **While telemetry is still undecided it is sent.** The first
+    /// `/api/info` answer races the page's initial load, and those load
+    /// requests are exactly the trace most worth having: holding the header
+    /// back would cut every enabled deployment's launch trace in two. The cost
+    /// falls on a deployment with telemetry *off*: its server spans for that
+    /// first second name a browser parent that is then discarded, so Tempo
+    /// shows them under a missing root. Accepted — cosmetic, bounded to the
+    /// launch, and the server spans themselves are complete.
     pub fn traceparent(&self) -> Option<String> {
         self.context().map(|context| context.traceparent())
     }

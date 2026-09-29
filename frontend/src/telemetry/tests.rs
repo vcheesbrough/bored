@@ -184,6 +184,20 @@ fn the_launch_buffer_is_discarded_if_configuration_never_arrives() {
 }
 
 #[test]
+fn traceparent_is_sent_while_undecided_and_withheld_once_off() {
+    test_support::reset();
+    // Undecided: the launch requests carry it, so an enabled deployment's
+    // first trace is whole.
+    let launch = start_span("GET /api/boards", SpanKind::Client, None);
+    assert!(launch.traceparent().is_some());
+    drop(launch);
+    // Decided off: no header, the server starts its own trace.
+    configure(None);
+    let later = start_span("GET /api/boards", SpanKind::Client, None);
+    assert_eq!(later.traceparent(), None);
+}
+
+#[test]
 fn a_traceparent_names_the_span_itself() {
     test_support::reset();
     let span = start_span("GET /api/boards", SpanKind::Client, None);
