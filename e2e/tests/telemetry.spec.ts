@@ -6,11 +6,15 @@ import { apiCreateBoard, apiCreateCard, apiCreateColumn, gotoBoardView, openChoo
 // environment's ingest (`otlp-collector-oidc`), which authenticates the
 // session's bearer, stamps identity and forwards to a collector.
 //
-// In this rig the edge (`app`, a Traefik) routes `/v1/` to the ingest exactly
-// as production does, and the ingest forwards to a fake receiver — a stock
-// OpenTelemetry Collector with a file exporter — whose JSON-lines output is
-// mounted read-only here. Assertions are on what that receiver actually got,
-// never on configuration.
+// In this rig the SPA reaches the ingest at https://collector:4318, cross-origin
+// with CORS allowed for https://app (production serves it same-origin, through
+// Traefik), and the ingest forwards to a fake receiver — a stock OpenTelemetry
+// Collector with a file exporter — whose JSON-lines output is mounted
+// read-only here. Assertions are on what that receiver actually got, never on
+// configuration.
+
+/** The ingest's base URL, as `/api/info` hands it to the SPA in this rig. */
+const INGEST = 'https://collector:4318';
 
 /**
  * Every test here gets a page with a session of its own, signed in through the
@@ -266,7 +270,7 @@ test.describe('client telemetry', () => {
       ['not-bored', forged],
       ['bored-spa', control],
     ]) {
-      const res = await page.request.post('/v1/traces', {
+      const res = await page.request.post(`${INGEST}/v1/traces`, {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         data: body(svc, name),
       });
@@ -279,7 +283,7 @@ test.describe('client telemetry', () => {
     expect(readReceiver().spans.find((s) => s.name === forged)).toBeUndefined();
 
     // And without a bearer, nothing gets in at all.
-    const anonymous = await page.request.post('/v1/traces', {
+    const anonymous = await page.request.post(`${INGEST}/v1/traces`, {
       headers: { 'Content-Type': 'application/json' },
       data: body('bored-spa', `anonymous-${Date.now()}`),
     });
@@ -363,27 +367,29 @@ test.describe('client telemetry', () => {
       const board = await boardWithCard(request, `otel-refuse-${refusal}`);
       const crashes = watchCrashes(page);
       const telemetryLines = watchTelemetryConsole(page);
-      await page.route('**/v1/**', (route) =>
-        refusal === 'network'
-          ? route.abort()
-          : route.fulfill({
-              status: Number(refusal),
-              contentType: 'application/json',
-              headers: refusal === '503' ? { 'Retry-After': '1' } : {},
-              body: JSON.stringify({ code: 16, message: refusal === '401' ? 'invalid token: expired' : 'not ready' }),
-            }),
-      );
+      // The ingest is another origin here, so a refusal the page can *read*
+      // (rather than an opaque CORS failure) carries the CORS headers the real
+      // ingest sends, and the preflight is allowed.
+      const cors = {
+        'Access-Control-Allow-Origin': 'https://app',
+        'Access-Control-Allow-Headers': 'authorization, content-type',
+        'Access-Control-Allow-Methods': 'POST',
+        'Access-Control-Expose-Headers': 'Retry-After',
+      };
+      await page.route(`${INGEST}/v1/**`, (route) => {
+        if (refusal === 'network') return route.abort();
+        if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+        return route.fulfill({
+          status: Number(refusal),
+          contentType: 'application/json',
+          headers: { ...cors, ...(refusal === '503' ? { 'Retry-After': '1' } : {}) },
+          body: JSON.stringify({ code: 16, message: refusal === '401' ? 'invalid token: expired' : 'not ready' }),
+        });
+      });
       await gotoBoardView(page, board.name);
 
       // Let the exporter meet the refusal (first tick is within 5 s).
       await expect.poll(() => telemetryLines.length, { timeout: 20_000 }).toBeGreaterThan(0);
-      if (refusal === '401') {
-        // One refresh, then a second 401 stops export for the session.
-        await expect
-          .poll(() => telemetryLines.some((l) => l.includes('giving up')), { timeout: 20_000 })
-          .toBe(true);
-      }
-
       // The app is untouched: a card can be created and edited, and the edit
       // reaches the server.
       await page.locator('[title="Add card"]').first().click();
@@ -405,6 +411,15 @@ test.describe('client telemetry', () => {
       await page.locator('.navbar-search-input').fill('Telemetry card');
       await expect(page.locator('.card-item', { hasText: 'Telemetry card' })).toBeVisible();
       await expect(page.locator('.card-item', { hasText: 'Made while telemetry fails' })).toBeHidden();
+
+      if (refusal === '401') {
+        // The edits above buffered more telemetry, so a second export is
+        // attempted with a refreshed token; its 401 stops export for the
+        // session — one refresh, never a loop.
+        await expect
+          .poll(() => telemetryLines.some((l) => l.includes('giving up')), { timeout: 20_000 })
+          .toBe(true);
+      }
 
       expect(crashes).toEqual([]);
       // Transitions only: never a line per batch.

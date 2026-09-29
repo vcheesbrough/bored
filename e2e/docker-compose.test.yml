@@ -48,15 +48,19 @@ services:
     networks:
       - e2e-net
 
-  # The image under test. Reached through `app` (the edge below), never
-  # directly: the browser, the OIDC redirect and the tests all use
-  # https://app, as production users go through Traefik.
-  bored:
+  # The image under test, as `app`: the browser, the OIDC redirect and the
+  # tests all use https://app.
+  app:
     image: ${TEST_IMAGE:?TEST_IMAGE must be set}
     environment:
-      # Client telemetry (card #416): the SPA exports to its own origin, where
-      # the edge routes OTLP's paths to the ingest.
-      BORED__CLIENT_TELEMETRY__ENDPOINT: https://app
+      # Client telemetry (card #416). Production serves the ingest on the
+      # app's own origin (Traefik routes `/v1/` to it); here the SPA reaches
+      # it cross-origin, with CORS allowed for https://app on the ingest. A
+      # Traefik edge in this rig was tried and dropped: it exposed a
+      # pre-existing loss of SSE events that made unrelated specs flaky
+      # (follow-up card), and same-origin routing is Traefik's contract, not
+      # bored's.
+      BORED__CLIENT_TELEMETRY__ENDPOINT: https://collector:4318
       # The server's own export (card #415), to the same fake receiver, so the
       # telemetry spec can see a browser span and the server span it caused
       # in one trace. Literals here are safe: it is the host's docker CLI, not
@@ -93,37 +97,6 @@ services:
     networks:
       - e2e-net
 
-  # The edge (card #416): a Traefik doing what production's does on bored's
-  # hostname — OTLP's paths to the ingest, everything else to the app — so the
-  # SPA's telemetry is same-origin here exactly as it is live. Named `app` so
-  # every existing URL, cookie and redirect (https://app/…) is unchanged.
-  app:
-    build:
-      context: ./edge
-      dockerfile_inline: |
-        FROM traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
-        COPY dynamic.yml /etc/traefik/dynamic.yml
-    command:
-      - --entrypoints.websecure.address=:443
-      - --entrypoints.websecure.http.tls=true
-      - --providers.file.filename=/etc/traefik/dynamic.yml
-      # Both backends present self-signed certificates.
-      - --serversTransport.insecureSkipVerify=true
-      - --ping=true
-    healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-    depends_on:
-      bored:
-        condition: service_healthy
-      # Started, never healthy-gated: the ingest is never in a health gate.
-      collector:
-        condition: service_started
-    networks:
-      - e2e-net
-
   # The telemetry ingest, the released image unmodified (card #416), configured
   # as bored's deploy configures it: the browser session's issuer and client
   # id (decision D1), `bored-spa` only, identity narrowed to id and name
@@ -142,6 +115,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://receiver:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       LOG_OUTPUT: stdout
+      # The page is https://app; the ingest is another origin here.
+      CORS_ALLOWED_ORIGINS: https://app
     depends_on:
       - mock-oidc
       - receiver
