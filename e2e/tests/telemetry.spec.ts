@@ -293,9 +293,15 @@ test.describe('client telemetry', () => {
   test('a panic is logged with its trace, and flushed before the tab dies', async ({ page, request }) => {
     const board = await boardWithCard(request, 'otel-panic');
     const since = Date.now();
+    // The page's timers run on a fake clock that only moves when told to, so
+    // the 5 s export tick fires exactly when this test says. After the panic
+    // the clock stays still: the panic hook's own keepalive flush is then the
+    // only way the record can leave.
+    await page.clock.install();
     await gotoBoardView(page, board.name);
-    // Wait for the first export, so the exporter holds a token: the panic's
-    // flush can only use one it already has.
+    // One tick, so the exporter sends the load and holds a token: the panic's
+    // flush can only use a token it already has.
+    await page.clock.runFor(6_000);
     const screen = await waitFor(
       () =>
         readReceiver().spans.find(
@@ -303,6 +309,10 @@ test.describe('client telemetry', () => {
         ),
       'the first export',
     );
+    // Stop the page's clock (installed clocks otherwise keep flowing): from
+    // here no interval fires, so the tick cannot send the panic record.
+    const pageNow = await page.evaluate(() => Date.now());
+    await page.clock.pauseAt(pageNow + 100);
 
     await page.evaluate(() => window.dispatchEvent(new Event('bored:test-panic')));
     await expect(page.locator('#panic-banner')).toBeVisible();
