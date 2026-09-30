@@ -258,9 +258,12 @@ test.describe('returning to a board', () => {
 // coalesced chunk, so the effects run per event. That browser property is
 // pinned by its own spec below. This spec does not force or detect
 // coalescing; it drives a burst of mutations fired the moment the stream
-// answers, while the column and card snapshots may still be in flight, and
-// requires every one of them to land on top of a card snapshot held back
-// until after the burst (the #452 race, forced every run).
+// answers and requires every one of them to land on top of a card snapshot
+// held back until after the burst (#452's column-level card gate, forced
+// every run). The board-level column and link gates are not forced here: a
+// column's cards are only fetched once the columns snapshot has rendered it,
+// so the rename below is ordinary traffic by then. Those gates are covered by
+// the frontend's `land_columns` / `land_links` tests.
 test.describe('a burst of events right after load', () => {
   test('every event of a burst fired as the stream opens is applied', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `sse-burst-${Date.now()}`);
@@ -344,8 +347,9 @@ test.describe('a burst of events right after load', () => {
     // Card and column events back to back, interleaved with the audit event
     // every mutation also broadcasts. The audit events are not asserted: the
     // only reader is the history drawer, which ignores them while closed, and
-    // it stays closed here. What must land is every card and column change.
-    // The edits and the rename go
+    // it stays closed here. What must land is every card and column change
+    // (the rename is not held by any gate; see above). The edits and the
+    // rename go
     // concurrently; the creates are sequential (every create bumps the global
     // `card_counter` and computes a top-of-column position, and concurrent
     // creates fail with a 500 — card #456; that holds across boards, so this
