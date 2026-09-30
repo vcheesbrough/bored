@@ -9,7 +9,16 @@ http:
       rule: "PathPrefix(`/`)"
       entryPoints: [websecure]
       tls: {}
+      middlewares: [edge-marker]
       service: app
+  middlewares:
+    # Test-only: marks every response that came through this edge, so the
+    # SSE spec can prove the stream it watched really crossed the proxy.
+    # bored speaks HTTP/2 itself, so the protocol alone could not tell.
+    edge-marker:
+      headers:
+        customResponseHeaders:
+          X-E2e-Edge: traefik
   services:
     app:
       loadBalancer:

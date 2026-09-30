@@ -284,7 +284,16 @@ test.describe('a burst of events right after load', () => {
     );
     // Not `gotoBoardView`: the burst must not wait for the columns to render.
     await page.goto(`/boards/${board.name}`);
-    await eventsReady;
+    const events = await eventsReady;
+
+    // The rig's point: the stream crossed the Traefik edge (its marker
+    // header, see e2e/edge/dynamic.yml) over HTTP/2 to the browser.
+    expect(await events.headerValue('x-e2e-edge')).toBe('traefik');
+    expect(
+      await page.evaluate(
+        () => (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming).nextHopProtocol
+      )
+    ).toBe('h2');
 
     // Card and column events back to back, interleaved with the audit event
     // every mutation also broadcasts. The audit events are not asserted: the
