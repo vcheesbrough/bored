@@ -119,9 +119,13 @@ services:
       # bored presents a self-signed certificate; the homelab Traefik skips
       # verification of its backends the same way.
       - --serversTransport.insecureSkipVerify=true
-      - --ping=true
+    # Healthy only once a request crosses the edge and reaches the app, not
+    # merely when Traefik is up: an edge with no routes (pipeline 325) must
+    # stop the run at startup rather than fail every spec with 404s.
+    # The edge serves Traefik's self-signed default certificate, hence
+    # --no-check-certificate.
     healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://localhost/health"]
       interval: 2s
       timeout: 3s
       retries: 30
