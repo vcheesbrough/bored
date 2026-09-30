@@ -9,8 +9,11 @@ import {
   apiListLinks,
   apiMoveCard,
   closeChooser,
+  dropSseEvents,
+  expectSseDropped,
   gotoBoardView,
   openChooser,
+  silenceSse,
 } from './helpers';
 
 // Card predecessor/successor links — iteration 42 / card #76.
@@ -349,19 +352,6 @@ test.describe('card links', () => {
   // reach the delete these tests are about, and would test the refusal instead.
   test.describe('deleting a linked card with no broadcast', () => {
     /**
-     * Point the event stream at a board id nothing will ever publish to. The
-     * backend filters by that id and validates nothing, so the response is a
-     * perfectly ordinary, perfectly silent SSE stream.
-     */
-    async function silenceSse(page: import('@playwright/test').Page) {
-      await page.route('**/api/events*', route => {
-        const url = new URL(route.request().url());
-        url.searchParams.set('board_id', 'no-such-board');
-        return route.continue({ url: url.toString() });
-      });
-    }
-
-    /**
      * Watch for reactive-disposal panics. Pruning the link index on delete
      * notifies the badges of the card being unmounted, so this path is one trap
      * away from a wedged tab — and a wedged tab fails silently, by making every
@@ -497,33 +487,8 @@ test.describe('card links', () => {
     });
     page.on('pageerror', err => panics.push(String(err)));
 
-    // Swallow every `card_link_deleted` before the app can see it. The board
-    // installs a single `onmessage` handler, so wrapping that setter is enough.
-    await page.addInitScript(() => {
-      const Native = window.EventSource;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).EventSource = function (...args: unknown[]) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const es = new (Native as any)(...args);
-        Object.defineProperty(es, 'onmessage', {
-          set(handler: (ev: MessageEvent) => void) {
-            Native.prototype.addEventListener.call(es, 'message', (ev: Event) => {
-              const msg = ev as MessageEvent;
-              try {
-                if (JSON.parse(msg.data)?.type === 'card_link_deleted') return;
-              } catch {
-                /* not JSON — pass it through untouched */
-              }
-              handler(msg);
-            });
-          },
-          configurable: true,
-        });
-        return es;
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).EventSource.prototype = Native.prototype;
-    });
+    // Swallow every `card_link_deleted` before the app can see it.
+    await dropSseEvents(page, 'card_link_deleted');
 
     const eventsReady = page.waitForResponse(
       response =>
@@ -556,6 +521,9 @@ test.describe('card links', () => {
     await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
       expect.objectContaining({ predecessor_id: partner.id, successor_id: other.id }),
     ]);
+    // And the link event really was withheld: were the filter bypassed, the
+    // ordinary `CardLinkDeleted` handler would have done the work instead.
+    await expectSseDropped(page);
     expect(panics).toEqual([]);
 
     // The tab still reacts — a wedged executor would repaint nothing. A query
@@ -671,11 +639,7 @@ test.describe('card links', () => {
       // to — a dead stream would make the tab refuse the delete outright).
       const b = await linkedBoard(request, 'links-col-del-local');
       const panics = watchForPanics(page);
-      await page.route('**/api/events*', route => {
-        const url = new URL(route.request().url());
-        url.searchParams.set('board_id', 'no-such-board');
-        return route.continue({ url: url.toString() });
-      });
+      await silenceSse(page);
       await gotoBoardView(page, b.board.name);
       await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveText([
         `↑#${b.a.number}`,
@@ -718,31 +682,7 @@ test.describe('card links', () => {
       // shape iteration 54 found — while the whole doomed column unmounts.
       const b = await linkedBoard(request, 'links-col-del-lagged');
       const panics = watchForPanics(page);
-      await page.addInitScript(() => {
-        const Native = window.EventSource;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).EventSource = function (...args: unknown[]) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const es = new (Native as any)(...args);
-          Object.defineProperty(es, 'onmessage', {
-            set(handler: (ev: MessageEvent) => void) {
-              Native.prototype.addEventListener.call(es, 'message', (ev: Event) => {
-                const msg = ev as MessageEvent;
-                try {
-                  if (JSON.parse(msg.data)?.type === 'card_link_deleted') return;
-                } catch {
-                  /* not JSON — pass it through untouched */
-                }
-                handler(msg);
-              });
-            },
-            configurable: true,
-          });
-          return es;
-        };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).EventSource.prototype = Native.prototype;
-      });
+      await dropSseEvents(page, 'card_link_deleted');
       const eventsReady = page.waitForResponse(
         response =>
           response.request().method() === 'GET' &&
@@ -771,6 +711,8 @@ test.describe('card links', () => {
       await expect(
         expanded.locator('.link-group[data-side="after"] .link-chip-card')
       ).toHaveText(`#${b.r.number} Survivor card`);
+      // The link events really were withheld, so the column event did this.
+      await expectSseDropped(page);
       // The liveness check also lets go of the expanded partner (a query it
       // fails releases the pin), so the collapsed badges can be read after.
       await expectLive(page);
@@ -830,11 +772,7 @@ test.describe('card links', () => {
       // Somewhere to land that is not the deleted board.
       const landing = await apiCreateBoard(request, `links-board-del-landing-${Date.now()}`);
       const panics = watchForPanics(page);
-      await page.route('**/api/events*', route => {
-        const url = new URL(route.request().url());
-        url.searchParams.set('board_id', 'no-such-board');
-        return route.continue({ url: url.toString() });
-      });
+      await silenceSse(page);
       await gotoBoardView(page, b.board.name);
       await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(2);
 

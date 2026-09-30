@@ -1,4 +1,4 @@
-import { APIRequestContext, Page } from '@playwright/test';
+import { APIRequestContext, Page, expect } from '@playwright/test';
 
 // ── API helpers (direct HTTP, no browser needed) ──────────────────────────
 
@@ -181,4 +181,82 @@ export async function openChooser(page: Page) {
 export async function closeChooser(page: Page) {
   await page.locator('.chooser-backdrop').click();
   await page.waitForSelector('.board-chooser', { state: 'hidden' });
+}
+
+// ── SSE fixtures for "the tab missed events" tests ────────────────────────
+
+/**
+ * Point the page's event stream at a board id nothing will ever publish to.
+ * The backend filters by that id and validates nothing, so the response is a
+ * perfectly ordinary, perfectly silent SSE stream: connected (so the tab still
+ * allows mutations) but never told anything about its own board. Stands in for
+ * a receiver lagging out of the backend's 128-slot broadcast channel.
+ */
+export async function silenceSse(page: Page) {
+  await page.route('**/api/events*', route => {
+    const url = new URL(route.request().url());
+    url.searchParams.set('board_id', 'no-such-board');
+    return route.continue({ url: url.toString() });
+  });
+}
+
+/**
+ * Drop every SSE message whose JSON `type` is `type` before the app sees it —
+ * what a lagged receiver sees when exactly those events fell out of the
+ * broadcast channel. Must be called before the page navigates.
+ *
+ * The app is wrapped at both ways it could subscribe (`onmessage` and
+ * `addEventListener('message', …)`), and every drop is counted in
+ * `window.__bored_sse_dropped`. Pair it with {@link expectSseDropped}: if the
+ * app ever subscribes some third way, the wrapper would silently filter
+ * nothing and the test would pass without testing anything — the count is
+ * what makes that failure loud.
+ */
+export async function dropSseEvents(page: Page, type: string) {
+  await page.addInitScript((dropType: string) => {
+    const Native = window.EventSource;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    w.__bored_sse_dropped = 0;
+    /** Wrap a message handler so dropped events never reach it. */
+    const filtered = (handler: (ev: MessageEvent) => void) => (ev: Event) => {
+      const msg = ev as MessageEvent;
+      try {
+        if (JSON.parse(msg.data)?.type === dropType) {
+          w.__bored_sse_dropped += 1;
+          return;
+        }
+      } catch {
+        /* not JSON — pass it through untouched */
+      }
+      handler(msg);
+    };
+    w.EventSource = function (...args: unknown[]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const es = new (Native as any)(...args);
+      Object.defineProperty(es, 'onmessage', {
+        set(handler: (ev: MessageEvent) => void) {
+          Native.prototype.addEventListener.call(es, 'message', filtered(handler));
+        },
+        configurable: true,
+      });
+      es.addEventListener = (
+        kind: string,
+        handler: (ev: MessageEvent) => void,
+        options?: unknown
+      ) =>
+        kind === 'message'
+          ? Native.prototype.addEventListener.call(es, kind, filtered(handler), options)
+          : Native.prototype.addEventListener.call(es, kind, handler, options);
+      return es;
+    };
+    w.EventSource.prototype = Native.prototype;
+  }, type);
+}
+
+/** Assert {@link dropSseEvents} actually intercepted something. */
+export async function expectSseDropped(page: Page) {
+  await expect
+    .poll(async () => page.evaluate(() => (window as any).__bored_sse_dropped ?? 0))
+    .toBeGreaterThan(0);
 }
