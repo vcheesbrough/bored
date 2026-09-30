@@ -112,6 +112,10 @@ services:
       - --entrypoints.websecure.address=:443
       - --entrypoints.websecure.http.tls=true
       - --providers.file.filename=/etc/traefik/dynamic.yml
+      # The file is baked into the image and never changes, so no watcher:
+      # on the shared CI host inotify instances run out, and Traefik then
+      # starts with no routes at all (pipeline 325).
+      - --providers.file.watch=false
       # bored presents a self-signed certificate; the homelab Traefik skips
       # verification of its backends the same way.
       - --serversTransport.insecureSkipVerify=true

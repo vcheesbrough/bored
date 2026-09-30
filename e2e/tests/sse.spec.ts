@@ -259,7 +259,8 @@ test.describe('returning to a board', () => {
 // pinned by its own spec below. This spec does not force or detect
 // coalescing; it drives a burst of mutations fired the moment the stream
 // answers, while the column and card snapshots may still be in flight, and
-// requires every one of them to land (the #452 race).
+// requires every one of them to land on top of a card snapshot held back
+// until after the burst (the #452 race, forced every run).
 test.describe('a burst of events right after load', () => {
   test('every event of a burst fired as the stream opens is applied', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `sse-burst-${Date.now()}`);
@@ -276,6 +277,50 @@ test.describe('a burst of events right after load', () => {
     });
     page.on('pageerror', err => panics.push(String(err)));
 
+    // Force the race rather than hope for it: the column's card snapshot is
+    // read from the server at once, but handed to the page only after the
+    // whole burst has happened. The page therefore always holds a snapshot
+    // older than the events it has already been sent, which is exactly the
+    // case #452's gate must reconcile (without it, the snapshot would
+    // overwrite the edits and drop the creates).
+    let snapshotRead!: () => void;
+    const snapshotReadP = new Promise<void>(resolve => (snapshotRead = resolve));
+    let releaseSnapshot!: () => void;
+    const released = new Promise<void>(resolve => (releaseSnapshot = resolve));
+    // Counts the board's non-audit events as the page receives them (an extra
+    // listener; the app's own `onmessage` is untouched), so the snapshot is
+    // released only once the page has been sent the whole burst.
+    await page.addInitScript(() => {
+      const Native = window.EventSource;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__boardEvents = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).EventSource = function (...args: unknown[]) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const es = new (Native as any)(...args);
+        es.addEventListener('message', (m: MessageEvent) => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            if (JSON.parse(m.data).type !== 'audit_appended') (window as any).__boardEvents++;
+          } catch {
+            /* not a board event */
+          }
+        });
+        return es;
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).EventSource.prototype = Native.prototype;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      Object.assign((window as any).EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+    });
+    await page.route(`**/api/columns/${col.id}/cards`, async route => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      const response = await route.fetch();
+      snapshotRead();
+      await released;
+      await route.fulfill({ response });
+    });
+
     const eventsReady = page.waitForResponse(
       response =>
         response.request().method() === 'GET' &&
@@ -285,6 +330,7 @@ test.describe('a burst of events right after load', () => {
     // Not `gotoBoardView`: the burst must not wait for the columns to render.
     await page.goto(`/boards/${board.name}`);
     const events = await eventsReady;
+    await snapshotReadP;
 
     // The rig's point: the stream crossed the Traefik edge (its marker
     // header, see e2e/edge/dynamic.yml) over HTTP/2 to the browser.
@@ -315,6 +361,15 @@ test.describe('a burst of events right after load', () => {
         for (let i = 0; i < CREATED; i++) await apiCreateCard(request, col.id, `# Created ${i}`);
       })(),
     ]);
+
+    // Only once the page has been sent every card and column event of the
+    // burst may the stale snapshot land, so they are all held behind it.
+    const BURST_EVENTS = EXISTING + 1 + CREATED;
+    await expect
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .poll(() => page.evaluate(() => (window as any).__boardEvents as number), { timeout: 5000 })
+      .toBeGreaterThanOrEqual(BURST_EVENTS);
+    releaseSnapshot();
 
     const TOTAL = EXISTING + CREATED;
     const cards = page.locator('.card-item');
