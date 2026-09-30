@@ -163,11 +163,16 @@ function pageClockMs(page: Page): Promise<number> {
 }
 
 /**
- * Whether an OTLP nanosecond timestamp is at or after a page-clock mark. The
- * 1 ms allowance absorbs float rounding between the two conversions to
- * nanoseconds; anything from an earlier test is seconds older.
+ * Whether an OTLP nanosecond timestamp is a page-clock mark taken while the
+ * page's clock is paused: every span started while it stays paused carries
+ * exactly that time. The 1 ms either side absorbs float rounding between the
+ * two conversions to nanoseconds. Two-sided on purpose: a one-sided "at or
+ * after" would also match a span from an earlier fake-clocked page, whose
+ * clock can run seconds ahead of this one (the panic test's runs 6 s ahead),
+ * and the receiver keeps every test's spans.
  */
-const atOrAfter = (nanos: string, markMs: number) => Number(BigInt(nanos) / 1_000n) / 1_000 >= markMs - 1;
+const atPausedMark = (nanos: string, markMs: number) =>
+  Math.abs(Number(BigInt(nanos) / 1_000n) / 1_000 - markMs) <= 1;
 
 /** Poll the receiver until `pick` finds something, or fail after `timeout`. */
 async function waitFor<T>(pick: () => T | undefined, what: string, timeout = 30_000): Promise<T> {
@@ -450,8 +455,9 @@ test.describe('client telemetry', () => {
     await page.clock.pauseAt(pageNow + 100);
 
     // Something new, then leave. The mark is read from the page's own
-    // telemetry clock, not the runner's (see `boardLoad`'s preamble).
-    const beforeChooser = await pageClockMs(page);
+    // telemetry clock, not the runner's (see `boardLoad`'s preamble); with
+    // that clock paused, the chooser span starts at exactly this time.
+    const chooserMark = await pageClockMs(page);
     await openChooser(page);
     await expect(page.locator('.board-chooser')).toContainText(other.name);
     await page.goto('about:blank');
@@ -462,7 +468,7 @@ test.describe('client telemetry', () => {
           (s) =>
             service(s.resource) === 'bored-spa' &&
             s.name === 'screen board chooser' &&
-            atOrAfter(s.startTimeUnixNano, beforeChooser),
+            atPausedMark(s.startTimeUnixNano, chooserMark),
         ),
       'the chooser span, sent on the way out',
       15_000,
