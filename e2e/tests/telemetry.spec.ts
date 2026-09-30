@@ -145,6 +145,14 @@ function boardLoad(boardName: string): ExportedSpan | undefined {
 }
 
 /**
+ * Appended to every wait on `boardLoad`: it walks the trace links, so a
+ * `traceparent` the server stops adopting shows up as "never arrived" there,
+ * and the timeout should say so rather than point only at the exporter.
+ */
+const VIA_TRACE_LINKS =
+  ' — reached via server span → http.client span → screen span, so a traceparent the server did not adopt also ends here';
+
+/**
  * The page's telemetry clock, read in the page: the same
  * `performance.timeOrigin + performance.now()` the SPA stamps spans with, so a
  * span started after this call carries a start time at or after it whatever
@@ -211,7 +219,7 @@ test.describe('client telemetry', () => {
     // is about (server span → http.client span → screen span), so its being
     // found already proves the parent links; the assertions below check the
     // attributes along it.
-    const screen = await waitFor(() => boardLoad(board.name), 'the screen board span');
+    const screen = await waitFor(() => boardLoad(board.name), `the screen board span${VIA_TRACE_LINKS}`);
     expect(screen.parentSpanId ?? '').toBe('');
     expect(attr(screen.attributes, 'bored.screen')).toBe('board');
 
@@ -298,7 +306,7 @@ test.describe('client telemetry', () => {
   }) => {
     const board = await boardWithCard(request, 'otel-after-load');
     await gotoBoardView(page, board.name);
-    await waitFor(() => boardLoad(board.name), 'the board load');
+    await waitFor(() => boardLoad(board.name), `the board load${VIA_TRACE_LINKS}`);
     // A column arriving over SSE mounts a new column view, which fetches its
     // cards — long after the load span ended.
     const later = await apiCreateColumn(request, board.name, 'Later', 1);
@@ -388,7 +396,7 @@ test.describe('client telemetry', () => {
     // One tick, so the exporter sends the load and holds a token: the panic's
     // flush can only use a token it already has.
     await page.clock.runFor(6_000);
-    const screen = await waitFor(() => boardLoad(board.name), 'the first export');
+    const screen = await waitFor(() => boardLoad(board.name), `the first export${VIA_TRACE_LINKS}`);
     // Stop the page's clock (installed clocks otherwise keep flowing): from
     // here no interval fires, so the tick cannot send the panic record.
     const pageNow = await page.evaluate(() => Date.now());
@@ -435,7 +443,7 @@ test.describe('client telemetry', () => {
     // One tick, so the exporter sends the load and holds a token: the unload
     // flush can only use a token it already has.
     await page.clock.runFor(6_000);
-    await waitFor(() => boardLoad(board.name), 'the first export (so a token is cached)');
+    await waitFor(() => boardLoad(board.name), `the first export (so a token is cached)${VIA_TRACE_LINKS}`);
     // Stop the clock: from here no interval fires, so the tick cannot send the
     // chooser's span — the unload flush is the only way it can leave.
     const pageNow = await page.evaluate(() => Date.now());
