@@ -420,6 +420,14 @@ test.describe('the browser the SSE plumbing relies on', () => {
           es.onmessage = m => {
             window.LOG.push('msg ' + m.data);
             queueMicrotask(() => window.LOG.push('micro ' + m.data));
+            // A task queued at the first message: it can only run after the
+            // other two if all three were dispatched without another task
+            // in between — the precondition that they arrived together.
+            if (m.data === 'a') {
+              const ch = new MessageChannel();
+              ch.port1.onmessage = () => window.LOG.push('task');
+              ch.port2.postMessage(0);
+            }
           };
         </script>`,
       })
@@ -432,11 +440,11 @@ test.describe('the browser the SSE plumbing relies on', () => {
     );
     await page.goto('/__sse-probe/page');
     // The stream ends after one body and EventSource reconnects, so only the
-    // first delivery's six entries are compared.
+    // first delivery's seven entries are compared.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const read = () => page.evaluate(() => (window as any).LOG as string[]);
-    await expect.poll(async () => (await read()).length).toBeGreaterThanOrEqual(6);
-    const log = (await read()).slice(0, 6);
-    expect(log).toEqual(['msg a', 'micro a', 'msg b', 'micro b', 'msg c', 'micro c']);
+    await expect.poll(async () => (await read()).length).toBeGreaterThanOrEqual(7);
+    const log = (await read()).slice(0, 7);
+    expect(log).toEqual(['msg a', 'micro a', 'msg b', 'micro b', 'msg c', 'micro c', 'task']);
   });
 });
