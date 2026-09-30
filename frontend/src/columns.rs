@@ -435,9 +435,18 @@ mod tests {
     }
 
     #[test]
-    fn a_prune_that_removes_links_notifies_once() {
-        // And the positive side, which shows the counter can see a write at
-        // all: two doomed links go in a single notification, not one per card.
+    fn a_prune_that_removes_links_notifies_readers() {
+        // The positive control for the test above: it shows the counter can
+        // see a write at all, so "still 1 run" there means "not notified", not
+        // "the counter is blind".
+        //
+        // It does **not** show the prune notifies only once. A lazy `Memo`
+        // recomputes once on the next read however many writes came before
+        // it, so a per-card `remove_touching` loop would pass this too. Doing
+        // it in one write is a cost saving (one wake-up of every link reader
+        // per column rather than per linked card), not a correctness property,
+        // and counting individual notifications would need an effect
+        // scheduler this host test does not have.
         use std::sync::atomic::Ordering;
         let owner = Owner::new();
         let (columns, _, links) = board(
@@ -451,7 +460,7 @@ mod tests {
         let (memo, runs) = notification_counter(&owner, links);
         remove(&owner, columns, "doomed");
         assert_eq!(memo.get_untracked(), 1, "the memo saw the pruned list");
-        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "the write woke the reader");
     }
 
     #[test]
