@@ -248,3 +248,270 @@ test.describe('returning to a board', () => {
     await expect(shown).not.toContainText('Version two');
   });
 });
+
+// Card #449. Behind a Traefik edge (HTTP/2 to the browser) the board missed
+// events that arrived right after it loaded. Cause: events racing the
+// snapshots they apply to, fixed by card #452's gates (this spec fails every
+// run on the pre-#452 image). The other suspect — several events in one chunk
+// overwriting each other in the board's single `sse_event` signal — was ruled
+// out: Chromium runs a microtask checkpoint after every message event of a
+// coalesced chunk, so the effects run per event. That browser property is
+// pinned by its own spec below. This spec does not force or detect
+// coalescing; it drives a burst of mutations fired the moment the stream
+// answers and requires every one of them to land on top of a card snapshot
+// held back until after the burst (#452's column-level card gate, forced
+// every run). The board-level column and link gates are not forced here: a
+// column's cards are only fetched once the columns snapshot has rendered it,
+// so the rename below is ordinary traffic by then. Those gates are covered by
+// the frontend's `land_columns` / `land_links` tests.
+test.describe('a burst of events right after load', () => {
+  test('every event of a burst fired as the stream opens is applied', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `sse-burst-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Burst');
+    const EXISTING = 5;
+    const existing = [];
+    for (let i = 0; i < EXISTING; i++) {
+      existing.push(await apiCreateCard(request, col.id, `# Existing ${i}`));
+    }
+
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    // Force the race rather than hope for it: the column's card snapshot is
+    // read from the server at once, but handed to the page only after the
+    // whole burst has happened. The page therefore always holds a snapshot
+    // older than the events it has already been sent, which is exactly the
+    // case #452's gate must reconcile (without it, the snapshot would
+    // overwrite the edits and drop the creates).
+    let snapshotRead!: () => void;
+    const snapshotReadP = new Promise<void>(resolve => (snapshotRead = resolve));
+    let releaseSnapshot!: () => void;
+    const released = new Promise<void>(resolve => (releaseSnapshot = resolve));
+    // Counts the board's non-audit events as the page receives them (an extra
+    // listener; the app's own `onmessage` is untouched), so the snapshot is
+    // released only once the page has been sent the whole burst.
+    await page.addInitScript(() => {
+      const Native = window.EventSource;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__boardEvents = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).EventSource = function (...args: unknown[]) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const es = new (Native as any)(...args);
+        es.addEventListener('message', (m: MessageEvent) => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            if (JSON.parse(m.data).type !== 'audit_appended') (window as any).__boardEvents++;
+          } catch {
+            /* not a board event */
+          }
+        });
+        return es;
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).EventSource.prototype = Native.prototype;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      Object.assign((window as any).EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+    });
+    await page.route(`**/api/columns/${col.id}/cards`, async route => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      const response = await route.fetch();
+      snapshotRead();
+      await released;
+      await route.fulfill({ response });
+    });
+
+    const eventsReady = page.waitForResponse(
+      response =>
+        response.request().method() === 'GET' &&
+        response.url().includes(`/api/events?board_id=${board.id}`) &&
+        response.ok()
+    );
+    // Not `gotoBoardView`: the burst must not wait for the columns to render.
+    await page.goto(`/boards/${board.name}`);
+    const events = await eventsReady;
+    await snapshotReadP;
+
+    // The rig's point: the stream crossed the Traefik edge (its marker
+    // header, see e2e/edge/dynamic.yml) over HTTP/2 to the browser.
+    expect(await events.headerValue('x-e2e-edge')).toBe('traefik');
+    expect(
+      await page.evaluate(
+        () => (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming).nextHopProtocol
+      )
+    ).toBe('h2');
+
+    // Card and column events back to back, interleaved with the audit event
+    // every mutation also broadcasts. The audit events are not asserted: the
+    // only reader is the history drawer, which ignores them while closed, and
+    // it stays closed here. What must land is every card and column change
+    // (the rename is not held by any gate; see above). The edits and the
+    // rename go
+    // concurrently; the creates are sequential (every create bumps the global
+    // `card_counter` and computes a top-of-column position, and concurrent
+    // creates fail with a 500 — card #456; that holds across boards, so this
+    // also relies on the suite's single worker), but run alongside the edits
+    // without waiting on the page.
+    const CREATED = 5;
+    await Promise.all([
+      ...existing.map((card, i) => apiUpdateCard(request, card.id, { body: `# Edited ${i}` })),
+      request
+        .put(`/api/columns/${col.id}`, { data: { name: 'Burst renamed' } })
+        .then(res => expect(res.ok()).toBe(true)),
+      (async () => {
+        for (let i = 0; i < CREATED; i++) await apiCreateCard(request, col.id, `# Created ${i}`);
+      })(),
+    ]);
+
+    // Only once the page has been sent every card and column event of the
+    // burst may the stale snapshot land, so they are all held behind it.
+    const BURST_EVENTS = EXISTING + 1 + CREATED;
+    await expect
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .poll(() => page.evaluate(() => (window as any).__boardEvents as number), { timeout: 5000 })
+      .toBeGreaterThanOrEqual(BURST_EVENTS);
+    releaseSnapshot();
+
+    const TOTAL = EXISTING + CREATED;
+    const cards = page.locator('.card-item');
+    await expect(cards).toHaveCount(TOTAL, { timeout: 5000 });
+    for (let i = 0; i < EXISTING; i++) {
+      await expect(cards.filter({ hasText: `Edited ${i}` })).toHaveCount(1);
+    }
+    for (let i = 0; i < CREATED; i++) {
+      await expect(cards.filter({ hasText: `Created ${i}` })).toHaveCount(1);
+    }
+    await expect(page.locator('.column-name')).toHaveText('Burst renamed');
+    await expect(page.locator('.card-count-badge').first()).toHaveText(String(TOTAL));
+
+    // Still alive: the search repaints the list both ways.
+    const search = page.locator('.navbar-search-input');
+    await search.fill('Created 3');
+    await expect(cards).toHaveCount(1);
+    await search.fill('');
+    await expect(cards).toHaveCount(TOTAL);
+    expect(panics).toEqual([]);
+  });
+});
+
+// Card #449. The board keeps the latest SSE event in one signal
+// (`sse_event` in `board_view.rs`) and its effects read it from there, so it
+// relies on the effects running between two message events — including two
+// that reached the browser in the same network chunk, as an HTTP/2 edge may
+// deliver them. Leptos runs effects in microtasks, so this holds exactly as
+// long as the browser performs a microtask checkpoint after each message
+// event. This pins that property on the suite's browser: a stream whose three
+// events arrive in one response body must interleave each message with its
+// own microtask. If it ever fails, the single signal can lose events and must
+// become a queue.
+test.describe('the browser the SSE plumbing relies on', () => {
+  test('runs microtasks between the message events of one chunk', async ({ page }) => {
+    // Both routes are served by Playwright, never by the app: the whole
+    // stream body is delivered at once, which is the coalesced case.
+    await page.route('**/__sse-probe/page', route =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: `<!doctype html><script>
+          window.LOG = [];
+          const es = new EventSource('/__sse-probe/stream');
+          es.onmessage = m => {
+            window.LOG.push('msg ' + m.data);
+            queueMicrotask(() => window.LOG.push('micro ' + m.data));
+            // A task queued at the first message: it can only run after the
+            // other two if all three were dispatched without another task
+            // in between — the precondition that they arrived together.
+            if (m.data === 'a') {
+              const ch = new MessageChannel();
+              ch.port1.onmessage = () => window.LOG.push('task');
+              ch.port2.postMessage(0);
+            }
+          };
+        </script>`,
+      })
+    );
+    await page.route('**/__sse-probe/stream', route =>
+      route.fulfill({
+        contentType: 'text/event-stream',
+        body: 'data: a\n\ndata: b\n\ndata: c\n\n',
+      })
+    );
+    await page.goto('/__sse-probe/page');
+    // The stream ends after one body and EventSource reconnects, so only the
+    // first delivery's seven entries are compared.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const read = () => page.evaluate(() => (window as any).LOG as string[]);
+    await expect.poll(async () => (await read()).length).toBeGreaterThanOrEqual(7);
+    const log = (await read()).slice(0, 7);
+    // The property: each message is followed by its own microtask. A failure
+    // here means the single `sse_event` signal can lose events.
+    expect(log.filter(entry => entry !== 'task')).toEqual([
+      'msg a', 'micro a', 'msg b', 'micro b', 'msg c', 'micro c',
+    ]);
+    // The precondition: the three were dispatched back to back. A failure
+    // here alone means the probe no longer exercises the coalesced case (a
+    // browser dispatching each event in a task of its own is safe too) —
+    // the probe needs a new way to deliver them together, not the app a queue.
+    expect(log.indexOf('task'), 'events not dispatched back to back; probe inconclusive').toBe(6);
+  });
+});
+
+// Card #449, the app-level counterpart of the probe above: bored's own board
+// view must apply every event of one chunk. The board's real `/api/events`
+// request is answered by Playwright with a single body holding three
+// `card_created` events, released only once the column has rendered its
+// snapshot (so no gate is involved), and all three cards must appear.
+// Control: handing the app the three events from one callback, with no
+// microtask checkpoint between them, leaves only the last one applied —
+// the single signal's dependency on the browser property pinned above.
+test.describe('the board with several events in one chunk', () => {
+  test('applies every event of the chunk', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `sse-chunk-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Chunk');
+    // A real card as the template, so the fabricated ones have every field
+    // `shared::Card` requires; only identity and body differ.
+    const template = await apiCreateCard(request, col.id, '# Template');
+
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    let release!: () => void;
+    const released = new Promise<void>(resolve => (release = resolve));
+    const fabricated = [1, 2, 3].map(i => ({
+      ...template,
+      // ULID-shaped and never equal to a real id (the Z timestamp is far in
+      // the future), so no fabricated card can collide with the template.
+      id: `7ZZZZZZZZZZZZZZZZZZZZZZZZ${i}`,
+      number: template.number + 100_000 + i,
+      body: `# Chunk ${i}`,
+    }));
+    // `retry` keeps the browser from reconnecting (and the board from
+    // reloading after the gap) within the test once this body has ended.
+    const body =
+      'retry: 600000\n\n' +
+      fabricated.map(card => `data: ${JSON.stringify({ type: 'card_created', card })}\n\n`).join('');
+    let served = false;
+    await page.route(`**/api/events?board_id=${board.id}`, async route => {
+      if (served) return route.fallback();
+      served = true;
+      await released;
+      await route.fulfill({ contentType: 'text/event-stream', body });
+    });
+
+    await gotoBoardView(page, board.name);
+    const cards = page.locator('.card-item');
+    await expect(cards).toHaveCount(1);
+    release();
+
+    await expect(cards).toHaveCount(4, { timeout: 5000 });
+    for (const i of [1, 2, 3]) {
+      await expect(cards.filter({ hasText: `Chunk ${i}` })).toHaveCount(1);
+    }
+    expect(panics).toEqual([]);
+  });
+});

@@ -1,0 +1,32 @@
+# The e2e rig's edge (card #449): what production's Traefik does on bored's
+# hostname — terminate TLS (HTTP/2 to the browser) and forward everything to
+# the app over HTTPS, as the `loadbalancer.server.scheme=https` label in
+# deploy/docker-compose.yml does. The telemetry ingest is reached directly
+# (cross-origin) in this rig, so it has no route here.
+#
+# One deliberate difference from production: the router adds the test-only
+# `edge-marker` headers middleware below (production's has no middlewares).
+# It only sets a response header; Traefik's headers middleware keeps
+# streaming responses flushed, so the SSE stream reaches the browser as it
+# would in production.
+http:
+  routers:
+    app:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [edge-marker]
+      service: app
+  middlewares:
+    # Test-only: marks every response that came through this edge, so the
+    # SSE spec can prove the stream it watched really crossed the proxy.
+    # bored speaks HTTP/2 itself, so the protocol alone could not tell.
+    edge-marker:
+      headers:
+        customResponseHeaders:
+          X-E2e-Edge: traefik
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: https://bored:443

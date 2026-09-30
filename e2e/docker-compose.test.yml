@@ -48,18 +48,17 @@ services:
     networks:
       - e2e-net
 
-  # The image under test, as `app`: the browser, the OIDC redirect and the
-  # tests all use https://app.
-  app:
+  # The image under test. Reached through `app` (the Traefik edge below),
+  # never directly: the browser, the OIDC redirect and the tests all use
+  # https://app, as production users go through Traefik.
+  bored:
     image: ${TEST_IMAGE:?TEST_IMAGE must be set}
     environment:
       # Client telemetry (card #416). Production serves the ingest on the
       # app's own origin (Traefik routes `/v1/` to it); here the SPA reaches
-      # it cross-origin, with CORS allowed for https://app on the ingest. A
-      # Traefik edge in this rig was tried and dropped: it exposed a
-      # pre-existing loss of SSE events that made unrelated specs flaky
-      # (card #449), and same-origin routing is Traefik's contract, not
-      # bored's.
+      # it cross-origin, with CORS allowed for https://app on the ingest —
+      # same-origin routing is Traefik's contract, not bored's, so the edge
+      # below routes only the app.
       BORED__CLIENT_TELEMETRY__ENDPOINT: https://collector:4318
       # The server's own export (card #415), to the same fake receiver, so the
       # telemetry spec can see a browser span and the server span it caused
@@ -94,6 +93,45 @@ services:
     depends_on:
       - mock-oidc
       - receiver
+    networks:
+      - e2e-net
+
+  # The edge (card #449): a Traefik in front of the app, as production has, so
+  # the browser talks HTTP/2 to a proxy that re-frames the SSE stream rather
+  # than to bored directly. Without it the suite could not see a loss that
+  # only a proxy exposes — which is how the SSE events dropped behind Traefik
+  # went unnoticed until iteration 64 tried an edge. Named `app` so every
+  # URL, cookie and redirect (https://app/…) is unchanged.
+  app:
+    build:
+      context: ./edge
+      dockerfile_inline: |
+        FROM traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+        COPY dynamic.yml /etc/traefik/dynamic.yml
+    command:
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      # The file is baked into the image and never changes, so no watcher:
+      # on the shared CI host inotify instances run out, and Traefik then
+      # starts with no routes at all (pipeline 325).
+      - --providers.file.watch=false
+      # bored presents a self-signed certificate; the homelab Traefik skips
+      # verification of its backends the same way.
+      - --serversTransport.insecureSkipVerify=true
+    # Healthy only once a request crosses the edge and reaches the app, not
+    # merely when Traefik is up: an edge with no routes (pipeline 325) must
+    # stop the run at startup rather than fail every spec with 404s.
+    # The edge serves Traefik's self-signed default certificate, hence
+    # --no-check-certificate.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "/dev/null", "https://localhost/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      bored:
+        condition: service_healthy
     networks:
       - e2e-net
 

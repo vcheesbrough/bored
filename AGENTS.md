@@ -284,8 +284,9 @@ README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
   D2); the ingest does not stamp email or full name.
 - **The unload flush is a `keepalive` fetch**, not `sendBeacon` (D3): a beacon
   cannot carry `Authorization`.
-- **e2e reaches the ingest cross-origin** (CORS on) rather than through a
-  Traefik edge; see card #449 (SSE events lost behind Traefik).
+- **e2e reaches the ingest cross-origin** (CORS on). The rig's Traefik edge
+  (`app` in `e2e/docker-compose.test.yml`, card #449) routes only the app;
+  same-origin routing of `/v1/` is Traefik's contract, not bored's.
 
 **Rules:**
 
