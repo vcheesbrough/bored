@@ -445,6 +445,73 @@ test.describe('the browser the SSE plumbing relies on', () => {
     const read = () => page.evaluate(() => (window as any).LOG as string[]);
     await expect.poll(async () => (await read()).length).toBeGreaterThanOrEqual(7);
     const log = (await read()).slice(0, 7);
-    expect(log).toEqual(['msg a', 'micro a', 'msg b', 'micro b', 'msg c', 'micro c', 'task']);
+    // The property: each message is followed by its own microtask. A failure
+    // here means the single `sse_event` signal can lose events.
+    expect(log.filter(entry => entry !== 'task')).toEqual([
+      'msg a', 'micro a', 'msg b', 'micro b', 'msg c', 'micro c',
+    ]);
+    // The precondition: the three were dispatched back to back. A failure
+    // here alone means the probe no longer exercises the coalesced case (a
+    // browser dispatching each event in a task of its own is safe too) —
+    // the probe needs a new way to deliver them together, not the app a queue.
+    expect(log.indexOf('task'), 'events not dispatched back to back; probe inconclusive').toBe(6);
+  });
+});
+
+// Card #449, the app-level counterpart of the probe above: bored's own board
+// view must apply every event of one chunk. The board's real `/api/events`
+// request is answered by Playwright with a single body holding three
+// `card_created` events, released only once the column has rendered its
+// snapshot (so no gate is involved), and all three cards must appear.
+// Control: handing the app the three events from one callback, with no
+// microtask checkpoint between them, leaves only the last one applied —
+// the single signal's dependency on the browser property pinned above.
+test.describe('the board with several events in one chunk', () => {
+  test('applies every event of the chunk', async ({ page, request }) => {
+    const board = await apiCreateBoard(request, `sse-chunk-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Chunk');
+    // A real card as the template, so the fabricated ones have every field
+    // `shared::Card` requires; only identity and body differ.
+    const template = await apiCreateCard(request, col.id, '# Template');
+
+    const panics: string[] = [];
+    page.on('console', msg => {
+      if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+    });
+    page.on('pageerror', err => panics.push(String(err)));
+
+    let release!: () => void;
+    const released = new Promise<void>(resolve => (release = resolve));
+    const fabricated = [1, 2, 3].map(i => ({
+      ...template,
+      // ULID-shaped and never equal to a real id (the Z timestamp is far in
+      // the future), so no fabricated card can collide with the template.
+      id: `7ZZZZZZZZZZZZZZZZZZZZZZZZ${i}`,
+      number: template.number + 100_000 + i,
+      body: `# Chunk ${i}`,
+    }));
+    // `retry` keeps the browser from reconnecting (and the board from
+    // reloading after the gap) within the test once this body has ended.
+    const body =
+      'retry: 600000\n\n' +
+      fabricated.map(card => `data: ${JSON.stringify({ type: 'card_created', card })}\n\n`).join('');
+    let served = false;
+    await page.route(`**/api/events?board_id=${board.id}`, async route => {
+      if (served) return route.fallback();
+      served = true;
+      await released;
+      await route.fulfill({ contentType: 'text/event-stream', body });
+    });
+
+    await gotoBoardView(page, board.name);
+    const cards = page.locator('.card-item');
+    await expect(cards).toHaveCount(1);
+    release();
+
+    await expect(cards).toHaveCount(4, { timeout: 5000 });
+    for (const i of [1, 2, 3]) {
+      await expect(cards.filter({ hasText: `Chunk ${i}` })).toHaveCount(1);
+    }
+    expect(panics).toEqual([]);
   });
 });
