@@ -108,8 +108,71 @@ function attr(attrs: Attr[] | undefined, key: string): unknown {
 }
 
 const service = (r: Resource) => attr(r.attributes, 'service.name');
-/** Nanosecond timestamps compared as BigInt — they overflow a double. */
-const after = (nanos: string, sinceMs: number) => BigInt(nanos) >= BigInt(sinceMs) * 1_000_000n;
+
+// Never pick "this test's span" by comparing its timestamp with the test
+// runner's `Date.now()` (card #454). The SPA stamps spans with
+// `performance.timeOrigin + performance.now()`, and in headless Chromium that
+// clock can lag the system wall clock by over a second for a whole document —
+// measured at -1.09 s to -1.19 s in exactly the runs that failed, and ~0 in
+// every run that passed. A span that did arrive then looked older than the
+// test's mark and was never found. Spans are identified by what they did
+// instead (the board they loaded), or against a mark read from the page's own
+// clock.
+
+/**
+ * The `screen board` span of a load of `boardName`, found through the request
+ * that load made: the server's span for `GET /api/boards/<name>/columns` (the
+ * name is unique per test) → its parent, the browser's `http.client` span →
+ * its parent, the screen span.
+ */
+function boardLoad(boardName: string): ExportedSpan | undefined {
+  const { spans } = readReceiver();
+  const byId = new Map(spans.map((s) => [s.spanId, s]));
+  for (const server of spans) {
+    if (
+      service(server.resource) !== 'bored' ||
+      attr(server.attributes, 'http.request.method') !== 'GET' ||
+      attr(server.attributes, 'url.path') !== `/api/boards/${boardName}/columns` ||
+      !server.parentSpanId
+    ) {
+      continue;
+    }
+    const request = byId.get(server.parentSpanId);
+    const screen = request?.parentSpanId ? byId.get(request.parentSpanId) : undefined;
+    if (screen?.name === 'screen board' && service(screen.resource) === 'bored-spa') return screen;
+  }
+  return undefined;
+}
+
+/**
+ * Appended to every wait on `boardLoad`: it walks the trace links, so a
+ * `traceparent` the server stops adopting shows up as "never arrived" there,
+ * and the timeout should say so rather than point only at the exporter.
+ */
+const VIA_TRACE_LINKS =
+  ' — reached via server span → http.client span → screen span, so a traceparent the server did not adopt also ends here';
+
+/**
+ * The page's telemetry clock, read in the page: the same
+ * `performance.timeOrigin + performance.now()` the SPA stamps spans with, so a
+ * span started after this call carries a start time at or after it whatever
+ * that clock's offset from the runner's.
+ */
+function pageClockMs(page: Page): Promise<number> {
+  return page.evaluate(() => performance.timeOrigin + performance.now());
+}
+
+/**
+ * Whether an OTLP nanosecond timestamp is a page-clock mark taken while the
+ * page's clock is paused: every span started while it stays paused carries
+ * exactly that time. The 1 ms either side absorbs float rounding between the
+ * two conversions to nanoseconds. Two-sided on purpose: a one-sided "at or
+ * after" would also match a span from an earlier fake-clocked page, whose
+ * clock can run seconds ahead of this one (the panic test's runs 6 s ahead),
+ * and the receiver keeps every test's spans.
+ */
+const atPausedMark = (nanos: string, markMs: number) =>
+  Math.abs(Number(BigInt(nanos) / 1_000n) / 1_000 - markMs) <= 1;
 
 /** Poll the receiver until `pick` finds something, or fail after `timeout`. */
 async function waitFor<T>(pick: () => T | undefined, what: string, timeout = 30_000): Promise<T> {
@@ -155,20 +218,13 @@ async function boardWithCard(request: import('@playwright/test').APIRequestConte
 test.describe('client telemetry', () => {
   test('a board load is one trace: screen span → http.client span → server span', async ({ page, request }) => {
     const board = await boardWithCard(request, 'otel-trace');
-    const since = Date.now();
     await gotoBoardView(page, board.name);
 
-    // The screen-load span: a browser root.
-    const screen = await waitFor(
-      () =>
-        readReceiver().spans.find(
-          (s) =>
-            service(s.resource) === 'bored-spa' &&
-            s.name === 'screen board' &&
-            after(s.startTimeUnixNano, since),
-        ),
-      'the screen board span',
-    );
+    // The screen-load span: a browser root. Found through the chain this test
+    // is about (server span → http.client span → screen span), so its being
+    // found already proves the parent links; the assertions below check the
+    // attributes along it.
+    const screen = await waitFor(() => boardLoad(board.name), `the screen board span${VIA_TRACE_LINKS}`);
     expect(screen.parentSpanId ?? '').toBe('');
     expect(attr(screen.attributes, 'bored.screen')).toBe('board');
 
@@ -254,15 +310,8 @@ test.describe('client telemetry', () => {
     request,
   }) => {
     const board = await boardWithCard(request, 'otel-after-load');
-    const since = Date.now();
     await gotoBoardView(page, board.name);
-    await waitFor(
-      () =>
-        readReceiver().spans.find(
-          (s) => service(s.resource) === 'bored-spa' && s.name === 'screen board' && after(s.startTimeUnixNano, since),
-        ),
-      'the board load',
-    );
+    await waitFor(() => boardLoad(board.name), `the board load${VIA_TRACE_LINKS}`);
     // A column arriving over SSE mounts a new column view, which fetches its
     // cards — long after the load span ended.
     const later = await apiCreateColumn(request, board.name, 'Later', 1);
@@ -343,7 +392,6 @@ test.describe('client telemetry', () => {
 
   test('a panic is logged with its trace, and flushed before the tab dies', async ({ page, request }) => {
     const board = await boardWithCard(request, 'otel-panic');
-    const since = Date.now();
     // The page's timers run on a fake clock that only moves when told to, so
     // the 5 s export tick fires exactly when this test says. After the panic
     // the clock stays still: the panic hook's own keepalive flush is then the
@@ -353,13 +401,7 @@ test.describe('client telemetry', () => {
     // One tick, so the exporter sends the load and holds a token: the panic's
     // flush can only use a token it already has.
     await page.clock.runFor(6_000);
-    const screen = await waitFor(
-      () =>
-        readReceiver().spans.find(
-          (s) => service(s.resource) === 'bored-spa' && s.name === 'screen board' && after(s.startTimeUnixNano, since),
-        ),
-      'the first export',
-    );
+    const screen = await waitFor(() => boardLoad(board.name), `the first export${VIA_TRACE_LINKS}`);
     // Stop the page's clock (installed clocks otherwise keep flowing): from
     // here no interval fires, so the tick cannot send the panic record.
     const pageNow = await page.evaluate(() => Date.now());
@@ -368,23 +410,25 @@ test.describe('client telemetry', () => {
     await page.evaluate(() => window.dispatchEvent(new Event('bored:test-panic')));
     await expect(page.locator('#panic-banner')).toBeVisible();
 
+    // Looked for in the screen's trace — this test's own, since the screen
+    // span was found through this test's board — so finding it at all proves
+    // the record is linked to the trace of the screen it hit.
     const panicLog = await waitFor(
       () =>
         readReceiver().logs.find(
           (l) =>
             service(l.resource) === 'bored-spa' &&
             attr(l.attributes, 'exception.type') === 'panic' &&
-            after(l.timeUnixNano, since),
+            l.traceId === screen.traceId,
         ),
-      'the panic log record',
+      "the panic log record, in the screen's trace",
     );
     expect(panicLog.body?.stringValue).toBe('wasm panic');
     // Where it happened — never the panic's message, which can quote user content.
     expect(String(attr(panicLog.attributes, 'code.file.path'))).toContain('panic_banner.rs');
     expect(Number(attr(panicLog.attributes, 'code.line.number'))).toBeGreaterThan(0);
     expect(attr(panicLog.attributes, 'exception.message')).toBeUndefined();
-    // Linked to its trace: the panic span, filed under the screen it hit.
-    expect(panicLog.traceId).toBe(screen.traceId);
+    // And to its span: the panic span, filed under the screen it hit.
     const panicSpan = await waitFor(
       () => readReceiver().spans.find((s) => s.spanId === panicLog.spanId && s.name === 'panic'),
       'the panic span',
@@ -397,18 +441,23 @@ test.describe('client telemetry', () => {
     // A second board only the chooser's own fetch can show: seeing it proves
     // that fetch — and so the chooser's span — has finished.
     const other = await apiCreateBoard(request, `otel-unload-other-${Date.now()}`);
-    const since = Date.now();
+    // As in the panic test: the page's timers run on a fake clock, so the 5 s
+    // tick fires only when this test says.
+    await page.clock.install();
     await gotoBoardView(page, board.name);
-    await waitFor(
-      () =>
-        readReceiver().spans.find(
-          (s) => service(s.resource) === 'bored-spa' && s.name === 'screen board' && after(s.startTimeUnixNano, since),
-        ),
-      'the first export (so a token is cached)',
-    );
+    // One tick, so the exporter sends the load and holds a token: the unload
+    // flush can only use a token it already has.
+    await page.clock.runFor(6_000);
+    await waitFor(() => boardLoad(board.name), `the first export (so a token is cached)${VIA_TRACE_LINKS}`);
+    // Stop the clock: from here no interval fires, so the tick cannot send the
+    // chooser's span — the unload flush is the only way it can leave.
+    const pageNow = await page.evaluate(() => Date.now());
+    await page.clock.pauseAt(pageNow + 100);
 
-    // Something new, then leave at once — well inside the next tick.
-    const beforeChooser = Date.now();
+    // Something new, then leave. The mark is read from the page's own
+    // telemetry clock, not the runner's (see `boardLoad`'s preamble); with
+    // that clock paused, the chooser span starts at exactly this time.
+    const chooserMark = await pageClockMs(page);
     await openChooser(page);
     await expect(page.locator('.board-chooser')).toContainText(other.name);
     await page.goto('about:blank');
@@ -419,7 +468,7 @@ test.describe('client telemetry', () => {
           (s) =>
             service(s.resource) === 'bored-spa' &&
             s.name === 'screen board chooser' &&
-            after(s.startTimeUnixNano, beforeChooser),
+            atPausedMark(s.startTimeUnixNano, chooserMark),
         ),
       'the chooser span, sent on the way out',
       15_000,
