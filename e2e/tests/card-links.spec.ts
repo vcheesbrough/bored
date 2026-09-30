@@ -5,9 +5,15 @@ import {
   apiCreateColumn,
   apiCreateLink,
   apiDeleteCard,
+  apiDeleteColumn,
   apiListLinks,
   apiMoveCard,
+  closeChooser,
+  dropSseEvents,
+  expectSseDropped,
   gotoBoardView,
+  openChooser,
+  silenceSse,
 } from './helpers';
 
 // Card predecessor/successor links — iteration 42 / card #76.
@@ -346,19 +352,6 @@ test.describe('card links', () => {
   // reach the delete these tests are about, and would test the refusal instead.
   test.describe('deleting a linked card with no broadcast', () => {
     /**
-     * Point the event stream at a board id nothing will ever publish to. The
-     * backend filters by that id and validates nothing, so the response is a
-     * perfectly ordinary, perfectly silent SSE stream.
-     */
-    async function silenceSse(page: import('@playwright/test').Page) {
-      await page.route('**/api/events*', route => {
-        const url = new URL(route.request().url());
-        url.searchParams.set('board_id', 'no-such-board');
-        return route.continue({ url: url.toString() });
-      });
-    }
-
-    /**
      * Watch for reactive-disposal panics. Pruning the link index on delete
      * notifies the badges of the card being unmounted, so this path is one trap
      * away from a wedged tab — and a wedged tab fails silently, by making every
@@ -494,33 +487,8 @@ test.describe('card links', () => {
     });
     page.on('pageerror', err => panics.push(String(err)));
 
-    // Swallow every `card_link_deleted` before the app can see it. The board
-    // installs a single `onmessage` handler, so wrapping that setter is enough.
-    await page.addInitScript(() => {
-      const Native = window.EventSource;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).EventSource = function (...args: unknown[]) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const es = new (Native as any)(...args);
-        Object.defineProperty(es, 'onmessage', {
-          set(handler: (ev: MessageEvent) => void) {
-            Native.prototype.addEventListener.call(es, 'message', (ev: Event) => {
-              const msg = ev as MessageEvent;
-              try {
-                if (JSON.parse(msg.data)?.type === 'card_link_deleted') return;
-              } catch {
-                /* not JSON — pass it through untouched */
-              }
-              handler(msg);
-            });
-          },
-          configurable: true,
-        });
-        return es;
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).EventSource.prototype = Native.prototype;
-    });
+    // Swallow every `card_link_deleted` before the app can see it.
+    await dropSseEvents(page, 'card_link_deleted');
 
     const eventsReady = page.waitForResponse(
       response =>
@@ -553,6 +521,9 @@ test.describe('card links', () => {
     await expect.poll(async () => apiListLinks(request, board.name)).toEqual([
       expect.objectContaining({ predecessor_id: partner.id, successor_id: other.id }),
     ]);
+    // And the link event really was withheld: were the filter bypassed, the
+    // ordinary `CardLinkDeleted` handler would have done the work instead.
+    await expectSseDropped(page);
     expect(panics).toEqual([]);
 
     // The tab still reacts — a wedged executor would repaint nothing. A query
@@ -569,6 +540,263 @@ test.describe('card links', () => {
     expect(panics).toEqual([]);
 
     await context.close();
+  });
+
+  // ── Deleting a column that holds linked cards — card #371 ───────────────
+  //
+  // #313 one level up. A column delete cascades on the server to its cards and
+  // every link touching them; the server broadcasts one `card_link_deleted` per
+  // link and then a single `column_deleted` — no `card_deleted` for the cards.
+  // The browser used to apply only the column removal itself, so a tab that
+  // missed the link events kept every link of every card in the column, and
+  // partner cards in *surviving* columns went on showing badges and bare `#N`
+  // chips until a reload.
+  //
+  // One board shape serves every test here:
+  //
+  //   Doomed column: A, B            Kept column: P (partner), Q, R
+  //   A → P, B → P   (P's "before" side is entirely doomed cards)
+  //   Q → B          (Q's only link is to a doomed card)
+  //   A → B          (both ends doomed)
+  //   P → R          (neither end doomed: must survive)
+  test.describe('deleting a column that holds linked cards', () => {
+    function watchForPanics(page: import('@playwright/test').Page) {
+      const panics: string[] = [];
+      page.on('console', msg => {
+        if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+      });
+      page.on('pageerror', err => panics.push(String(err)));
+      return panics;
+    }
+
+    async function linkedBoard(request: import('@playwright/test').APIRequestContext, slug: string) {
+      const board = await apiCreateBoard(request, `${slug}-${Date.now()}`);
+      // Positions put the kept column first, so the doomed one is not the
+      // board's only or first column.
+      const kept = await apiCreateColumn(request, board.name, 'Kept col', 0);
+      const doomed = await apiCreateColumn(request, board.name, 'Doomed col', 1);
+      const a = await apiCreateCard(request, doomed.id, '# Doomed A');
+      const b = await apiCreateCard(request, doomed.id, '# Doomed B');
+      const p = await apiCreateCard(request, kept.id, '# Partner card');
+      const q = await apiCreateCard(request, kept.id, '# Lonely card');
+      const r = await apiCreateCard(request, kept.id, '# Survivor card');
+      await apiCreateLink(request, a.id, 'successor', p.id);
+      await apiCreateLink(request, b.id, 'successor', p.id);
+      await apiCreateLink(request, q.id, 'successor', b.id);
+      await apiCreateLink(request, a.id, 'successor', b.id);
+      await apiCreateLink(request, p.id, 'successor', r.id);
+      return { board, kept, doomed, a, b, p, q, r };
+    }
+
+    /** Every assertion that the column's links, and only those, are gone. */
+    async function expectOnlySurvivingLinks(
+      page: import('@playwright/test').Page,
+      request: import('@playwright/test').APIRequestContext,
+      b: Awaited<ReturnType<typeof linkedBoard>>
+    ) {
+      await expect(page.locator('.column-name').filter({ hasText: 'Doomed col' })).toHaveCount(0);
+      await expect(cardWith(page, 'Doomed A')).toHaveCount(0);
+      // The survivors are all still on screen — asserted positively, so the
+      // badge checks below cannot pass merely because the board is empty.
+      await expect(page.locator('.card-item')).toHaveCount(3);
+      // P loses both of its doomed "before" pills and keeps its "after" one.
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-after')).toHaveText([
+        `↓#${b.r.number}`,
+      ]);
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(0);
+      // Q's only link went with B.
+      await expect(cardWith(page, 'Lonely card').locator('.link-badge')).toHaveCount(0);
+      // R's link to P is untouched.
+      await expect(cardWith(page, 'Survivor card').locator('.link-badge')).toHaveText([
+        `↑#${b.p.number}`,
+      ]);
+      // The server agrees: the cascade removed exactly the four doomed links.
+      await expect.poll(async () => apiListLinks(request, b.board.name)).toEqual([
+        expect.objectContaining({ predecessor_id: b.p.id, successor_id: b.r.id }),
+      ]);
+    }
+
+    /**
+     * The tab still reacts: two repaints a wedged executor cannot make. A
+     * query matching no card empties the board — an expanded card included,
+     * since a query it fails releases its pin (card #375) — and clearing it
+     * brings the three survivors back, all collapsed.
+     */
+    async function expectLive(page: import('@playwright/test').Page) {
+      await page.locator('.navbar-search-input').fill('matches no card at all');
+      await expect(page.locator('.card-item')).toHaveCount(0);
+      await page.locator('.navbar-search-input').fill('');
+      await expect(page.locator('.card-item')).toHaveCount(3);
+      await expect(page.locator('.card-item.card-expanded')).toHaveCount(0);
+    }
+
+    test('a chooser delete with no broadcast clears the partner cards', async ({
+      page,
+      request,
+    }) => {
+      // The local path: `BoardChooser`'s delete, with the stream silenced the
+      // way the #313 tests silence it (subscribed to a board nothing publishes
+      // to — a dead stream would make the tab refuse the delete outright).
+      const b = await linkedBoard(request, 'links-col-del-local');
+      const panics = watchForPanics(page);
+      await silenceSse(page);
+      await gotoBoardView(page, b.board.name);
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveText([
+        `↑#${b.a.number}`,
+        `↑#${b.b.number}`,
+      ]);
+
+      await openChooser(page);
+      page.once('dialog', dialog => dialog.accept());
+      await page
+        .locator('.chooser-col-row')
+        .filter({ hasText: 'Doomed col' })
+        .locator('.chooser-col-delete')
+        .click();
+      await closeChooser(page);
+
+      await expectOnlySurvivingLinks(page, request, b);
+      // No chip degraded to a bare `#N`: the partner's editor lists only R.
+      await cardWith(page, 'Partner card').click();
+      const expanded = page.locator('.card-item.card-expanded');
+      await expect(expanded).toHaveCount(1);
+      await expect(expanded.locator('.link-group')).toHaveCount(2);
+      await expect(expanded.locator('.link-group[data-side="before"] .link-chip')).toHaveCount(0);
+      await expect(
+        expanded.locator('.link-group[data-side="after"] .link-chip-card')
+      ).toHaveText(`#${b.r.number} Survivor card`);
+      await expectLive(page);
+      expect(panics).toEqual([]);
+    });
+
+    test('a lagged tab heals from the column event alone', async ({ page, request }) => {
+      // The SSE `ColumnDeleted` arm. A healthy stream has pruned every link
+      // through `card_link_deleted` before the column event lands, so only a
+      // tab that lost those — a receiver lagged out of the backend's 128-slot
+      // broadcast channel — reaches the new code. Simulated exactly as the
+      // #313 lagged-card test does: drop `card_link_deleted` on the way in.
+      //
+      // The delete is remote (the API), so the chooser path is not involved,
+      // and the partner is left **expanded** so the prune notifies its live
+      // `LinkChip`s and `LinkBadges` from the SSE handler — the disposal-trap
+      // shape iteration 54 found — while the whole doomed column unmounts.
+      const b = await linkedBoard(request, 'links-col-del-lagged');
+      const panics = watchForPanics(page);
+      await dropSseEvents(page, 'card_link_deleted');
+      const eventsReady = page.waitForResponse(
+        response =>
+          response.request().method() === 'GET' &&
+          response.url().includes(`/api/events?board_id=${b.board.id}`) &&
+          response.ok()
+      );
+      await gotoBoardView(page, b.board.name);
+      await eventsReady;
+
+      await cardWith(page, 'Partner card').click();
+      const expanded = page.locator('.card-item.card-expanded');
+      await expect(
+        expanded.locator('.link-group[data-side="before"] .link-chip-card')
+      ).toHaveText([`#${b.a.number} Doomed A`, `#${b.b.number} Doomed B`]);
+
+      await apiDeleteColumn(request, b.doomed.id);
+
+      // The column goes over SSE, and its cards' links with it — this tab
+      // never saw a single `card_link_deleted`.
+      await expect(page.locator('.column-name').filter({ hasText: 'Doomed col' })).toHaveCount(0, {
+        timeout: 5000,
+      });
+      await expect(expanded).toHaveCount(1);
+      await expect(expanded.locator('.link-group')).toHaveCount(2);
+      await expect(expanded.locator('.link-group[data-side="before"] .link-chip')).toHaveCount(0);
+      await expect(
+        expanded.locator('.link-group[data-side="after"] .link-chip-card')
+      ).toHaveText(`#${b.r.number} Survivor card`);
+      // The link events really were withheld, so the column event did this.
+      await expectSseDropped(page);
+      // The liveness check also lets go of the expanded partner (a query it
+      // fails releases the pin), so the collapsed badges can be read after.
+      await expectLive(page);
+      await expectOnlySurvivingLinks(page, request, b);
+      expect(panics).toEqual([]);
+    });
+
+    test('a healthy stream deletes a linked column cleanly', async ({ page, request }) => {
+      // The regression guard for the two above: with SSE working, the link
+      // events, the column event and the chooser's own delete all prune the
+      // same links, and the column unmounting between those passes must not
+      // panic. (That the later passes write nothing is pinned by the host test
+      // `a_prune_that_finds_nothing_notifies_no_link_reader`, not here: this
+      // end state is the same either way.)
+      const b = await linkedBoard(request, 'links-col-del-sse-ok');
+      const panics = watchForPanics(page);
+      const eventsReady = page.waitForResponse(
+        response =>
+          response.request().method() === 'GET' &&
+          response.url().includes(`/api/events?board_id=${b.board.id}`) &&
+          response.ok()
+      );
+      await gotoBoardView(page, b.board.name);
+      await eventsReady;
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(2);
+
+      await openChooser(page);
+      page.once('dialog', dialog => dialog.accept());
+      await page
+        .locator('.chooser-col-row')
+        .filter({ hasText: 'Doomed col' })
+        .locator('.chooser-col-delete')
+        .click();
+      await closeChooser(page);
+
+      await expectOnlySurvivingLinks(page, request, b);
+      await expectLive(page);
+      expect(panics).toEqual([]);
+    });
+
+    test('deleting the board being viewed navigates away without a panic', async ({
+      page,
+      request,
+    }) => {
+      // The board half of the card needed no fix, and this test does **not**
+      // prove that — no e2e can: every card at either end of the deleted
+      // board's links goes with it, and the server refuses cross-board links,
+      // so no card on any other board could ever show one of them, stale
+      // index or not. The "no bug" verdict rests on the code: links are
+      // board-scoped, and deleting the board on screen always navigates, which
+      // re-runs `BoardView`'s load effect and empties `board_links` first.
+      //
+      // What this does check is the unmount the delete causes, with linked
+      // cards on screen and the stream silenced as above: no disposal panic,
+      // and a tab that still reacts afterwards.
+      const b = await linkedBoard(request, 'links-board-del');
+      // Somewhere to land that is not the deleted board.
+      const landing = await apiCreateBoard(request, `links-board-del-landing-${Date.now()}`);
+      const panics = watchForPanics(page);
+      await silenceSse(page);
+      await gotoBoardView(page, b.board.name);
+      await expect(cardWith(page, 'Partner card').locator('.link-badge-before')).toHaveCount(2);
+
+      await openChooser(page);
+      page.once('dialog', dialog => dialog.accept());
+      await page
+        .locator('.chooser-board-row')
+        .filter({ hasText: b.board.name })
+        .locator('.chooser-board-delete')
+        .click();
+
+      await expect(page).not.toHaveURL(`/boards/${b.board.name}`);
+      await page.waitForSelector('.columns-row');
+      // Liveness: the chooser opens again and lists the boards as they now
+      // are — two repaints a wedged executor could not make.
+      await openChooser(page);
+      await expect(
+        page.locator('.chooser-board-row').filter({ hasText: landing.name })
+      ).toHaveCount(1);
+      await expect(
+        page.locator('.chooser-board-row').filter({ hasText: b.board.name })
+      ).toHaveCount(0);
+      expect(panics).toEqual([]);
+    });
   });
 
   test('a healthy stream clears a deleted card\'s links exactly once', async ({

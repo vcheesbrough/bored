@@ -67,6 +67,39 @@ impl BoardCardIndex {
             .and_then(|card| card.try_get_untracked())
     }
 
+    /// The ids of every card the column `column_id` currently holds — empty if
+    /// no mounted column has that id (already removed, or never loaded).
+    ///
+    /// Used by [`crate::columns::remove`] to learn which cards a column delete
+    /// takes with it, so their links can be pruned. It must be asked *before*
+    /// the column leaves the board: the column withdraws its entry here in its
+    /// own `on_cleanup`.
+    ///
+    /// Untracked, and `try_*` at every read, for the reasons given on
+    /// [`Self::find_untracked`]: the caller is a write path (the SSE handler or
+    /// the chooser's delete), which must not subscribe to the index, and the
+    /// signals here belong to the columns, not to this index.
+    pub fn card_ids_in_column_untracked(&self, column_id: &str) -> Vec<String> {
+        self.0
+            // `try_with_untracked` borrows the entry list rather than cloning
+            // it; `None` (disposed) and "no such column" both mean no cards.
+            .try_with_untracked(|entries| {
+                entries
+                    .iter()
+                    .find(|(id, _)| id == column_id)
+                    // Copy the column's card-list handle out (`RwSignal` is
+                    // `Copy`), so the borrow ends here.
+                    .map(|(_, cards)| *cards)
+            })
+            .flatten()
+            .and_then(|cards| cards.try_get_untracked())
+            .unwrap_or_default()
+            .into_iter()
+            // Each card is its own signal; a disposed one is simply skipped.
+            .filter_map(|card| card.try_with_untracked(|c| c.id.clone()))
+            .collect()
+    }
+
     /// Distinct tags in use anywhere on the board, case-insensitively deduped
     /// and sorted so the suggestion list is stable between keystrokes.
     pub fn all_tags(&self) -> Vec<String> {

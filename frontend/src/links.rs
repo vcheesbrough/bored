@@ -133,4 +133,37 @@ impl BoardLinkIndex {
         self.links
             .update(|links| links.retain(|link| !link.touches(card_id)));
     }
+
+    /// Drop every link that has any of `card_ids` at either end — one write
+    /// for the lot.
+    ///
+    /// [`Self::remove_touching`] for many cards at once, used when a whole
+    /// column goes (card #371, see [`crate::columns::remove`]). Calling
+    /// `remove_touching` per card would notify every link reader on the board
+    /// once per linked card in the column; this notifies them once, and not at
+    /// all when none of the cards has a link — the common case, and the
+    /// healthy-stream case, where the server's `CardLinkDeleted` broadcasts
+    /// have already emptied the index of these links.
+    ///
+    /// The same soundness argument applies: a link cannot outlive either of
+    /// its cards, so pruning by card can never discard a link the server still
+    /// holds, and a second call finds nothing to do.
+    pub fn remove_touching_any(&self, card_ids: &[String]) {
+        // A link goes if *any* of the ids is one of its ends.
+        let doomed = |link: &shared::CardLink| card_ids.iter().any(|id| link.touches(id));
+        // Check before writing, exactly as `remove_touching` does and for the
+        // same reason: `update` notifies whether or not anything was removed.
+        // The `try_*` form tolerates a disposed index (the board unmounted
+        // while the chooser's DELETE was in flight) by treating it as empty.
+        if !self
+            .links
+            .try_with_untracked(|links| links.iter().any(doomed))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let _ = self
+            .links
+            .try_update(|links| links.retain(|link| !doomed(link)));
+    }
 }
