@@ -5,7 +5,8 @@
 # other script tests. A fake `docker` first on PATH answers `ps -a` from
 # $WORK_DIR/ps ("<project>|<RunningFor>" per line) and the network listing
 # from $WORK_DIR/nets ("<project>|<created unix time>"), returns one id per
-# project for the per-project listings, and records every removal.
+# project for the per-project listings (images included), and records every
+# removal.
 
 set -eu
 
@@ -44,6 +45,13 @@ case "$1 $2" in
         fi
         ;;
     "network inspect") cat "$WORK_DIR/nets" ;;
+    "image ls")
+        # --filter reference=<project>-* → an id naming the project.
+        for a in "$@"; do
+            case "$a" in reference=*) ref="${a#reference=}"; echo "img-${ref%-\*}" ;; esac
+        done
+        ;;
+    "image rm") echo "$*" >> "$WORK_DIR/removed" ;;
     "volume ls") echo "vol-$(project_of "$@")" ;;
     "rm -f" | "network rm" | "volume rm") echo "$*" >> "$WORK_DIR/removed" ;;
     *) echo "unexpected: $*" >&2; exit 2 ;;
@@ -82,7 +90,8 @@ run \
 
 expected_removed="rm -f ctr-bored-e2e-301
 network rm net-bored-e2e-301
-volume rm vol-bored-e2e-301"
+volume rm vol-bored-e2e-301
+image rm -f img-bored-e2e-301"
 if [ "$(cat "$WORK_DIR/removed")" = "$expected_removed" ]; then
     pass "only the hours-old bored-e2e-<n> project, not the current one, is removed"
 else
@@ -115,7 +124,8 @@ printf '%s\n' \
 run "bored-e2e-312|5 minutes ago"
 expected_removed="rm -f ctr-bored-e2e-310
 network rm net-bored-e2e-310
-volume rm vol-bored-e2e-310"
+volume rm vol-bored-e2e-310
+image rm -f img-bored-e2e-310"
 if [ "$(cat "$WORK_DIR/removed")" = "$expected_removed" ]; then
     pass "a container-less project's old network is removed; young, live, current and non-e2e ones kept"
 else

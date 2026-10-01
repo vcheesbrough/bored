@@ -7,7 +7,8 @@
 # price is that nothing reuses a leaked project: a pipeline killed before its
 # `down` leaves containers, a network and volumes behind for good, and every
 # leaked network eats one of the daemon's address pools until `compose up`
-# fails for every project on the host (v-note and the deploys included).
+# fails for every project on the host (v-note and the deploys included), and
+# its built images pile up on disk.
 #
 # Only projects that have existed for ~90 minutes or more are removed. An e2e
 # run takes minutes, so that can never be a live pipeline's stack, which a
@@ -72,4 +73,10 @@ for project in $stale; do
     volumes="$(docker volume ls -q --filter "$label")"
     [ -z "$volumes" ] || docker volume rm $volumes >/dev/null \
         || echo "WARNING: could not remove volumes of $project" >&2
+    # The images compose built for the project, named <project>-<service>
+    # (the run's own `down --rmi local` never ran). The trailing "-" keeps
+    # bored-e2e-35 from matching bored-e2e-350's images.
+    images="$(docker image ls -q --filter "reference=$project-*")"
+    [ -z "$images" ] || docker image rm -f $images >/dev/null \
+        || echo "WARNING: could not remove images of $project" >&2
 done
