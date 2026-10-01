@@ -1,75 +1,41 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push/manual: compute-version → tag-release → build(local, no push) → e2e → publish-image
+# Push/manual: compute-version → build(local, no push) → e2e → publish-image
 #   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
-#   A push never deploys: dev is deployed by hand, from any branch, with a deployment event (card #461). That lets
-#   several branches build at once without racing for the one shared dev environment.
-# Deploy: (validate-deployment ∥ compute-version) → (apply-authentik-blueprint ∥ verify-image) → deploy-*
-#   Deployments do NOT allocate a version — compute-version REUSES the semver tag already on the commit; verify-image
-#   pulls that exact artifact and does NOT rebuild (card #254).
+#   A push never deploys: dev is deployed by hand, from any branch, by promoting the push pipeline (card #461). That
+#   lets several branches build at once without racing for the one shared dev environment.
+# Deploy: (validate-deployment ∥ compute-version) → (apply-authentik-blueprint ∥ verify-image) → deploy-* → tag-release-*
+#   Deployments do NOT build — compute-version names the image the parent push pipeline published; verify-image pulls
+#   that exact artifact and does NOT rebuild (card #254).
 #
-# Release mechanics (see card #176):
-#   - compute-version (plugin) allocates/reuses ONE semver per commit, on every event.
-#   - tag-release pushes the git tag straight after compute-version, BEFORE the build. The tag claims the version: compute
-#     allocates max(tag)+1, so an untagged build would leave the next concurrent push free to allocate (and publish over)
-#     the same version. Two pushes that still race lose at tag-release — the plugin refuses a tag that already exists on a
-#     different commit — before anything is built; re-running the loser allocates the next patch (card #461).
-#   - Deployments (dev/prod) hit the plugin's REUSE path: it finds the tag already on the commit and writes it straight
-#     back to .release-tag, so a deploy promotes the already-built version and never allocates (card #254, #336).
+# Release mechanics (card #461; see scripts/compute-release-tag.sh):
+#   - The version is MAJOR.MINOR from Cargo.toml + PATCH = the number of the push pipeline that built the image:
+#     CI_PIPELINE_NUMBER on push/manual, CI_PIPELINE_PARENT on a deployment (the pipeline it was promoted from).
+#     Pipeline numbers are unique, so concurrent builds can never collide on a version and git holds no state the
+#     build depends on. Patches are sparse (1.69.339, 1.69.352, …) — every pipeline consumes a number.
 #   - RELEASE_TAG is burned into the image (build-arg) and used as the single
 #     docker tag; the git tag is byte-identical.
-#   - A tag therefore does not mean "deployed", nor even "built": a push whose build or e2e fails keeps its tag but never
-#     publishes an image, and verify-image refuses to deploy it.
+#   - The git tag is pushed only after a successful dev OR prod deploy, so a tag means "this version was deployed".
+#     Re-running a push pipeline builds the same commit under a new number; the plugin's push-tag refuses a second
+#     semver tag on one commit, so deploy the build whose number is already tagged, or one the commit has never had.
 
 when:
   - event: [push, deployment, manual]
 
 steps:
   compute-version:
-    # Allocates/reuses ONE semver per commit, on EVERY event — the single place
-    # .release-tag is ever written:
-    #   - push/manual: the commit is untagged, so `compute` allocates
-    #     max(existing MAJOR.MINOR.* tag) + 1.
-    #   - deployment: the commit was already released by its own push pipeline, so
-    #     `compute` finds that tag and REUSES it ("release tag reused for commit
-    #     <sha>"). A deployment therefore promotes the already-built artifact and
-    #     never mints a new version (card #254).
-    # The reuse path needs plugin >= 0.1.1. 0.1.0 listed tags with
-    # `git ls-remote --tags --refs`, which hides the peeled `^{}` lines — the only
-    # ones carrying the commit sha for the annotated tags this plugin creates — so
-    # every commit looked untagged and a deployment allocated an unbuilt tag
-    # (1.35.3 -> 1.35.4) that broke prod. The custom resolve-release-tag step that
-    # worked around that is gone (card #336).
+    # The single place .release-tag is ever written, on EVERY event: MAJOR.MINOR
+    # from Cargo.toml + the building push pipeline's number (see "Release
+    # mechanics" above). Reads no git state, so a deployment of a commit whose
+    # push pipeline never published finds no image and verify-image fails it.
     # This step is read-only, so it needs no ordering against validate-deployment;
     # the deploy-target gate still holds because verify-image depends on both.
     when:
       - event: [push, manual, deployment]
     depends_on: []
-    pull: true
-    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
-    settings:
-      mode: compute
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
-
-  tag-release:
-    # Claims the version compute-version just allocated by pushing its git tag
-    # BEFORE the build — see "Release mechanics" above for why it cannot wait
-    # until a deploy (card #461). Push-only: a deployment reuses a tag that
-    # already exists, so there is nothing to push there. On a re-run of a
-    # tagged commit, compute reuses the tag and push-tag logs "already exists
-    # at commit" and exits 0 (plugin >= 0.1.1, card #336).
-    when:
-      - event: [push, manual]
-    depends_on:
-      - compute-version
-    pull: true
-    image: *version-plugin
-    settings:
-      mode: push-tag
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
+    image: &alpine-image alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
+    commands:
+      - ./scripts/compute-release-tag.sh > .release-tag
+      - echo "RELEASE_TAG=$(cat .release-tag)"
 
   build:
     # Build the image and validate its OCI labels LOCALLY — do not push yet.
@@ -81,10 +47,8 @@ steps:
     # round-trip. Base images are public, so no registry login is needed here.
     when:
       - event: [push, manual]
-    # tag-release, not just compute-version: a push that lost the race for its
-    # version must fail before it builds an image under someone else's tag.
     depends_on:
-      - tag-release
+      - compute-version
     image: &docker-image docker:27-cli@sha256:f56779b4e86550493153cc8642c9c8e40b5d934e43cb5b4ea463aea5245c5c01
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
@@ -154,7 +118,7 @@ steps:
     when:
       - event: deployment
     depends_on: []
-    image: alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
+    image: *alpine-image
     commands:
       - |
         if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
@@ -190,25 +154,16 @@ steps:
           from_secret: bored_mcp_prod_client_secret
 
   verify-image:
-    # A deployment promotes the artifact the push-event pipeline already built,
+    # A deployment promotes the artifact its parent push pipeline already built,
     # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
-    # #254). compute-version's reuse path pins .release-tag to the commit's
-    # already-built version, so the tag we pull here is byte-identical to what
-    # e2e validated and what dev is running. Because publish-image only pushes
-    # AFTER e2e passes, the tag existing in the registry *is* the e2e-passed
-    # signal — a red e2e run never publishes it. Pull it and re-assert its OCI labels; fail loudly
-    # (fail-closed) if it is absent, which means this commit never completed
-    # build/e2e. Since tag-release runs before the build (card #461) that is the
-    # common failure: the commit IS tagged, but its build or e2e went red so
-    # its image was never published.
-    # The other way in is a commit that was never pushed through the pipeline
-    # at all: it has no tag, so compute allocates the next unused patch, which
-    # nothing built — the pull fails the same way. (Only if another pipeline
-    # sits between its own compute-version and tag-release can the two pick the
-    # same patch, and that pipeline cannot have published by the time this
-    # pull runs, so the pull still fails. Should a matching image ever exist,
-    # check-image-metadata.sh's revision label check fails the deploy on the
-    # sha instead.) Still fail-closed.
+    # #254). compute-version names that pipeline's image (PATCH =
+    # CI_PIPELINE_PARENT), so the tag we pull here is byte-identical to what e2e
+    # validated. Because publish-image only pushes AFTER e2e passes, the tag
+    # existing in the registry *is* the e2e-passed signal — a red e2e run never
+    # publishes it. Pull it and re-assert its OCI labels; fail loudly
+    # (fail-closed) if it is absent, which means the parent pipeline never
+    # completed build/e2e. The revision label check catches a parent pipeline
+    # that built a different commit than the one being deployed.
     when:
       - event: deployment
     depends_on:
@@ -224,9 +179,8 @@ steps:
         IMAGE=registry.desync.link/bored:$$RELEASE_TAG
         if ! docker pull "$$IMAGE"; then
           echo "ERROR: $$IMAGE not found in registry." >&2
-          echo "Either this commit's push pipeline went red before publish-image (build or e2e failed), or the commit was never pushed and compute-version allocated the next unused patch ($$RELEASE_TAG), which was never built." >&2
-          echo "Both mean the same thing: the commit must finish its push pipeline (tag -> build -> e2e -> publish-image) before it can be deployed." >&2
-          echo "Fix and push (or re-run the push pipeline) and let it go green (prod additionally requires the commit be on main), then re-run this deployment." >&2
+          echo "The parent push pipeline ($$CI_PIPELINE_PARENT) went red before publish-image (build or e2e failed), so it never published this image." >&2
+          echo "Deploy by promoting a green push pipeline for this commit (prod additionally requires the commit be on main); re-run the push pipeline first if it has none." >&2
           exit 1
         fi
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
@@ -347,3 +301,34 @@ steps:
         sovereign-config render /bored/devops/prod/ingest -- \
         ./scripts/compose-up-ingest.sh -p bored-ingest -f deploy/otlp-ingest.yml up -d --pull always \
         || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
+
+  tag-release-dev:
+    # After a successful deploy, push the git tag matching .release-tag, so a
+    # tag means "this version was deployed" (card #461). Both tag steps share
+    # pull/image/settings via &tag-release-base and differ only in when/
+    # depends_on. push-tag is idempotent (plugin >= 0.1.1, card #336): a
+    # commit already carrying this tag — e.g. dev then prod of the same build —
+    # logs "already exists at commit" and exits 0. It refuses a second,
+    # different semver tag on one commit (a re-run push pipeline's build of an
+    # already-deployed commit); the deploy itself has succeeded by then.
+    <<: &tag-release-base
+      pull: true
+      image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
+      settings:
+        mode: push-tag
+        major_minor_source: cargo
+        github_token:
+          from_secret: github_token
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
+    depends_on:
+      - deploy-dev
+
+  tag-release-prod:
+    <<: *tag-release-base
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    depends_on:
+      - deploy-prod
