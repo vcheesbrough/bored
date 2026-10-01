@@ -135,10 +135,15 @@ steps:
 
   apply-authentik-blueprint-dev:
     # Dev deploys come from any branch (card #461), so they get the dev-only
-    # blueprint and only the dev secret: an unmerged branch must never be able
-    # to change prod Authentik state. The full dev+prod blueprint is applied
-    # only by prod deploys, which validate-deployment limits to main. Both
-    # steps share everything but file/vars via &authentik-blueprint-base.
+    # blueprint and only the dev secret: a dev deploy of an unmerged branch
+    # does not, by itself, touch prod Authentik state. The full dev+prod
+    # blueprint is applied only by prod deploys, which validate-deployment
+    # limits to main. This guards against accidents; it is NOT a security
+    # boundary — the branch controls this YAML (validate-deployment included)
+    # and receives the admin authentik_api_token, so enforcing it would need
+    # the secret broker to withhold that token and the prod secrets from
+    # non-main pipelines. Both steps share everything but file/vars via
+    # &authentik-blueprint-base.
     <<: &authentik-blueprint-base
       depends_on:
         - validate-deployment
