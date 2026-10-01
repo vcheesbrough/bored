@@ -3,8 +3,10 @@
 # share a Woodpecker agent and docker daemon, so the two test stacks landed in
 # one namespace and each `up --force-recreate` tore down the other's containers
 # (pipeline 191: "No such container", v-note services listed as orphans).
-# Declared here rather than as `-p` at the call sites so CI's up/down, the local
-# repro in AGENTS.md, and any ad-hoc run all agree. Card #346.
+# Declared here so the local repro in AGENTS.md and any ad-hoc run agree. CI
+# overrides it with `-p bored-e2e-<pipeline number>`, because with no dev
+# auto-deploy several bored pipelines run at once on the shared daemon and must
+# not share a project either (card #461). Card #346.
 name: bored-e2e
 
 services:
