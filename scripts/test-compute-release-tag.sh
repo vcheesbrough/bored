@@ -43,14 +43,14 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 EOF
 
-# run <event> <number> <parent> [cargo_toml] — stdout to $WORK_DIR/out,
+# run <event> <number> [cargo_toml] — stdout to $WORK_DIR/out,
 # stderr to $WORK_DIR/err; returns the script's exit status.
 run() {
-    CI_PIPELINE_EVENT="$1" CI_PIPELINE_NUMBER="$2" CI_PIPELINE_PARENT="$3" \
-        sh "$UNDER_TEST" "${4:-$WORK_DIR/Cargo.toml}" >"$WORK_DIR/out" 2>"$WORK_DIR/err"
+    CI_PIPELINE_EVENT="$1" CI_PIPELINE_NUMBER="$2" \
+        sh "$UNDER_TEST" "${3:-$WORK_DIR/Cargo.toml}" >"$WORK_DIR/out" 2>"$WORK_DIR/err"
 }
 
-# expect_tag <name> <expected> <event> <number> <parent>
+# expect_tag <name> <expected> <event> <number>
 expect_tag() {
     name="$1"
     expected="$2"
@@ -62,7 +62,7 @@ expect_tag() {
     fi
 }
 
-# expect_refusal <name> <stderr-substring> <event> <number> <parent> [cargo_toml]
+# expect_refusal <name> <stderr-substring> <event> <number> [cargo_toml]
 expect_refusal() {
     name="$1"
     needle="$2"
@@ -76,18 +76,19 @@ expect_refusal() {
     fi
 }
 
-expect_tag "push: patch is this pipeline's number" "1.69.339" push 339 0
-expect_tag "manual: patch is this pipeline's number" "1.69.340" manual 340 0
-expect_tag "deployment: patch is the parent push pipeline's number" "1.69.339" deployment 341 339
+expect_tag "push: patch is this pipeline's number" "1.69.339" push 339
+expect_tag "manual: patch is this pipeline's number" "1.69.340" manual 340
 
-expect_refusal "deployment without a parent is refused" "no parent pipeline" deployment 341 0
-expect_refusal "deployment with an empty parent is refused" "no parent pipeline" deployment 341 ""
-expect_refusal "push with a non-numeric number is refused" "not a pipeline number" push "12a" 0
-expect_refusal "push with a leading-zero number is refused" "not a pipeline number" push "012" 0
-expect_refusal "unknown event is refused" "unsupported CI_PIPELINE_EVENT" pull_request 5 0
+expect_refusal "push with an empty number is refused" "not a pipeline number" push ""
+expect_refusal "push with a non-numeric number is refused" "not a pipeline number" push "12a"
+expect_refusal "push with a leading-zero number is refused" "not a pipeline number" push "012"
+# Deployments find their build through the commit (resolve-deploy-tag.sh);
+# numbering one here would name an image no pipeline built.
+expect_refusal "deployment is refused" "unsupported CI_PIPELINE_EVENT" deployment 341
+expect_refusal "unknown event is refused" "unsupported CI_PIPELINE_EVENT" pull_request 5
 
 printf '[workspace.package]\nedition = "2024"\n' >"$WORK_DIR/no-version.toml"
-expect_refusal "manifest without a workspace version is refused" "no MAJOR.MINOR.PATCH" push 5 0 "$WORK_DIR/no-version.toml"
+expect_refusal "manifest without a workspace version is refused" "no MAJOR.MINOR.PATCH" push 5 "$WORK_DIR/no-version.toml"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures test(s) failed" >&2

@@ -1,36 +1,32 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
 # Push/manual: compute-version → build(local, no push) → e2e → publish-image
 #   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
-#   A push never deploys: dev is deployed by hand, from any branch, by promoting the push pipeline (card #461). That
-#   lets several branches build at once without racing for the one shared dev environment.
-# Deploy: (validate-deployment ∥ compute-version) → (apply-authentik-blueprint ∥ verify-image) → deploy-* → tag-release-*
-#   Deployments do NOT build — compute-version names the image the parent push pipeline published; verify-image pulls
-#   that exact artifact and does NOT rebuild (card #254).
+#   A push never deploys: dev is deployed by hand, from any branch, with a deployment event (card #461). That lets
+#   several branches build at once without racing for the one shared dev environment.
+# Deploy: (validate-deployment ∥ find-commit-tag) → (apply-authentik-blueprint ∥ verify-image) → deploy-* → tag-release-*
+#   Deployments do NOT build — verify-image finds the build of this commit to promote, pulls that exact artifact and
+#   does NOT rebuild (card #254).
 #
-# Release mechanics (card #461; see scripts/compute-release-tag.sh):
-#   - The version is MAJOR.MINOR from Cargo.toml + PATCH = the number of the push pipeline that built the image:
-#     CI_PIPELINE_NUMBER on push/manual, CI_PIPELINE_PARENT on a deployment (the pipeline it was promoted from).
-#     Pipeline numbers are unique, so concurrent builds can never collide on a version and git holds no state the
-#     build depends on. Patches are sparse (1.69.339, 1.69.352, …) — every pipeline consumes a number.
-#   - RELEASE_TAG is burned into the image (build-arg) and used as the single
-#     docker tag; the git tag is byte-identical.
+# Release mechanics (card #461):
+#   - A build's version is MAJOR.MINOR from Cargo.toml + PATCH = its push pipeline's CI_PIPELINE_NUMBER
+#     (scripts/compute-release-tag.sh). Pipeline numbers are unique, so concurrent builds can never collide on a
+#     version and git holds no state the build depends on. Patches are sparse (1.69.339, 1.69.352, …).
+#   - RELEASE_TAG is burned into the image (build-arg) and used as its docker tag; the git tag is byte-identical.
+#     publish-image also pushes each green build as :commit-<sha>, the latest green build of that commit.
+#   - A deployment finds its build through the commit, never through CI_PIPELINE_PARENT (a restarted deploy, or one
+#     promoted from another deploy, has a deployment as its parent): the commit's existing semver git tag if it was
+#     deployed before — so a commit always redeploys the build its tag names — else the version label of
+#     :commit-<sha> (scripts/resolve-deploy-tag.sh).
 #   - The git tag is pushed only after a successful dev OR prod deploy, so a tag means "this version was deployed".
-#     Re-running a push pipeline builds the same commit under a new number; the plugin's push-tag refuses a second
-#     semver tag on one commit, so deploy the build whose number is already tagged, or one the commit has never had.
-
 when:
   - event: [push, deployment, manual]
 
 steps:
   compute-version:
-    # The single place .release-tag is ever written, on EVERY event: MAJOR.MINOR
-    # from Cargo.toml + the building push pipeline's number (see "Release
-    # mechanics" above). Reads no git state, so a deployment of a commit whose
-    # push pipeline never published finds no image and verify-image fails it.
-    # This step is read-only, so it needs no ordering against validate-deployment;
-    # the deploy-target gate still holds because verify-image depends on both.
+    # The build's version: MAJOR.MINOR from Cargo.toml + this pipeline's number
+    # (see "Release mechanics" above). Reads no git state.
     when:
-      - event: [push, manual, deployment]
+      - event: [push, manual]
     depends_on: []
     image: &alpine-image alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
     commands:
@@ -113,6 +109,12 @@ steps:
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker push registry.desync.link/bored:$$(cat .release-tag)
+      # The commit's latest green build, for a deployment that has not been
+      # deployed before to find (scripts/resolve-deploy-tag.sh, card #461).
+      # A re-run of the same commit's push pipeline moves it to the newer build.
+      - |
+        docker tag registry.desync.link/bored:$$(cat .release-tag) registry.desync.link/bored:commit-$$CI_COMMIT_SHA
+        docker push registry.desync.link/bored:commit-$$CI_COMMIT_SHA
 
   validate-deployment:
     when:
@@ -153,34 +155,54 @@ steps:
         AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET:
           from_secret: bored_mcp_prod_client_secret
 
+  find-commit-tag:
+    # The plugin's compute mode, used only for its lookup: it writes the semver
+    # git tag already on this commit to .release-tag with .release-tag-reused
+    # = true — i.e. the commit was deployed before. For a commit never deployed
+    # it writes reused = false and a max(tag)+1 guess that means nothing under
+    # pipeline-number patches; verify-image's resolve-deploy-tag.sh discards it.
+    # The lookup needs plugin >= 0.1.1 (0.1.0 could not see annotated tags'
+    # commits, card #336). Read-only, so no ordering against
+    # validate-deployment; verify-image depends on both.
+    when:
+      - event: deployment
+    depends_on: []
+    pull: true
+    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
+    settings:
+      mode: compute
+      major_minor_source: cargo
+      github_token:
+        from_secret: github_token
+
   verify-image:
-    # A deployment promotes the artifact its parent push pipeline already built,
+    # A deployment promotes a build the push pipeline already built,
     # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
-    # #254). compute-version names that pipeline's image (PATCH =
-    # CI_PIPELINE_PARENT), so the tag we pull here is byte-identical to what e2e
-    # validated. Because publish-image only pushes AFTER e2e passes, the tag
-    # existing in the registry *is* the e2e-passed signal — a red e2e run never
-    # publishes it. Pull it and re-assert its OCI labels; fail loudly
-    # (fail-closed) if it is absent, which means the parent pipeline never
-    # completed build/e2e. The revision label check catches a parent pipeline
-    # that built a different commit than the one being deployed.
+    # #254). resolve-deploy-tag.sh rewrites .release-tag to that build: the
+    # commit's existing git tag if it was deployed before, else its latest
+    # green build (:commit-<sha>). Because publish-image only pushes AFTER e2e
+    # passes, the image existing in the registry *is* the e2e-passed signal.
+    # Pull it and re-assert its OCI labels; fail loudly (fail-closed) if it is
+    # absent. The revision label check catches an image built from another
+    # commit.
     when:
       - event: deployment
     depends_on:
-      - compute-version
+      - find-commit-tag
       - validate-deployment
     image: *docker-image
     volumes: *docker-socket
     environment: *registry-creds
     commands:
       - *docker-login
+      - ./scripts/resolve-deploy-tag.sh
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/bored:$$RELEASE_TAG
         if ! docker pull "$$IMAGE"; then
           echo "ERROR: $$IMAGE not found in registry." >&2
-          echo "The parent push pipeline ($$CI_PIPELINE_PARENT) went red before publish-image (build or e2e failed), so it never published this image." >&2
-          echo "Deploy by promoting a green push pipeline for this commit (prod additionally requires the commit be on main); re-run the push pipeline first if it has none." >&2
+          echo "resolve-deploy-tag.sh chose $$RELEASE_TAG (see its output above). If that is this commit's existing git tag, the build it names has since left the registry:" >&2
+          echo "restore the image, or delete the git tag $$RELEASE_TAG so the deploy takes the commit's latest green build." >&2
           exit 1
         fi
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
@@ -307,13 +329,12 @@ steps:
     # tag means "this version was deployed" (card #461). Both tag steps share
     # pull/image/settings via &tag-release-base and differ only in when/
     # depends_on. push-tag is idempotent (plugin >= 0.1.1, card #336): a
-    # commit already carrying this tag — e.g. dev then prod of the same build —
-    # logs "already exists at commit" and exits 0. It refuses a second,
-    # different semver tag on one commit (a re-run push pipeline's build of an
-    # already-deployed commit); the deploy itself has succeeded by then.
+    # commit already carrying this tag — a redeploy, or dev then prod —
+    # logs "already exists at commit" and exits 0. A commit never gets a
+    # second tag, because a deployed commit always redeploys its tagged build.
     <<: &tag-release-base
       pull: true
-      image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
+      image: *version-plugin
       settings:
         mode: push-tag
         major_minor_source: cargo
