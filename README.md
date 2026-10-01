@@ -65,7 +65,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 **On every push or manual run**:
 
 1. **compute-version** — [`scripts/compute-release-tag.sh`](scripts/compute-release-tag.sh) writes `.release-tag` (see [Versioning](#versioning)).
-2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test -p backend -p shared`, and the `scripts/test-*.sh` script tests) run *inside* the Dockerfile's `backend-builder` stage, so a green build implies a green check suite.
+2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test -p backend -p shared`) run *inside* the Dockerfile's `backend-builder` stage, and the `scripts/test-*.sh` script tests inside its `frontend-builder` stage, so a green build implies a green check suite.
 3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC, the freshly-built local image behind a Traefik edge as in production, the telemetry ingest and a fake OTLP receiver, and Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`.
 4. **publish-image** — [`scripts/publish-release-image.sh`](scripts/publish-release-image.sh) refuses a version the registry already holds, then pushes the `.release-tag` image, and the same image as `:commit-<sha>`, to `registry.desync.link` **only after e2e passes**, so the registry never holds an image from a red e2e run (this is what makes the deployment-path `verify-image` existence check a genuine e2e-tested gate).
 
