@@ -30,6 +30,19 @@ sha="${CI_COMMIT_SHA:?CI_COMMIT_SHA is required}"
 
 reused="$(cat .release-tag-reused 2>/dev/null || true)"
 
+# Fail closed on anything but the plugin's two literal answers: guessing
+# "never deployed" for a deployed commit would deploy a different build from
+# the one its git tag names, and the conflict would only surface at
+# tag-release, after the deploy.
+case "$reused" in
+    true | false) ;;
+    *)
+        echo "ERROR: .release-tag-reused is '$reused', expected 'true' or 'false' from find-commit-tag." >&2
+        echo "Cannot tell whether commit $sha was deployed before; refusing to guess which build to deploy." >&2
+        exit 1
+        ;;
+esac
+
 if [ "$reused" = true ]; then
     tag="$(cat .release-tag)"
     echo "commit $sha was deployed before as $tag; deploying that build again"

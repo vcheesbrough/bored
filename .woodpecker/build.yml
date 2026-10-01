@@ -108,26 +108,10 @@ steps:
         from_secret: zot_ci_password
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      # Versions are unique only while Woodpecker's pipeline counter is (card
-      # #461): if the repo is re-created in Woodpecker or its DB restored from
-      # an old backup, numbers repeat and this push would silently overwrite
-      # an image prod or a git tag may name. Refuse instead. A registry error
-      # in the probe exits non-zero too and falls through to the push, which
-      # then fails on its own if the registry is really down.
-      - |
-        IMAGE=registry.desync.link/bored:$$(cat .release-tag)
-        if docker manifest inspect "$$IMAGE" >/dev/null 2>&1; then
-          echo "ERROR: $$IMAGE already exists; Woodpecker's pipeline numbers have repeated (card #461)." >&2
-          echo "Refusing to overwrite it. Bump the minor in Cargo.toml so new builds start a fresh version line." >&2
-          exit 1
-        fi
-        docker push "$$IMAGE"
-      # The commit's latest green build, for a deployment that has not been
-      # deployed before to find (scripts/resolve-deploy-tag.sh, card #461).
-      # A re-run of the same commit's push pipeline moves it to the newer build.
-      - |
-        docker tag registry.desync.link/bored:$$(cat .release-tag) registry.desync.link/bored:commit-$$CI_COMMIT_SHA
-        docker push registry.desync.link/bored:commit-$$CI_COMMIT_SHA
+      # Refuses to overwrite an existing version (pipeline numbers repeat if
+      # the repo is re-created in Woodpecker), then pushes :<version> and the
+      # same image as :commit-<sha> for deployments to find (card #461).
+      - ./scripts/publish-release-image.sh "$$(cat .release-tag)" "$$CI_COMMIT_SHA"
 
   validate-deployment:
     when:

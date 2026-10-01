@@ -106,13 +106,26 @@ else
     fail "unlabelled image: refused, but stderr: $(cat "$ws/err")"
 fi
 
-# --- missing reused marker is treated as never deployed ----------------------
-setup 1.69.342 false "$REPO:commit-$SHA 1.69.341"
+# --- missing or unexpected reused marker: refused, not guessed ---------------
+# Treating it as "never deployed" could deploy a different build from the one
+# the commit's git tag names.
+setup 1.69.339 false "$REPO:commit-$SHA 1.69.352"
 rm "$ws/.release-tag-reused"
-if run && [ "$(cat "$ws/.release-tag")" = "1.69.341" ]; then
-    pass "no .release-tag-reused: falls back to the commit image"
+if run; then
+    fail "no .release-tag-reused: expected a refusal, got '$(cat "$ws/.release-tag")'"
+elif grep -q "refusing to guess" "$ws/err"; then
+    pass "no .release-tag-reused: refused"
 else
-    fail "no .release-tag-reused: got '$(cat "$ws/.release-tag")' / $(cat "$ws/err")"
+    fail "no .release-tag-reused: refused, but stderr: $(cat "$ws/err")"
+fi
+
+setup 1.69.339 True "$REPO:commit-$SHA 1.69.352"
+if run; then
+    fail "unexpected .release-tag-reused: expected a refusal, got '$(cat "$ws/.release-tag")'"
+elif grep -q "refusing to guess" "$ws/err"; then
+    pass "unexpected .release-tag-reused ('True'): refused"
+else
+    fail "unexpected .release-tag-reused: refused, but stderr: $(cat "$ws/err")"
 fi
 
 if [ "$failures" -ne 0 ]; then

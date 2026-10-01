@@ -49,13 +49,17 @@ COPY scripts/compose-up-ingest.sh scripts/compose-up-ingest.sh
 COPY scripts/test-compose-up-ingest.sh scripts/test-compose-up-ingest.sh
 RUN sh /app/scripts/test-compose-up-ingest.sh
 # And the pipeline's release-tag scripts (card #461), tested the same way: the
-# build's version, and the deploy's lookup of the build to promote.
+# build's version, its publishing, and the deploy's lookup of the build to
+# promote.
 COPY scripts/compute-release-tag.sh scripts/compute-release-tag.sh
 COPY scripts/test-compute-release-tag.sh scripts/test-compute-release-tag.sh
 RUN sh /app/scripts/test-compute-release-tag.sh
 COPY scripts/resolve-deploy-tag.sh scripts/resolve-deploy-tag.sh
 COPY scripts/test-resolve-deploy-tag.sh scripts/test-resolve-deploy-tag.sh
 RUN sh /app/scripts/test-resolve-deploy-tag.sh
+COPY scripts/publish-release-image.sh scripts/publish-release-image.sh
+COPY scripts/test-publish-release-image.sh scripts/test-publish-release-image.sh
+RUN sh /app/scripts/test-publish-release-image.sh
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
