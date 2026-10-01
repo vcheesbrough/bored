@@ -35,11 +35,16 @@ now="$(date +%s)"
 containers_listing="$(docker ps -a --filter label=com.docker.compose.project \
     --format '{{.Label "com.docker.compose.project"}}|{{.RunningFor}}')"
 network_ids="$(docker network ls -q --filter label=com.docker.compose.project)"
-networks_listing=""
-if [ -n "$network_ids" ]; then
-    networks_listing="$(docker network inspect \
-        -f '{{index .Labels "com.docker.compose.project"}}|{{.Created.Unix}}' $network_ids)"
-fi
+# One inspect per network: a batch inspect fails outright if any one network
+# vanished since the listing (another pipeline's `down`, likely with
+# concurrent pipelines), which would skip the whole cleanup. A vanished one
+# is simply skipped.
+networks_listing="$(
+    for id in $network_ids; do
+        docker network inspect \
+            -f '{{index .Labels "com.docker.compose.project"}}|{{.Created.Unix}}' "$id" 2>/dev/null || true
+    done
+)"
 
 # Projects named bored-e2e-<digits>, other than this run's, that are stale by
 # the rules above.

@@ -44,7 +44,14 @@ case "$1 $2" in
             n=0; while IFS= read -r line; do n=$((n + 1)); echo "netid$n"; done < "$WORK_DIR/nets"
         fi
         ;;
-    "network inspect") cat "$WORK_DIR/nets" ;;
+    "network inspect")
+        # Exactly one id per call (netid<N> → line N of nets); a line reading
+        # GONE is a network that vanished since the listing.
+        [ "$#" -eq 5 ] || { echo "inspect expects one network, got: $*" >&2; exit 2; }
+        line="$(sed -n "${5#netid}p" "$WORK_DIR/nets")"
+        [ "$line" = GONE ] && { echo "Error: network $5 not found" >&2; exit 1; }
+        echo "$line"
+        ;;
     "image ls")
         # --filter reference=<project>-* → an id naming the project.
         for a in "$@"; do
@@ -72,7 +79,8 @@ run() {
     for line in "$@"; do
         echo "$line" >> "$WORK_DIR/ps"
     done
-    PATH="$WORK_DIR/bin:$PATH" sh "$UNDER_TEST" bored-e2e-350 > "$WORK_DIR/out" 2> "$WORK_DIR/err"
+    # A failing script must show up as a named FAIL below, not abort this file.
+    PATH="$WORK_DIR/bin:$PATH" sh "$UNDER_TEST" bored-e2e-350 > "$WORK_DIR/out" 2> "$WORK_DIR/err" || true
 }
 
 : > "$WORK_DIR/nets"
@@ -130,6 +138,19 @@ if [ "$(cat "$WORK_DIR/removed")" = "$expected_removed" ]; then
     pass "a container-less project's old network is removed; young, live, current and non-e2e ones kept"
 else
     fail "container-less: removed: $(cat "$WORK_DIR/removed") / $(cat "$WORK_DIR/err")"
+fi
+
+# --- a network vanishing mid-run doesn't stop the cleanup -------------------
+# Another pipeline's `down` can remove its network between the listing and the
+# inspect; the old project after it must still be cleaned.
+printf '%s\n' \
+    "GONE" \
+    "bored-e2e-310|$((now - 7200))" > "$WORK_DIR/nets"
+run
+if [ "$(cat "$WORK_DIR/removed")" = "$expected_removed" ]; then
+    pass "a network vanishing between listing and inspect is skipped, cleanup continues"
+else
+    fail "vanished network: removed: $(cat "$WORK_DIR/removed") / $(cat "$WORK_DIR/err")"
 fi
 
 : > "$WORK_DIR/nets"
