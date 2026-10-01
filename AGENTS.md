@@ -29,7 +29,10 @@ this file is only the working-rules layer that used to be split across
 Iteration `N` matches the workspace **`Cargo.toml`** minor (`1.N.x`) at start of
 work; feature branches are `feat/iteration-N-short-slug` from `main`. Start a
 card with the **`start-iteration`** skill (baseline §1–§2); bored is post-MVP so
-versions are `1.N.x`.
+versions are `1.N.x`. **Override of baseline §2's patch rule:** the patch `x`
+is not bumped by hand — CI sets it to the Woodpecker number of the push
+pipeline that built the image (card #461; README § Versioning), so leave
+`Cargo.toml` at `1.N.0`.
 
 ---
 

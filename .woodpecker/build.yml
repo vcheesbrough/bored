@@ -1,49 +1,37 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push/manual: compute-version → build(local, no push) → e2e → (publish-image ∥ apply-authentik-blueprint-auto-dev) → auto-deploy-dev → tag-release-auto-dev
+# Push/manual: compute-version → build(local, no push) → e2e → publish-image
 #   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
-# Deploy: (validate-deployment ∥ compute-version) → (apply-authentik-blueprint ∥ verify-image) → deploy-* → tag-release-*
-#   Deployments do NOT allocate a version — compute-version REUSES the semver tag already on the commit; verify-image
-#   pulls that exact artifact and does NOT rebuild (card #254).
+#   A push never deploys: dev is deployed by hand, from any branch, with a deployment event (card #461). That lets
+#   several branches build at once without racing for the one shared dev environment.
+# Deploy: (validate-deployment ∥ find-commit-tag) → (apply-authentik-blueprint-<target> ∥ verify-image) → deploy-* → tag-release-*
+#   Deployments do NOT build — verify-image finds the build of this commit to promote, pulls that exact artifact and
+#   does NOT rebuild (card #254).
 #
-# Release mechanics (see card #176):
-#   - compute-version (plugin) allocates/reuses ONE semver per commit, on every event.
-#   - Deployments (dev/prod) hit the plugin's REUSE path: it finds the tag already on the commit and writes it straight
-#     back to .release-tag, so a deploy promotes the already-built version and never allocates (card #254, #336).
-#   - RELEASE_TAG is burned into the image (build-arg) and used as the single
-#     docker tag; the git tag pushed after deploy is byte-identical.
-#   - Git tagging happens after a successful dev OR prod deploy.
-
+# Release mechanics (card #461):
+#   - A build's version is MAJOR.MINOR from Cargo.toml + PATCH = its push pipeline's CI_PIPELINE_NUMBER
+#     (scripts/compute-release-tag.sh). Pipeline numbers are unique, so concurrent builds can never collide on a
+#     version and git holds no state the build depends on. Patches are sparse (1.69.339, 1.69.352, …).
+#   - RELEASE_TAG is burned into the image (build-arg) and used as its docker tag; the git tag is byte-identical.
+#     publish-image also pushes each green build as :commit-<sha>, the latest green build of that commit.
+#   - A deployment finds its build through the commit, never through CI_PIPELINE_PARENT (a restarted deploy, or one
+#     promoted from another deploy, has a deployment as its parent): the commit's existing semver git tag if it was
+#     deployed before — so a commit always redeploys the build its tag names — else the version label of
+#     :commit-<sha> (scripts/resolve-deploy-tag.sh).
+#   - The git tag is pushed only after a successful dev OR prod deploy, so a tag means "this version was deployed".
 when:
   - event: [push, deployment, manual]
 
 steps:
   compute-version:
-    # Allocates/reuses ONE semver per commit, on EVERY event — the single place
-    # .release-tag is ever written:
-    #   - push/manual: the commit is untagged, so `compute` allocates
-    #     max(existing MAJOR.MINOR.* tag) + 1.
-    #   - deployment: the commit was already released by its own push pipeline, so
-    #     `compute` finds that tag and REUSES it ("release tag reused for commit
-    #     <sha>"). A deployment therefore promotes the already-built artifact and
-    #     never mints a new version (card #254).
-    # The reuse path needs plugin >= 0.1.1. 0.1.0 listed tags with
-    # `git ls-remote --tags --refs`, which hides the peeled `^{}` lines — the only
-    # ones carrying the commit sha for the annotated tags this plugin creates — so
-    # every commit looked untagged and a deployment allocated an unbuilt tag
-    # (1.35.3 -> 1.35.4) that broke prod. The custom resolve-release-tag step that
-    # worked around that is gone (card #336).
-    # This step is read-only, so it needs no ordering against validate-deployment;
-    # the deploy-target gate still holds because verify-image depends on both.
+    # The build's version: MAJOR.MINOR from Cargo.toml + this pipeline's number
+    # (see "Release mechanics" above). Reads no git state.
     when:
-      - event: [push, manual, deployment]
+      - event: [push, manual]
     depends_on: []
-    pull: true
-    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
-    settings:
-      mode: compute
-      major_minor_source: cargo
-      github_token:
-        from_secret: github_token
+    image: &alpine-image alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
+    commands:
+      - ./scripts/compute-release-tag.sh > .release-tag
+      - echo "RELEASE_TAG=$(cat .release-tag)"
 
   build:
     # Build the image and validate its OCI labels LOCALLY — do not push yet.
@@ -92,12 +80,24 @@ steps:
       - build
     image: *docker-image
     volumes: *docker-socket
+    # One compose project per pipeline (-p overrides the file's `name:`): with
+    # no auto-deploy, pipelines on several branches run at once on this shared
+    # docker daemon, and a common project name would let each `up
+    # --force-recreate` / `down` tear down another pipeline's stack (card
+    # #461; the bored-vs-v-note version of this was card #346). `--rmi local`
+    # drops the per-project images compose built, so they don't pile up; their
+    # layers stay in the build cache. A pipeline cancelled before its `down`
+    # leaks its project for good, so each run first removes bored-e2e-*
+    # projects whose containers are hours old — never a live run's.
     commands:
       - |
+        ./scripts/prune-stale-e2e-projects.sh bored-e2e-$$CI_PIPELINE_NUMBER || echo "WARNING: stale e2e project cleanup failed"
+      - |
         RELEASE_TAG=$$(cat .release-tag)
+        PROJECT=bored-e2e-$$CI_PIPELINE_NUMBER
         REPORT=/srv/dev/playwright-reports/pipeline-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -f e2e/docker-compose.test.yml down --volumes
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -p $$PROJECT -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -p $$PROJECT -f e2e/docker-compose.test.yml down --volumes --rmi local
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
@@ -120,13 +120,16 @@ steps:
         from_secret: zot_ci_password
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker push registry.desync.link/bored:$$(cat .release-tag)
+      # Refuses to overwrite an existing version (pipeline numbers repeat if
+      # the repo is re-created in Woodpecker), then pushes :<version> and the
+      # same image as :commit-<sha> for deployments to find (card #461).
+      - ./scripts/publish-release-image.sh "$$(cat .release-tag)" "$$CI_COMMIT_SHA"
 
   validate-deployment:
     when:
       - event: deployment
     depends_on: []
-    image: alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
+    image: *alpine-image
     commands:
       - |
         if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
@@ -139,17 +142,44 @@ steps:
           exit 1
         fi
 
-  apply-authentik-blueprint:
+  apply-authentik-blueprint-dev:
+    # Dev deploys come from any branch (card #461), so they get the dev-only
+    # blueprint and only the dev secret: a dev deploy of an unmerged branch
+    # does not, by itself, touch prod Authentik state. The full dev+prod
+    # blueprint is applied only by prod deploys, which validate-deployment
+    # limits to main. This guards against accidents; it is NOT a security
+    # boundary — the branch controls this YAML (validate-deployment included)
+    # and receives the admin authentik_api_token, so enforcing it would need
+    # the secret broker to withhold that token and the prod secrets from
+    # non-main pipelines. Both steps share everything but file/vars via
+    # &authentik-blueprint-base.
+    <<: &authentik-blueprint-base
+      depends_on:
+        - validate-deployment
+      pull: true
+      image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
     when:
       - event: deployment
-    depends_on:
-      - validate-deployment
-    pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     settings:
-      api_url: https://auth.desync.link
-      api_token:
+      api_url: &authentik-url https://auth.desync.link
+      api_token: &authentik-token
         from_secret: authentik_api_token
+      file: authentik/blueprint-dev.yaml
+      instance_name: bored
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_BORED_DEV_CLIENT_SECRET:
+          from_secret: bored_dev_oidc_client_secret
+
+  apply-authentik-blueprint-prod:
+    <<: *authentik-blueprint-base
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    settings:
+      api_url: *authentik-url
+      api_token: *authentik-token
       file: authentik/blueprint.yaml
       instance_name: bored
       timeout_seconds: 900
@@ -161,141 +191,129 @@ steps:
         AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET:
           from_secret: bored_mcp_prod_client_secret
 
-  apply-authentik-blueprint-auto-dev:
+  find-commit-tag:
+    # Looks up the semver git tag already on this commit (scripts/
+    # find-commit-tag.sh): tagged means deployed before, and verify-image's
+    # resolve-deploy-tag.sh then redeploys exactly that build. Not the
+    # release-versions plugin's compute mode: on an untagged commit that also
+    # logs an invented max(tag)+1 "allocation" no build ever has (card #461).
+    # Read-only, so no ordering against validate-deployment; verify-image
+    # depends on both.
     when:
-      - event: [push, manual]
-    depends_on:
-      - e2e
-    pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
-    settings:
-      api_url: https://auth.desync.link
-      api_token:
-        from_secret: authentik_api_token
-      file: authentik/blueprint-dev.yaml
-      instance_name: bored
-      timeout_seconds: 900
-      vars:
-        AUTHENTIK_BORED_DEV_CLIENT_SECRET:
-          from_secret: bored_dev_oidc_client_secret
+      - event: deployment
+    depends_on: []
+    image: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - ./scripts/find-commit-tag.sh
 
   verify-image:
-    # A deployment promotes the artifact the push-event pipeline already built,
+    # A deployment promotes a build the push pipeline already built,
     # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
-    # #254). compute-version's reuse path pins .release-tag to the commit's
-    # already-built version, so the tag we pull here is byte-identical to what
-    # e2e validated and what dev is running. Because publish-image only pushes
-    # AFTER e2e passes, the tag existing in the registry *is* the e2e-passed
-    # signal — a red e2e run never publishes it. Pull it and re-assert its OCI labels; fail loudly
-    # (fail-closed) if it is absent, which means this commit never completed
-    # build/e2e.
-    # One corner to know about: publish-image pushes the image BEFORE
-    # tag-release-auto-dev creates the git tag, so a pipeline that dies between
-    # the two leaves :X.Y.Z in the registry with no tag on the commit. Deploying
-    # a different, still-untagged commit then has compute allocate that same
-    # X.Y.Z and the pull SUCCEEDS — it is check-image-metadata.sh's revision
-    # label check that fails it, on the sha rather than on the missing tag. Still
-    # fail-closed, just a different message than the one below (card #336).
+    # #254). resolve-deploy-tag.sh rewrites .release-tag to that build: the
+    # commit's existing git tag if it was deployed before, else its latest
+    # green build (:commit-<sha>). Because publish-image only pushes AFTER e2e
+    # passes, the image existing in the registry *is* the e2e-passed signal.
+    # Pull it and re-assert its OCI labels; fail loudly (fail-closed) if it is
+    # absent. The revision label check catches an image built from another
+    # commit.
     when:
       - event: deployment
     depends_on:
-      - compute-version
+      - find-commit-tag
       - validate-deployment
     image: *docker-image
     volumes: *docker-socket
     environment: *registry-creds
     commands:
       - *docker-login
+      - ./scripts/resolve-deploy-tag.sh
       - |
         RELEASE_TAG=$$(cat .release-tag)
         IMAGE=registry.desync.link/bored:$$RELEASE_TAG
         if ! docker pull "$$IMAGE"; then
           echo "ERROR: $$IMAGE not found in registry." >&2
-          echo "Either this commit has no release tag — in which case compute-version allocated the next unused patch ($$RELEASE_TAG), which was never built — or its image was never published." >&2
-          echo "Both mean the same thing: the commit must finish the main push pipeline (build + e2e -> publish-image -> dev deploy -> git tag) before it can be deployed." >&2
-          echo "Push the commit and let that pipeline finish (prod additionally requires it be on main), then re-run this deployment." >&2
+          echo "resolve-deploy-tag.sh chose $$RELEASE_TAG (see its output above). If that is this commit's existing git tag, the build it names has since left the registry:" >&2
+          echo "restore the image, or delete the git tag $$RELEASE_TAG so the deploy takes the commit's latest green build." >&2
           exit 1
         fi
         ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
 
   deploy-dev:
-    # Everything a dev deploy needs except its trigger lives in &dev-deploy-base,
-    # merged (`<<`) into both this step and auto-deploy-dev, so the two triggers
-    # differ ONLY in when/depends_on and can never drift. (A single merged step
-    # would need `optional: true` deps, which this Woodpecker rejects — card #254.)
-    <<: &dev-deploy-base
-      # The docker CLI image with the sovereign-config CLI baked in — the same
-      # pinned image v-note deploys with. It carries docker 27.5.1 with the
-      # compose plugin plus sh, so it replaces `*docker-image` for the steps
-      # that run `sovereign-config render`. The CLI must match the running
-      # sovereign-config server (2.30.2, like the provider in
-      # backend/Cargo.toml): bump tag and digest together, as a commit.
-      image: &deploy-image registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf49099830f99b6dbc421527f13fd3f32e1156ed62c9d26987d26c256d1827
-      volumes: *docker-socket
-      environment:
-        REGISTRY_USER:
-          from_secret: zot_ci_user
-        REGISTRY_PASSWORD:
-          from_secret: zot_ci_password
-        # OIDC/session config now lives in sovereign-config (card #288) — this
-        # one read-only access URL replaces the individual OIDC_*/SESSION_COOKIE_KEY
-        # secrets previously injected here. The Authentik blueprint steps still
-        # use bored_{dev,prod}_oidc_client_secret directly (unchanged).
-        SOVEREIGN_CONFIG_ACCESS_URL_FILE:
-          from_secret: bored_dev_sovereign_access_url
-        # The *deploy's* credential, not the app's (that is the one above):
-        # a read-only connection rooted at /bored/devops, used by `render`
-        # below to read the telemetry layer, and stripped by `render` from the
-        # environment it hands to compose. Card #415.
-        SOVEREIGN_CONFIG_URL: &devops-url
-          from_secret: bored_devops_sovereign_access_url
-      commands:
-        - *docker-login
-        - docker volume create bored-dev-db
-        # APP_ENV is the literal `dev`, not the branch it used to be: it becomes
-        # the `deployment_environment` Loki label, and a per-branch value there
-        # started a fresh stream set on every push with no single value meaning
-        # "dev". The branch rides alongside in APP_BRANCH, which only
-        # `/api/info` and the board watermark read. Card #412.
-        #
-        # `sovereign-config render` overlays the direct children of
-        # /bored/devops/dev/otel — the OTEL_* variables and nothing else — onto
-        # the environment of scripts/compose-up-with-otel.sh, which hands them
-        # to the container through compose's `env_file:` and hides them from
-        # docker itself (the docker CLI is OpenTelemetry-instrumented and
-        # rewrites OTEL_RESOURCE_ATTRIBUTES). The compose file holds no value, so
-        # telemetry is retargeted by a write to the store, not a commit.
-        # Dropping the layer from this line is how an environment runs with
-        # telemetry off; `render` fails closed on an unreadable or empty
-        # layer, so a broken store stops the deploy rather than silently
-        # deploying without telemetry. The deployment.environment.name inside
-        # the layer must match APP_ENV — the backend refuses to start if the
-        # two disagree (AGENTS.md § Observability).
-        - |
-          BORED_IMAGE_TAG=$(cat .release-tag) \
-          APP_ENV=dev APP_BRANCH=$$CI_COMMIT_BRANCH \
-          BORED_HOST=bored-dev.desync.link \
-          BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
-          sovereign-config render /bored/devops/dev/otel -- \
-          ./scripts/compose-up-with-otel.sh -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
-        # The client-telemetry ingest (otlp-collector-oidc, card #416): its
-        # own compose project, started after the app and *never* part of the
-        # deploy gate — no `--wait`, and a failure (the store unreadable, the
-        # image unpullable) is a warning, not a failed deploy. Its settings are
-        # the /bored/devops/dev/ingest layer, handed to the container by
-        # scripts/compose-up-ingest.sh the same way the app's OTEL_* are.
-        # Stopping the `bored-dev-ingest` project is the emergency stop.
-        - |
-          APP_ENV=dev BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev \
-          sovereign-config render /bored/devops/dev/ingest -- \
-          ./scripts/compose-up-ingest.sh -p bored-dev-ingest -f deploy/otlp-ingest.yml up -d --pull always \
-          || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
+    # The docker CLI image with the sovereign-config CLI baked in — the same
+    # pinned image v-note deploys with. It carries docker 27.5.1 with the
+    # compose plugin plus sh, so it replaces `*docker-image` for the steps
+    # that run `sovereign-config render`. The CLI must match the running
+    # sovereign-config server (2.30.2, like the provider in
+    # backend/Cargo.toml): bump tag and digest together, as a commit.
+    image: &deploy-image registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf49099830f99b6dbc421527f13fd3f32e1156ed62c9d26987d26c256d1827
+    volumes: *docker-socket
+    environment:
+      REGISTRY_USER:
+        from_secret: zot_ci_user
+      REGISTRY_PASSWORD:
+        from_secret: zot_ci_password
+      # OIDC/session config now lives in sovereign-config (card #288) — this
+      # one read-only access URL replaces the individual OIDC_*/SESSION_COOKIE_KEY
+      # secrets previously injected here. The Authentik blueprint steps still
+      # use bored_{dev,prod}_oidc_client_secret directly (unchanged).
+      SOVEREIGN_CONFIG_ACCESS_URL_FILE:
+        from_secret: bored_dev_sovereign_access_url
+      # The *deploy's* credential, not the app's (that is the one above):
+      # a read-only connection rooted at /bored/devops, used by `render`
+      # below to read the telemetry layer, and stripped by `render` from the
+      # environment it hands to compose. Card #415.
+      SOVEREIGN_CONFIG_URL: &devops-url
+        from_secret: bored_devops_sovereign_access_url
+    commands:
+      - *docker-login
+      - docker volume create bored-dev-db
+      # APP_ENV is the literal `dev`, not the branch it used to be: it becomes
+      # the `deployment_environment` Loki label, and a per-branch value there
+      # started a fresh stream set on every push with no single value meaning
+      # "dev". The branch rides alongside in APP_BRANCH, which only
+      # `/api/info` and the board watermark read. Card #412.
+      #
+      # `sovereign-config render` overlays the direct children of
+      # /bored/devops/dev/otel — the OTEL_* variables and nothing else — onto
+      # the environment of scripts/compose-up-with-otel.sh, which hands them
+      # to the container through compose's `env_file:` and hides them from
+      # docker itself (the docker CLI is OpenTelemetry-instrumented and
+      # rewrites OTEL_RESOURCE_ATTRIBUTES). The compose file holds no value, so
+      # telemetry is retargeted by a write to the store, not a commit.
+      # Dropping the layer from this line is how an environment runs with
+      # telemetry off; `render` fails closed on an unreadable or empty
+      # layer, so a broken store stops the deploy rather than silently
+      # deploying without telemetry. The deployment.environment.name inside
+      # the layer must match APP_ENV — the backend refuses to start if the
+      # two disagree (AGENTS.md § Observability).
+      - |
+        BORED_IMAGE_TAG=$(cat .release-tag) \
+        APP_ENV=dev APP_BRANCH=$$CI_COMMIT_BRANCH \
+        BORED_HOST=bored-dev.desync.link \
+        BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
+        sovereign-config render /bored/devops/dev/otel -- \
+        ./scripts/compose-up-with-otel.sh -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120
+      # The client-telemetry ingest (otlp-collector-oidc, card #416): its
+      # own compose project, started after the app and *never* part of the
+      # deploy gate — no `--wait`, and a failure (the store unreadable, the
+      # image unpullable) is a warning, not a failed deploy. Its settings are
+      # the /bored/devops/dev/ingest layer, handed to the container by
+      # scripts/compose-up-ingest.sh the same way the app's OTEL_* are.
+      # Stopping the `bored-dev-ingest` project is the emergency stop.
+      - |
+        APP_ENV=dev BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev \
+        sovereign-config render /bored/devops/dev/ingest -- \
+        ./scripts/compose-up-ingest.sh -p bored-dev-ingest -f deploy/otlp-ingest.yml up -d --pull always \
+        || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - verify-image
-      - apply-authentik-blueprint
+      - apply-authentik-blueprint-dev
 
   deploy-prod:
     when:
@@ -303,7 +321,7 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
       - verify-image
-      - apply-authentik-blueprint
+      - apply-authentik-blueprint-prod
     image: *deploy-image
     volumes: *docker-socket
     environment:
@@ -340,39 +358,22 @@ steps:
         ./scripts/compose-up-ingest.sh -p bored-ingest -f deploy/otlp-ingest.yml up -d --pull always \
         || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
 
-  auto-deploy-dev:
-    # Same dev deploy as deploy-dev (via <<: *dev-deploy-base), fired on push.
-    # Depends on publish-image because the deploy pulls the image from the
-    # registry (`--pull always`), so it must be pushed (post-e2e) first.
-    <<: *dev-deploy-base
-    when:
-      - event: [push, manual]
-    depends_on:
-      - compute-version
-      - apply-authentik-blueprint-auto-dev
-      - publish-image
-
-  tag-release-auto-dev:
-    # All three tag-release steps share pull/image/settings via &tag-release-base;
-    # they differ only in when/depends_on. From plugin 0.1.1 push-tag is genuinely
-    # idempotent — on an already-tagged commit it logs "already exists at commit"
-    # and exits 0 — which is what lets the deploy paths run it unconditionally
-    # (0.1.0 failed there as an "immutability violation"; card #336).
+  tag-release-dev:
+    # After a successful deploy, push the git tag matching .release-tag, so a
+    # tag means "this version was deployed" (card #461). Both tag steps share
+    # pull/image/settings via &tag-release-base and differ only in when/
+    # depends_on. push-tag is idempotent (plugin >= 0.1.1, card #336): a
+    # commit already carrying this tag — a redeploy, or dev then prod —
+    # logs "already exists at commit" and exits 0. A commit never gets a
+    # second tag, because a deployed commit always redeploys its tagged build.
     <<: &tag-release-base
       pull: true
-      image: *version-plugin
+      image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
       settings:
         mode: push-tag
         major_minor_source: cargo
         github_token:
           from_secret: github_token
-    when:
-      - event: [push, manual]
-    depends_on:
-      - auto-deploy-dev
-
-  tag-release-dev:
-    <<: *tag-release-base
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
@@ -380,9 +381,6 @@ steps:
       - deploy-dev
 
   tag-release-prod:
-    # A prod deploy always targets a commit main already tagged, so this is
-    # normally a no-op that just re-asserts the tag — kept so the dev and prod
-    # deploy paths are symmetric and neither can silently stop tagging.
     <<: *tag-release-base
     when:
       - event: deployment

@@ -9,7 +9,8 @@ pub mod tags;
 ///
 /// The release pipeline passes `RELEASE_TAG` as a build arg and exports it as an
 /// environment variable for the compile, so `option_env!` captures the exact
-/// semver that was tagged in git and pushed to the registry. Local/dev builds
+/// semver the image was pushed to the registry under (and the git tag a
+/// successful deploy of it pushes; card #461). Local/dev builds
 /// (no `RELEASE_TAG`) fall back to the crate version.
 pub fn app_version() -> &'static str {
     match option_env!("RELEASE_TAG") {
