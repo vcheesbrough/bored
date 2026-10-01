@@ -10,9 +10,10 @@
 # fails for every project on the host (v-note and the deploys included), and
 # its built images pile up on disk.
 #
-# Only projects that have existed for ~90 minutes or more are removed. An e2e
-# run takes minutes, so that can never be a live pipeline's stack, which a
-# blanket `bored-e2e-*` cleanup would kill:
+# Only projects that have existed for ~90 minutes or more are removed. That
+# is longer than the repo's Woodpecker pipeline timeout (60 min default), so
+# it can never be a live pipeline's stack, which a blanket `bored-e2e-*`
+# cleanup would kill. Keep the threshold above that timeout if it is raised:
 #   - a project with containers is stale when all of them are that old.
 #     Docker's RunningFor reads "About an hour ago" up to ~90 minutes and
 #     "N hours/days/weeks/months/years ago" after, so those plural units;
