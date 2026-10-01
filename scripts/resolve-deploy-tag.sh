@@ -36,8 +36,9 @@ if [ "$reused" = true ]; then
 else
     commit_image="$image_repo:commit-$sha"
     if ! docker pull "$commit_image" >/dev/null; then
-        echo "ERROR: $commit_image not found in the registry: no push pipeline for commit $sha has gone green." >&2
-        echo "Push the commit (or re-run its push pipeline) and let build, e2e and publish-image pass, then re-run this deployment." >&2
+        echo "ERROR: could not pull $commit_image (docker's error is above)." >&2
+        echo "If it is 'not found' / 'manifest unknown', no push pipeline for commit $sha has gone green:" >&2
+        echo "push the commit (or re-run its push pipeline) and let build, e2e and publish-image pass, then re-run this deployment." >&2
         exit 1
     fi
     tag="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$commit_image")"

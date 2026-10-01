@@ -3,7 +3,7 @@
 #   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
 #   A push never deploys: dev is deployed by hand, from any branch, with a deployment event (card #461). That lets
 #   several branches build at once without racing for the one shared dev environment.
-# Deploy: (validate-deployment ∥ find-commit-tag) → (apply-authentik-blueprint ∥ verify-image) → deploy-* → tag-release-*
+# Deploy: (validate-deployment ∥ find-commit-tag) → (apply-authentik-blueprint-<target> ∥ verify-image) → deploy-* → tag-release-*
 #   Deployments do NOT build — verify-image finds the build of this commit to promote, pulls that exact artifact and
 #   does NOT rebuild (card #254).
 #
@@ -133,17 +133,39 @@ steps:
           exit 1
         fi
 
-  apply-authentik-blueprint:
+  apply-authentik-blueprint-dev:
+    # Dev deploys come from any branch (card #461), so they get the dev-only
+    # blueprint and only the dev secret: an unmerged branch must never be able
+    # to change prod Authentik state. The full dev+prod blueprint is applied
+    # only by prod deploys, which validate-deployment limits to main. Both
+    # steps share everything but file/vars via &authentik-blueprint-base.
+    <<: &authentik-blueprint-base
+      depends_on:
+        - validate-deployment
+      pull: true
+      image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
     when:
       - event: deployment
-    depends_on:
-      - validate-deployment
-    pull: true
-    image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     settings:
-      api_url: https://auth.desync.link
-      api_token:
+      api_url: &authentik-url https://auth.desync.link
+      api_token: &authentik-token
         from_secret: authentik_api_token
+      file: authentik/blueprint-dev.yaml
+      instance_name: bored
+      timeout_seconds: 900
+      vars:
+        AUTHENTIK_BORED_DEV_CLIENT_SECRET:
+          from_secret: bored_dev_oidc_client_secret
+
+  apply-authentik-blueprint-prod:
+    <<: *authentik-blueprint-base
+    when:
+      - event: deployment
+        evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
+    settings:
+      api_url: *authentik-url
+      api_token: *authentik-token
       file: authentik/blueprint.yaml
       instance_name: bored
       timeout_seconds: 900
@@ -279,7 +301,7 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - verify-image
-      - apply-authentik-blueprint
+      - apply-authentik-blueprint-dev
 
   deploy-prod:
     when:
@@ -287,7 +309,7 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
       - verify-image
-      - apply-authentik-blueprint
+      - apply-authentik-blueprint-prod
     image: *deploy-image
     volumes: *docker-socket
     environment:

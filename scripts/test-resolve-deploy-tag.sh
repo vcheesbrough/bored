@@ -90,7 +90,7 @@ fi
 setup 1.69.342 false
 if run; then
     fail "no green build: expected a refusal, got '$(cat "$ws/.release-tag")'"
-elif grep -q "no push pipeline for commit $SHA has gone green" "$ws/err"; then
+elif grep -q "could not pull $REPO:commit-$SHA" "$ws/err" && grep -q "no push pipeline for commit $SHA has gone green" "$ws/err"; then
     pass "no green build: refused, naming the commit"
 else
     fail "no green build: refused, but stderr: $(cat "$ws/err")"
