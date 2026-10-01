@@ -180,24 +180,22 @@ steps:
           from_secret: bored_mcp_prod_client_secret
 
   find-commit-tag:
-    # The plugin's compute mode, used only for its lookup: it writes the semver
-    # git tag already on this commit to .release-tag with .release-tag-reused
-    # = true — i.e. the commit was deployed before. For a commit never deployed
-    # it writes reused = false and a max(tag)+1 guess that means nothing under
-    # pipeline-number patches; verify-image's resolve-deploy-tag.sh discards it.
-    # The lookup needs plugin >= 0.1.1 (0.1.0 could not see annotated tags'
-    # commits, card #336). Read-only, so no ordering against
-    # validate-deployment; verify-image depends on both.
+    # Looks up the semver git tag already on this commit (scripts/
+    # find-commit-tag.sh): tagged means deployed before, and verify-image's
+    # resolve-deploy-tag.sh then redeploys exactly that build. Not the
+    # release-versions plugin's compute mode: on an untagged commit that also
+    # logs an invented max(tag)+1 "allocation" no build ever has (card #461).
+    # Read-only, so no ordering against validate-deployment; verify-image
+    # depends on both.
     when:
       - event: deployment
     depends_on: []
-    pull: true
-    image: &version-plugin ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
-    settings:
-      mode: compute
-      major_minor_source: cargo
-      github_token:
+    image: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+    environment:
+      GITHUB_TOKEN:
         from_secret: github_token
+    commands:
+      - ./scripts/find-commit-tag.sh
 
   verify-image:
     # A deployment promotes a build the push pipeline already built,
@@ -358,7 +356,7 @@ steps:
     # second tag, because a deployed commit always redeploys its tagged build.
     <<: &tag-release-base
       pull: true
-      image: *version-plugin
+      image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
       settings:
         mode: push-tag
         major_minor_source: cargo

@@ -5,7 +5,7 @@
 # other script tests. A fake `docker` first on PATH stands in for the registry:
 # it knows the images listed in $WORK_DIR/registry (one "<ref> <version label>"
 # per line), fails `pull` for any other, and records every call. Each case runs
-# in its own workspace holding the plugin's .release-tag/.release-tag-reused.
+# in its own workspace holding find-commit-tag.sh's .release-tag/.release-tag-reused.
 # Expected tags are literal strings.
 
 set -eu
@@ -44,7 +44,7 @@ failures=0
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1" >&2; failures=$((failures + 1)); }
 
-# setup <plugin-tag> <reused> <registry lines...> — a fresh workspace in $ws.
+# setup <found-tag> <reused> <registry lines...> — a fresh workspace in $ws.
 case_n=0
 setup() {
     case_n=$((case_n + 1))
@@ -67,7 +67,7 @@ run() {
 }
 
 # --- never deployed: the commit image's version label wins -------------------
-# The plugin's max(tag)+1 guess (1.69.342) must be discarded.
+# Whatever .release-tag holds when the commit is untagged must be discarded.
 setup 1.69.342 false "$REPO:commit-$SHA 1.69.341"
 if run && [ "$(cat "$ws/.release-tag")" = "1.69.341" ]; then
     pass "undeployed commit: .release-tag is the commit image's version label"

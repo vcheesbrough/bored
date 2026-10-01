@@ -56,6 +56,9 @@ COPY scripts/test-compute-release-tag.sh scripts/test-compute-release-tag.sh
 RUN sh /app/scripts/test-compute-release-tag.sh
 COPY scripts/resolve-deploy-tag.sh scripts/resolve-deploy-tag.sh
 COPY scripts/test-resolve-deploy-tag.sh scripts/test-resolve-deploy-tag.sh
+COPY scripts/find-commit-tag.sh scripts/find-commit-tag.sh
+COPY scripts/test-find-commit-tag.sh scripts/test-find-commit-tag.sh
+RUN sh /app/scripts/test-find-commit-tag.sh
 RUN sh /app/scripts/test-resolve-deploy-tag.sh
 COPY scripts/publish-release-image.sh scripts/publish-release-image.sh
 COPY scripts/test-publish-release-image.sh scripts/test-publish-release-image.sh

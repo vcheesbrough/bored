@@ -2,16 +2,16 @@
 # Rewrites .release-tag, on a deployment, to the version of the build being
 # deployed for CI_COMMIT_SHA. Card #461.
 #
-# Runs after the release-versions plugin's `compute` mode, which writes
-# .release-tag and .release-tag-reused:
+# Runs after find-commit-tag.sh, which writes .release-tag and
+# .release-tag-reused:
 #
 #   - reused=true: the commit already carries a semver git tag, because a
 #     deploy of it succeeded before. Deploy that same build again, so a commit
 #     never runs under two versions and its git tag always names what is
 #     deployed (the plugin's push-tag refuses a second tag on one commit).
-#   - reused=false: the commit has never been deployed, and the plugin's
-#     max(tag)+1 guess means nothing — builds take the pipeline number as their
-#     patch (compute-release-tag.sh). publish-image also pushes each green
+#   - reused=false: the commit has never been deployed. Builds take the
+#     pipeline number as their patch (compute-release-tag.sh), so nothing in
+#     git names the build to use; publish-image also pushes each green
 #     build as :commit-<sha>, so read the version from that image's label: it
 #     is the latest green build of this commit.
 #
@@ -30,7 +30,7 @@ sha="${CI_COMMIT_SHA:?CI_COMMIT_SHA is required}"
 
 reused="$(cat .release-tag-reused 2>/dev/null || true)"
 
-# Fail closed on anything but the plugin's two literal answers: guessing
+# Fail closed on anything but find-commit-tag.sh's two literal answers: guessing
 # "never deployed" for a deployed commit would deploy a different build from
 # the one its git tag names, and the conflict would only surface at
 # tag-release, after the deploy.
