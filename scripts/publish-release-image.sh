@@ -6,9 +6,9 @@
 #      MAJOR.MINOR.<pipeline number>, unique only while Woodpecker's pipeline
 #      counter is: if the repo is re-created in Woodpecker or its DB restored
 #      from an old backup, numbers repeat, and pushing would silently replace
-#      an image prod or a git tag may name. A registry error in the probe also
-#      exits non-zero and falls through to the push, which then fails on its
-#      own if the registry is really down.
+#      an image prod or a git tag may name. Only an explicit "not found" from
+#      the registry lets the push go ahead; any other probe failure (auth,
+#      network, 5xx) refuses, since it cannot rule the version out.
 #   2. Push :<version>.
 #   3. Push the same image as :commit-<sha>, which a deployment of a commit
 #      never deployed before resolves to (resolve-deploy-tag.sh). A re-run of
@@ -27,12 +27,20 @@ image_repo="${IMAGE_REPO:-registry.desync.link/bored}"
 image="$image_repo:$version"
 commit_image="$image_repo:commit-$sha"
 
-if docker manifest inspect "$image" >/dev/null 2>&1; then
+if probe="$(docker manifest inspect "$image" 2>&1 >/dev/null)"; then
     echo "ERROR: $image already exists in the registry; Woodpecker's pipeline numbers have repeated (card #461)." >&2
     echo "Refusing to overwrite it. Start the next iteration — its new minor (AGENTS.md: minor = iteration) is a" >&2
     echo "fresh version line — rather than bumping the minor mid-iteration." >&2
     exit 1
 fi
+case "$probe" in
+    *"no such manifest"* | *"manifest unknown"* | *"not found"*) ;;
+    *)
+        echo "ERROR: could not tell whether $image already exists: $probe" >&2
+        echo "Refusing to push over a version that may exist; re-run publish-image once the registry answers." >&2
+        exit 1
+        ;;
+esac
 
 docker push "$image"
 docker tag "$image" "$commit_image"

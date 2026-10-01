@@ -86,8 +86,12 @@ steps:
     # --force-recreate` / `down` tear down another pipeline's stack (card
     # #461; the bored-vs-v-note version of this was card #346). `--rmi local`
     # drops the per-project images compose built, so they don't pile up; their
-    # layers stay in the build cache.
+    # layers stay in the build cache. A pipeline cancelled before its `down`
+    # leaks its project for good, so each run first removes bored-e2e-*
+    # projects whose containers are hours old — never a live run's.
     commands:
+      - |
+        ./scripts/prune-stale-e2e-projects.sh bored-e2e-$$CI_PIPELINE_NUMBER || echo "WARNING: stale e2e project cleanup failed"
       - |
         RELEASE_TAG=$$(cat .release-tag)
         PROJECT=bored-e2e-$$CI_PIPELINE_NUMBER

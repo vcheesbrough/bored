@@ -20,7 +20,13 @@ cat > "$WORK_DIR/bin/docker" <<EOF
 #!/bin/sh
 echo "\$*" >> "$WORK_DIR/docker-calls"
 if [ "\$1 \$2" = "manifest inspect" ]; then
-    grep -qx "\$3" "$WORK_DIR/registry"
+    if [ -f "$WORK_DIR/registry-down" ]; then
+        echo "Get https://registry.example/v2/: dial tcp: connection refused" >&2
+        exit 1
+    fi
+    grep -qx "\$3" "$WORK_DIR/registry" && exit 0
+    echo "no such manifest: \$3" >&2
+    exit 1
 fi
 EOF
 chmod +x "$WORK_DIR/bin/docker"
@@ -35,6 +41,7 @@ fail() { echo "FAIL - $1" >&2; failures=$((failures + 1)); }
 # run <registry refs...> — fresh registry and call log, then the script for
 # version 1.69.341.
 run() {
+    rm -f "$WORK_DIR/registry-down"
     : > "$WORK_DIR/registry"
     : > "$WORK_DIR/docker-calls"
     for ref in "$@"; do
@@ -65,6 +72,19 @@ elif grep -q "already exists" "$WORK_DIR/err" \
     pass "existing version: refused before any push or tag"
 else
     fail "existing version: docker calls: $(cat "$WORK_DIR/docker-calls") / $(cat "$WORK_DIR/err")"
+fi
+
+# --- registry error in the probe: refused, nothing pushed -----------------
+# It cannot rule out that the version exists, so pushing could overwrite it.
+run "$REPO:1.69.300" || true
+: > "$WORK_DIR/docker-calls"
+touch "$WORK_DIR/registry-down"
+if PATH="$WORK_DIR/bin:$PATH" IMAGE_REPO="$REPO" sh "$UNDER_TEST" 1.69.341 "$SHA" > "$WORK_DIR/out" 2> "$WORK_DIR/err"; then
+    fail "registry error: expected a refusal"
+elif grep -q "could not tell whether" "$WORK_DIR/err" && ! grep -q "^push\|^tag" "$WORK_DIR/docker-calls"; then
+    pass "registry error in the probe: refused before any push"
+else
+    fail "registry error: docker calls: $(cat "$WORK_DIR/docker-calls") / $(cat "$WORK_DIR/err")"
 fi
 
 # --- missing arguments: refused -------------------------------------------

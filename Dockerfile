@@ -63,6 +63,9 @@ RUN sh /app/scripts/test-resolve-deploy-tag.sh
 COPY scripts/publish-release-image.sh scripts/publish-release-image.sh
 COPY scripts/test-publish-release-image.sh scripts/test-publish-release-image.sh
 RUN sh /app/scripts/test-publish-release-image.sh
+COPY scripts/prune-stale-e2e-projects.sh scripts/prune-stale-e2e-projects.sh
+COPY scripts/test-prune-stale-e2e-projects.sh scripts/test-prune-stale-e2e-projects.sh
+RUN sh /app/scripts/test-prune-stale-e2e-projects.sh
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
