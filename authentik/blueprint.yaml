@@ -47,7 +47,7 @@ entries:
   # access token carries it and the SPA can present that token to the ingest.
   # Identified by name, not scope_name, because another product's instance of
   # the collector's reference blueprint may define its own `telemetry:write`
-  # mapping. Kept identical to the entry in blueprint-dev.yaml.
+  # mapping.
   - model: authentik_providers_oauth2.scopemapping
     state: present
     identifiers:
