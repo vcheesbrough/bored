@@ -9,11 +9,15 @@
 # leaked network eats one of the daemon's address pools until `compose up`
 # fails for every project on the host (v-note and the deploys included).
 #
-# Only projects whose containers have all existed for hours are removed. An
-# e2e run takes minutes, so that can never be a live pipeline's stack, which a
-# blanket `bored-e2e-*` cleanup would kill. Docker's RunningFor reads
-# "About an hour ago" up to ~90 minutes and "N hours/days/weeks/months/years
-# ago" after, so matching those plural units means at least ~90 minutes old.
+# Only projects that have existed for ~90 minutes or more are removed. An e2e
+# run takes minutes, so that can never be a live pipeline's stack, which a
+# blanket `bored-e2e-*` cleanup would kill:
+#   - a project with containers is stale when all of them are that old.
+#     Docker's RunningFor reads "About an hour ago" up to ~90 minutes and
+#     "N hours/days/weeks/months/years ago" after, so those plural units;
+#   - a project with no containers at all (cancelled during `up`, after its
+#     network was created) is stale when its network is that old, by the
+#     network's own creation time.
 #
 # Best effort: a failure to remove something is a warning, never a failed run.
 #
@@ -24,19 +28,36 @@ set -eu
 
 current="${1:?usage: prune-stale-e2e-projects.sh <current-project>}"
 
-listing="$(docker ps -a --filter label=com.docker.compose.project \
-    --format '{{.Label "com.docker.compose.project"}}|{{.RunningFor}}')"
+threshold=5400  # seconds: ~90 minutes, as RunningFor's plural units
+now="$(date +%s)"
 
-# Projects named bored-e2e-<digits>, other than this run's, where no
-# container is younger than the threshold.
+containers_listing="$(docker ps -a --filter label=com.docker.compose.project \
+    --format '{{.Label "com.docker.compose.project"}}|{{.RunningFor}}')"
+network_ids="$(docker network ls -q --filter label=com.docker.compose.project)"
+networks_listing=""
+if [ -n "$network_ids" ]; then
+    networks_listing="$(docker network inspect \
+        -f '{{index .Labels "com.docker.compose.project"}}|{{.Created.Unix}}' $network_ids)"
+fi
+
+# Projects named bored-e2e-<digits>, other than this run's, that are stale by
+# the rules above.
 stale="$(
-    printf '%s\n' "$listing" | awk -F'|' -v current="$current" '
-        $1 ~ /^bored-e2e-[0-9]+$/ && $1 != current {
-            seen[$1] = 1
-            if ($2 !~ /(hours|days|weeks|months|years) ago$/) young[$1] = 1
+    {
+        printf '%s\n' "$containers_listing" | sed 's/^/C|/'
+        printf '%s\n' "$networks_listing" | sed 's/^/N|/'
+    } | awk -F'|' -v current="$current" -v now="$now" -v threshold="$threshold" '
+        $2 !~ /^bored-e2e-[0-9]+$/ || $2 == current { next }
+        $1 == "C" {
+            has_container[$2] = 1
+            if ($3 !~ /(hours|days|weeks|months|years) ago$/) young[$2] = 1
         }
-        END { for (p in seen) if (!(p in young)) print p }
-    ' | sort
+        $1 == "N" && now - $3 >= threshold { old_network[$2] = 1 }
+        END {
+            for (p in has_container) if (!(p in young)) print p
+            for (p in old_network) if (!(p in has_container)) print p
+        }
+    ' | sort -u
 )"
 
 for project in $stale; do

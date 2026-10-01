@@ -89,7 +89,7 @@ Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but val
 | Secret | Used by |
 |---|---|
 | `zot_ci_user` / `zot_ci_password` | push to `registry.desync.link` |
-| `github_token` | `woodpecker-plugin-release-versions` (remote tag listing + `git push` of release tags) **and** the `build` step's `docker build --secret id=github_token` (fetches the private `sovereign-config-provider` git dependency — see [Runtime configuration](#runtime-configuration)) |
+| `github_token` | `woodpecker-plugin-release-versions` (`git push` of release tags after a deploy), the `find-commit-tag` step (`git ls-remote --tags`, see [`scripts/find-commit-tag.sh`](scripts/find-commit-tag.sh)), **and** the `build` step's `docker build --secret id=github_token` (fetches the private `sovereign-config-provider` git dependency — see [Runtime configuration](#runtime-configuration)) |
 | `authentik_api_token` | apply-authentik-blueprint-dev / -prod (Authentik admin API) |
 | `bored_dev_oidc_client_secret` | blueprint var `AUTHENTIK_BORED_DEV_CLIENT_SECRET` only — deploy-dev reads the OIDC client secret from sovereign-config now, not this secret directly |
 | `bored_prod_oidc_client_secret` | blueprint var `AUTHENTIK_BORED_PROD_CLIENT_SECRET` only (prod deploys) — deploy-prod reads the OIDC client secret from sovereign-config now, not this secret directly |
