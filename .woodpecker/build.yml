@@ -203,10 +203,12 @@ steps:
     # its image was never published.
     # The other way in is a commit that was never pushed through the pipeline
     # at all: it has no tag, so compute allocates the next unused patch, which
-    # nothing built — the pull fails the same way. If a pipeline elsewhere is
-    # between its own tag-release and publish-image, that "unused" patch can be
-    # the one it is about to publish; check-image-metadata.sh's revision label
-    # check then fails the deploy on the sha instead. Still fail-closed.
+    # nothing built — the pull fails the same way. (Only if another pipeline
+    # sits between its own compute-version and tag-release can the two pick the
+    # same patch, and that pipeline cannot have published by the time this
+    # pull runs, so the pull still fails. Should a matching image ever exist,
+    # check-image-metadata.sh's revision label check fails the deploy on the
+    # sha instead.) Still fail-closed.
     when:
       - event: deployment
     depends_on:
