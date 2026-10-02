@@ -8,7 +8,10 @@
 //! is checked: it pins the *shape* of every payload, so a storage change that
 //! alters what clients see fails here first. It is deliberately broad: one
 //! scenario drives every JSON route, and every `BoardEvent` variant, through
-//! the real router.
+//! the real router. The one route it cannot reach with a 200 is
+//! `GET /api/telemetry/token`, which needs an authenticated browser session;
+//! its success body carries no timestamp or id, and only its 404 is checked
+//! here.
 //!
 //! # What it asserts
 //!
@@ -794,6 +797,16 @@ async fn every_route_and_event_honours_the_contract() {
         "GET /api/info",
     );
     assert_shape(&info, Shape::AppInfo, "GET /api/info");
+    // `/api/telemetry/token` only answers 200 to an authenticated browser
+    // session, which this auth-disabled router has no way to create; its
+    // success body (`access_token`, `expires_in`) holds no timestamp or id
+    // and is covered by `routes::telemetry`'s own tests. Here: the reachable
+    // answer leaks nothing.
+    assert_error(
+        server.get("/api/telemetry/token").await,
+        StatusCode::NOT_FOUND,
+        "GET /api/telemetry/token (telemetry off)",
+    );
 
     // ── Errors carry no database text ───────────────────────────────────
     assert_error(
@@ -989,8 +1002,35 @@ async fn restore_legacy_deletion(target: Deleted) {
     );
     assert_list_of(&restored, Shape::AuditEntry, &context);
 
+    // Check every event the restore caused, and keep the `created_at` the
+    // `*_created` event announced for the target entity.
     let mut seen = BTreeSet::new();
-    drain_events(&mut rx, &mut seen);
+    let mut announced_created_at = None;
+    loop {
+        let message = match rx.try_recv() {
+            Ok(message) => message,
+            Err(TryRecvError::Empty) => break,
+            Err(other) => panic!("{target:?}: event receiver failed: {other:?}"),
+        };
+        seen.insert(assert_event(&message.event));
+        let announced = match &message.event {
+            BoardEvent::BoardCreated { board } if board.id == entity_id => &board.created_at,
+            BoardEvent::ColumnCreated { column } if column.id == entity_id => &column.created_at,
+            BoardEvent::CardCreated { card } if card.id == entity_id => &card.created_at,
+            _ => continue,
+        };
+        announced_created_at = Some(announced.clone());
+    }
+    // And the restore row's `snapshot_after` for the target entity.
+    let snapshot_created_at =
+        restored
+            .as_array()
+            .expect("restore response is a list")
+            .iter()
+            .find(|row| row["entity_id"] == entity_id.as_str())
+            .unwrap_or_else(|| panic!("{target:?}: restore row for the entity"))["snapshot_after"]
+            ["created_at"]
+            .clone();
     assert!(
         seen.contains(created_event),
         "{target:?}: restore announced {created_event}: {seen:?}"
@@ -1036,6 +1076,18 @@ async fn restore_legacy_deletion(target: Deleted) {
     assert_ne!(
         fetched["created_at"], original_created_at,
         "{target:?}: the recreated row has its own created_at"
+    );
+    // The fix itself: the event and the new audit snapshot describe the row
+    // that now exists, not the deleted one they were recreated from. The
+    // re-read above was already fresh before #472, so only these two pin it.
+    assert_eq!(
+        announced_created_at.as_deref(),
+        fetched["created_at"].as_str(),
+        "{target:?}: {created_event} announces the recreated row"
+    );
+    assert_eq!(
+        snapshot_created_at, fetched["created_at"],
+        "{target:?}: snapshot_after records the recreated row"
     );
 }
 
