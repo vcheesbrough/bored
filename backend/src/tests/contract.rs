@@ -14,8 +14,9 @@
 //!
 //! For every response body and every serialized SSE event:
 //!
-//! - **No storage syntax.** No `d'` (a SurrealQL datetime literal) and no
-//!   `"<table>:` (a SurrealDB record id) anywhere in the text.
+//! - **No storage syntax.** No JSON string starting `"d'YYYY-MM-DDT` (a
+//!   SurrealQL datetime literal) and no `"<table>:` (a SurrealDB record id)
+//!   anywhere in the text.
 //! - **Timestamps** match `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$` —
 //!   RFC 3339, UTC, exactly six fractional digits (`crate::timestamp`).
 //! - **IDs** are bare lowercase ULIDs.
@@ -190,12 +191,18 @@ impl Shape {
 
 // ── Checks ──────────────────────────────────────────────────────────────────
 
+/// A JSON string whose value starts as a SurrealQL datetime literal:
+/// `"d'2026-10-02T…`. Anchored on the opening quote and the date, so prose
+/// such as `"the board's name"` in a card body is not mistaken for one.
+static SURREAL_DATETIME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""d'\d{4}-\d{2}-\d{2}T"#).expect("surreal datetime regex"));
+
 /// The text of a body or event must carry no SurrealDB syntax at all. Checked
 /// on the raw text, not the parsed JSON, so nothing can hide in a field the
 /// shape checks do not look at.
 fn assert_no_storage_syntax(text: &str, context: &str) {
     assert!(
-        !text.contains("d'"),
+        !SURREAL_DATETIME.is_match(text),
         "{context}: SurrealQL datetime literal in {text}"
     );
     for table in TABLES {
@@ -572,7 +579,9 @@ async fn every_route_and_event_honours_the_contract() {
             server
                 .post(&format!("/api/columns/{todo}/cards"))
                 .json(&shared::CreateCardRequest {
-                    body: format!("# Contract card {i}"),
+                    // An apostrophe on purpose: `d'` in prose ("board's")
+                    // must not read as a SurrealQL literal.
+                    body: format!("# Contract card {i}: the board's card"),
                     tags: vec!["contract".to_string(), format!("tag-{i}")],
                 })
                 .await,
