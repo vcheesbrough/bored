@@ -20,6 +20,14 @@ services:
     # observability.rs); this leaves headroom so it is never SIGKILLed while
     # flushing.
     stop_grace_period: 15s
+    # A ceiling, so a runaway backend is OOM-killed and restarted rather than
+    # eating the host (card #470). It must stay ABOVE the backend's real peak:
+    # ~530 MB (VmHWM) on 2026-10-02, almost all of it the ~824k `!ts` keys
+    # SurrealKV holds in memory — leaked before card #470 stopped the leak, and
+    # resident until the Postgres migration drops SurrealDB. A tighter limit
+    # OOM-kills the backend while it replays its index at startup, every
+    # restart. Revisit (lower it) once the migration lands.
+    mem_limit: 768m
     environment:
       # Container-internal key stays `BORED__OBSERVABILITY__ENVIRONMENT`; the
       # deploy-script-facing variable name stays `APP_ENV` (`.woodpecker/build.yml`

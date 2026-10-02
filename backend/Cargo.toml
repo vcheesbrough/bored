@@ -114,4 +114,10 @@ rcgen = { version = "0.14", default-features = false, features = [
 ] }
 axum-test = "15"
 serial_test = "3"
+# The storage engine under SurrealDB, opened directly by the `!ts` key-leak
+# test (card #470) so it counts keys without going through SurrealDB — an
+# oracle independent of the code under test. Pinned with `=` to the version
+# surrealdb-core resolves to in Cargo.lock, so the test reads the same on-disk
+# format the backend writes; bump it together with surrealdb.
+surrealkv = "=0.9.3"
 tempfile = "3"
