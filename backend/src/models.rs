@@ -1,5 +1,20 @@
+//! Database row types (`Db*`) and their conversion to the public API types in
+//! `shared`.
+//!
+//! Every `into_api()` here is a boundary: nothing SurrealDB-specific may cross
+//! it (card #472). Concretely:
+//!
+//! - **IDs** go out as the bare ULID (`thing.id.to_raw()`), never the
+//!   `table:id` record-id form.
+//! - **Timestamps** go out through [`api_timestamp`], never the driver's own
+//!   `Datetime::to_string()`, which renders a SurrealQL literal
+//!   (`d'…'`). The contract tests in `tests/contract.rs` hold both rules for
+//!   every route and SSE event.
+
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+
+use crate::timestamp::api_timestamp;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbBoard {
@@ -16,8 +31,8 @@ impl DbBoard {
             id: self.id.id.to_raw(),
             name: self.name,
             last_edited_by: self.last_edited_by,
-            created_at: self.created_at.to_string(),
-            updated_at: self.updated_at.to_string(),
+            created_at: api_timestamp(&self.created_at),
+            updated_at: api_timestamp(&self.updated_at),
         }
     }
 }
@@ -41,8 +56,8 @@ impl DbColumn {
             name: self.name,
             position: self.position,
             last_edited_by: self.last_edited_by,
-            created_at: self.created_at.to_string(),
-            updated_at: self.updated_at.to_string(),
+            created_at: api_timestamp(&self.created_at),
+            updated_at: api_timestamp(&self.updated_at),
         }
     }
 }
@@ -74,8 +89,8 @@ impl DbCard {
             number: self.number.unwrap_or(0) as u32,
             tags: self.tags,
             last_edited_by: self.last_edited_by,
-            created_at: self.created_at.to_string(),
-            updated_at: self.updated_at.to_string(),
+            created_at: api_timestamp(&self.created_at),
+            updated_at: api_timestamp(&self.updated_at),
         }
     }
 }
@@ -113,8 +128,8 @@ impl DbCardLink {
             successor_number: self.successor_number.unwrap_or(0) as u32,
             reason: self.reason,
             last_edited_by: self.last_edited_by,
-            created_at: self.created_at.to_string(),
-            updated_at: self.updated_at.to_string(),
+            created_at: api_timestamp(&self.created_at),
+            updated_at: api_timestamp(&self.updated_at),
         }
     }
 }
@@ -147,7 +162,7 @@ impl DbAuditLog {
     pub fn into_api(self) -> shared::AuditLogEntry {
         shared::AuditLogEntry {
             id: self.id.id.to_raw(),
-            created_at: self.created_at.to_string(),
+            created_at: api_timestamp(&self.created_at),
             actor_sub: self.actor_sub,
             actor_display_name: self.actor_display_name,
             entity_type: self.entity_type,

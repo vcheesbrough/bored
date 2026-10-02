@@ -502,7 +502,7 @@ async fn restore_one_delete(
             if exists.is_some() {
                 return Err(ApiError::CONFLICT);
             }
-            let _: Option<DbBoard> = db
+            let created: Option<DbBoard> = db
                 .create(("boards", &b.id))
                 .content(json!({
                     "name": b.name,
@@ -514,6 +514,14 @@ async fn restore_one_delete(
                     "boards",
                 ))
                 .await?;
+            // Announce the row the database just created, not the snapshot it
+            // was created from (card #472). The snapshot is history: it may
+            // predate #472 and carry a SurrealQL `d'…'` timestamp, and its
+            // `created_at` / `updated_at` are the deleted row's, while the
+            // recreated row has fresh ones from the schema defaults.
+            let b = created
+                .ok_or_else(|| ApiError::internal("restore created no board row"))?
+                .into_api();
             let after = serde_json::to_value(b.clone())?;
             let _ = events.send(BroadcastEvent {
                 board_id: b.id.clone(),
@@ -552,7 +560,7 @@ async fn restore_one_delete(
             if exists.is_some() {
                 return Err(ApiError::CONFLICT);
             }
-            let _: Option<DbColumn> = db
+            let created: Option<DbColumn> = db
                 .query(
                     "CREATE type::thing('columns', $id) SET \
                      board = type::thing('boards', $board_id), \
@@ -570,6 +578,10 @@ async fn restore_one_delete(
                 ))
                 .await?
                 .take(0)?;
+            // The recreated row, not the snapshot — see the board arm above.
+            let c = created
+                .ok_or_else(|| ApiError::internal("restore created no column row"))?
+                .into_api();
             let after = serde_json::to_value(c.clone())?;
             let entry = record_and_broadcast(
                 db,
@@ -608,7 +620,7 @@ async fn restore_one_delete(
             if exists.is_some() {
                 return Err(ApiError::CONFLICT);
             }
-            let _: Option<DbCard> = db
+            let created: Option<DbCard> = db
                 .query(
                     "CREATE type::thing('cards', $id) SET \
                      column = type::thing('columns', $col_id), \
@@ -629,6 +641,10 @@ async fn restore_one_delete(
                 ))
                 .await?
                 .take(0)?;
+            // The recreated row, not the snapshot — see the board arm above.
+            let card = created
+                .ok_or_else(|| ApiError::internal("restore created no card row"))?
+                .into_api();
             let after = serde_json::to_value(card.clone())?;
             let mut out = Vec::new();
             let entry = record_and_broadcast(

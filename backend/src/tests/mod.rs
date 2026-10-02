@@ -9,6 +9,7 @@ mod audit_log;
 mod boards;
 mod cards;
 mod columns;
+mod contract;
 mod errors;
 mod links;
 mod outbound_http;

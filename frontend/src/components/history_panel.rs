@@ -579,18 +579,18 @@ fn current_tz_label() -> String {
     String::new()
 }
 
-/// Parse a Surreal-emitted timestamp string (e.g. `"d'2026-05-07T01:27:04.823026281Z'"`)
-/// into milliseconds since the Unix epoch.
+/// Parse an audit timestamp into milliseconds since the Unix epoch.
 ///
-/// Strips the `d'…'` wrapper first, then trims fractional seconds to three
-/// digits (JS `Date.parse` is permissive about trailing fractional digits
-/// in modern engines, but trimming keeps the input portable).
+/// Takes the API's format since card #472 (`"2026-05-07T01:27:04.823026Z"`),
+/// and still accepts the pre-#472 SurrealQL literal
+/// (`"d'2026-05-07T01:27:04.823026281Z'"`) — see [`normalise_audit_ts`]. The
+/// API no longer sends the literal, but pre-#472 audit snapshots hold it
+/// until card #471 rewrites them, so the tolerance stays until then.
 ///
 /// Falls back to the current time when parsing fails so a malformed row
 /// still renders rather than blowing up the whole drawer.
 fn parse_audit_ts(raw: &str) -> i64 {
-    let inner = shared::history::strip_surreal_wrapper(raw);
-    let normalised = trim_fractional_seconds(inner);
+    let normalised = normalise_audit_ts(raw);
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(&normalised));
     let ms = date.get_time();
     if ms.is_nan() {
@@ -598,6 +598,18 @@ fn parse_audit_ts(raw: &str) -> i64 {
     } else {
         ms as i64
     }
+}
+
+/// Turn either audit timestamp form into the plain millisecond-precision
+/// ISO string JS `Date` parses everywhere.
+///
+/// Strips the legacy `d'…'` wrapper (a no-op on the current format), then
+/// trims fractional seconds to three digits: JS `Date.parse` is permissive
+/// about longer fractions in modern engines, but trimming keeps the input
+/// portable. Pure string work, split out of [`parse_audit_ts`] so it can be
+/// unit-tested on the host target, where `js_sys::Date` is unavailable.
+fn normalise_audit_ts(raw: &str) -> String {
+    trim_fractional_seconds(shared::history::strip_surreal_wrapper(raw))
 }
 
 /// Truncate the fractional-seconds part of an ISO-8601 string to at most
@@ -619,4 +631,41 @@ fn trim_fractional_seconds(s: &str) -> String {
         prefix = &s[..dot_at],
         suffix = &after_dot[z_at..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! Host-target tests (`cargo test -p frontend`, no wasm32): only the pure
+    //! string handling, since `js_sys::Date` needs a JS engine. Expected
+    //! strings are written out by hand.
+
+    use super::*;
+
+    /// The API format since card #472: fixed microseconds, no wrapper.
+    #[test]
+    fn normalises_the_current_api_format() {
+        assert_eq!(
+            normalise_audit_ts("2026-10-02T16:17:12.643091Z"),
+            "2026-10-02T16:17:12.643Z"
+        );
+    }
+
+    /// The pre-#472 SurrealQL literal, nanoseconds, as old audit snapshots
+    /// still hold it. It must land on the same string as the same instant in
+    /// the new format, so old and new values render identically.
+    #[test]
+    fn normalises_a_legacy_surreal_literal() {
+        assert_eq!(
+            normalise_audit_ts("d'2026-10-02T16:17:12.643091493Z'"),
+            "2026-10-02T16:17:12.643Z"
+        );
+    }
+
+    #[test]
+    fn leaves_a_whole_second_timestamp_alone() {
+        assert_eq!(
+            normalise_audit_ts("2026-10-02T16:17:12Z"),
+            "2026-10-02T16:17:12Z"
+        );
+    }
 }
