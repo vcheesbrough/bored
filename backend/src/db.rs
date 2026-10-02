@@ -608,7 +608,8 @@ mod tests {
     /// Opens the database at `path` through the production open path with the
     /// given intervals, writes a board every 100 ms for `wall` (so the run is
     /// not idle — ordinary writes must not create `!ts` keys either), then
-    /// closes it completely. Returns how long the connection was open.
+    /// closes it completely. Returns how long the connection was open,
+    /// counted from just before it was opened.
     ///
     /// A runtime of its own, rather than `#[tokio::test]`, because SurrealDB
     /// closes its store on a spawned task after the last handle drops, and
@@ -627,10 +628,14 @@ mod tests {
             .expect("tokio runtime");
         let open_for = runtime.block_on(async {
             let path_str = path.to_str().expect("temp path is valid UTF-8");
+            // Start the clock *before* connecting: the engine's background
+            // ticks start inside `connect_persistent_with`, before `init()`
+            // (schema + migrations) finishes, so ticks during a slow setup
+            // still count towards the expected total.
+            let opened = std::time::Instant::now();
             let db = connect_persistent_with(path_str, intervals)
                 .await
                 .expect("connect_persistent_with should open the database");
-            let opened = std::time::Instant::now();
             let mut written = 0u32;
             while opened.elapsed() < wall {
                 db.query("CREATE boards SET name = $name")
