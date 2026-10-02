@@ -152,19 +152,27 @@ pub fn tag_rank_of(recent: &[String], tag: &str) -> usize {
 
 /// A sortable key for an API timestamp, ordering chronologically as a string.
 ///
-/// Timestamps reach the frontend as whatever `surrealdb::sql::Datetime`'s
-/// `Display` produced — an RFC 3339 instant, possibly wrapped as `d'…'`. Two
-/// such strings do *not* reliably compare chronologically on their own: the
-/// fractional part is printed without trailing zeros, so `…45.6Z` sorts
-/// *after* `…45.679Z` because `'Z'` outranks `'7'` in ASCII. Unwrapping the
-/// quotes and padding the fraction to nine digits removes both hazards, and
-/// leaves anything unrecognised to compare as itself rather than vanishing.
+/// Since card #472 the API sends fixed-width UTC timestamps
+/// (`2026-09-12T12:17:45.679420Z`, always six fractional digits), which
+/// already compare chronologically as text; on those this function only pads
+/// the fraction. It still handles the older, ragged form —
+/// `surrealdb::sql::Datetime`'s `Display`, an RFC 3339 instant wrapped as
+/// `d'…'` with trailing zeros dropped. In that form `…45.6Z` sorts *after*
+/// `…45.679Z` (`'Z'` outranks `'7'` in ASCII); unwrapping the quotes and
+/// padding the fraction to nine digits removes both hazards, and leaves
+/// anything unrecognised to compare as itself rather than vanishing.
+///
+/// Every caller passes a live card's `updated_at`, which the API now always
+/// formats itself, so the `d'…'` unwrap is a **defensive no-op**. It is kept
+/// alongside `shared::history::strip_surreal_wrapper` until card #471
+/// rewrites the legacy literals still stored in old audit snapshots, and can
+/// go with it.
 ///
 /// Instants carrying a numeric UTC offset are split correctly but still not
 /// *converted*: `12:00:00+01:00` and `12:00:00Z` compare by their wall-clock
 /// text, not by the moment they name. Ordering only stays chronological among
 /// timestamps sharing one offset — which every timestamp from this API does,
-/// since SurrealDB renders UTC.
+/// since it always renders UTC.
 pub fn recency_key(timestamp: &str) -> String {
     let trimmed = timestamp
         .trim()
@@ -279,6 +287,22 @@ mod tests {
         assert_eq!(
             recency_key("d'2026-09-12T12:17:45.679420467Z'"),
             "2026-09-12T12:17:45.679420467Z"
+        );
+    }
+
+    /// The post-#472 API format pads to the nine-digit key, and still sorts
+    /// correctly against the defensive legacy path for a later instant.
+    #[test]
+    fn recency_key_orders_the_current_format_against_a_legacy_literal() {
+        assert_eq!(
+            recency_key("2026-09-12T12:17:45.679420Z"),
+            "2026-09-12T12:17:45.679420000Z"
+        );
+        let current = recency_key("2026-09-12T12:17:45.679420Z");
+        let later_legacy = recency_key("d'2026-09-12T12:17:45.679420467Z'");
+        assert!(
+            current < later_legacy,
+            "{current} should sort before {later_legacy}"
         );
     }
 

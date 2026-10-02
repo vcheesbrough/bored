@@ -113,6 +113,10 @@ rcgen = { version = "0.14", default-features = false, features = [
     "ring",
 ] }
 axum-test = "15"
+# The API contract suite (`src/tests/contract.rs`, card #472) states the
+# timestamp grammar as the literal regex the card specifies. Already in the
+# dependency tree; this adds no new crate.
+regex = "1"
 serial_test = "3"
 # The storage engine under SurrealDB, opened directly by the `!ts` key-leak
 # test (card #470) so it counts keys without going through SurrealDB — an

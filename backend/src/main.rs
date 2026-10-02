@@ -31,6 +31,7 @@ mod redact;
 mod routes;
 mod server_span;
 mod spa;
+mod timestamp;
 
 use std::sync::Arc;
 use std::time::Duration;
