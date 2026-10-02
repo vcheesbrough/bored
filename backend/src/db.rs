@@ -750,6 +750,14 @@ mod tests {
         format!("{ns}\n{db_info}")
     }
 
+    /// Whether any definition carries a `CHANGEFEED` clause. Shared by the
+    /// guard and its control, so the control exercises the very predicate the
+    /// guard relies on. Upper-cased first so a lower-case clause (should the
+    /// renderer ever change) still matches.
+    fn mentions_changefeed(defined: &str) -> bool {
+        defined.to_uppercase().contains("CHANGEFEED")
+    }
+
     /// The 24 h changefeed tick is only harmless because bored defines no
     /// changefeed: with one, its entries would be garbage-collected once a
     /// day. Fail loudly if the schema (or anything `init()` runs) ever adds
@@ -764,20 +772,27 @@ mod tests {
             "INFO output does not list the schema's tables:\n{defined}"
         );
         assert!(
-            !defined.to_uppercase().contains("CHANGEFEED"),
+            !mentions_changefeed(&defined),
             "the schema now defines a CHANGEFEED — the changefeed tick is set to \
              once a day on the basis that there are none (CHANGEFEED_GC_INTERVAL, \
              card #470); revisit it:\n{defined}"
         );
 
         // Control: the same check does see a changefeed when there is one.
-        db.query("DEFINE TABLE changefeed_probe CHANGEFEED 1d")
+        // The probe's name must not itself contain the word, or the control
+        // would pass on the table name alone, clause or no clause.
+        db.query("DEFINE TABLE cf_probe CHANGEFEED 1d")
             .await
             .expect("define should execute")
             .check()
             .expect("define should succeed");
+        let with_probe = definitions(&db).await;
         assert!(
-            definitions(&db).await.to_uppercase().contains("CHANGEFEED"),
+            with_probe.contains("DEFINE TABLE cf_probe"),
+            "the probe table is missing from INFO:\n{with_probe}"
+        );
+        assert!(
+            mentions_changefeed(&with_probe),
             "the check cannot see a table-level CHANGEFEED"
         );
     }
