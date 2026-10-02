@@ -581,11 +581,14 @@ fn current_tz_label() -> String {
 
 /// Parse an audit timestamp into milliseconds since the Unix epoch.
 ///
-/// Takes the API's format since card #472 (`"2026-05-07T01:27:04.823026Z"`),
-/// and still accepts the pre-#472 SurrealQL literal
-/// (`"d'2026-05-07T01:27:04.823026281Z'"`) — see [`normalise_audit_ts`]. The
-/// API no longer sends the literal, but pre-#472 audit snapshots hold it
-/// until card #471 rewrites them, so the tolerance stays until then.
+/// Takes the API's format since card #472 (`"2026-05-07T01:27:04.823026Z"`).
+/// It still accepts the pre-#472 SurrealQL literal
+/// (`"d'2026-05-07T01:27:04.823026281Z'"`) — see [`normalise_audit_ts`] —
+/// but only as a **defensive no-op**: this parses an audit row's own
+/// top-level `created_at`, which the API now always formats itself, so no
+/// caller can hand it the literal. Kept, like
+/// `shared::history::strip_surreal_wrapper`, until card #471 rewrites the
+/// legacy literals still stored inside old audit snapshots; remove after.
 ///
 /// Falls back to the current time when parsing fails so a malformed row
 /// still renders rather than blowing up the whole drawer.
@@ -650,9 +653,8 @@ mod tests {
         );
     }
 
-    /// The pre-#472 SurrealQL literal, nanoseconds, as old audit snapshots
-    /// still hold it. It must land on the same string as the same instant in
-    /// the new format, so old and new values render identically.
+    /// The pre-#472 SurrealQL literal, nanoseconds: the defensive path. It
+    /// lands on the same string as the same instant in the new format.
     #[test]
     fn normalises_a_legacy_surreal_literal() {
         assert_eq!(

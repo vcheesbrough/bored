@@ -157,12 +157,16 @@ pub fn tag_rank_of(recent: &[String], tag: &str) -> usize {
 /// already compare chronologically as text; on those this function only pads
 /// the fraction. It still handles the older, ragged form —
 /// `surrealdb::sql::Datetime`'s `Display`, an RFC 3339 instant wrapped as
-/// `d'…'` with trailing zeros dropped — which the API no longer sends but
-/// pre-#472 audit snapshots hold until card #471 rewrites them. In that form `…45.6Z` sorts
-/// *after* `…45.679Z` (`'Z'` outranks `'7'` in ASCII); unwrapping the quotes
-/// and padding the fraction to nine digits removes both hazards, and leaves
-/// anything unrecognised to compare as itself rather than vanishing. The
-/// `d'…'` unwrap can go after #471, like `shared::history::strip_surreal_wrapper`.
+/// `d'…'` with trailing zeros dropped. In that form `…45.6Z` sorts *after*
+/// `…45.679Z` (`'Z'` outranks `'7'` in ASCII); unwrapping the quotes and
+/// padding the fraction to nine digits removes both hazards, and leaves
+/// anything unrecognised to compare as itself rather than vanishing.
+///
+/// Every caller passes a live card's `updated_at`, which the API now always
+/// formats itself, so the `d'…'` unwrap is a **defensive no-op**. It is kept
+/// alongside `shared::history::strip_surreal_wrapper` until card #471
+/// rewrites the legacy literals still stored in old audit snapshots, and can
+/// go with it.
 ///
 /// Instants carrying a numeric UTC offset are split correctly but still not
 /// *converted*: `12:00:00+01:00` and `12:00:00Z` compare by their wall-clock
@@ -286,8 +290,8 @@ mod tests {
         );
     }
 
-    /// The post-#472 API format sorts correctly against a legacy literal of
-    /// a later instant, so a list mixing the two still orders by time.
+    /// The post-#472 API format pads to the nine-digit key, and still sorts
+    /// correctly against the defensive legacy path for a later instant.
     #[test]
     fn recency_key_orders_the_current_format_against_a_legacy_literal() {
         assert_eq!(

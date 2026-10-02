@@ -42,7 +42,7 @@
 //! Historic audit rows written before #472 still hold `d'…'` timestamps
 //! *inside* their snapshots until #471's data migration rewrites them; these
 //! tests run on a fresh database, so they see only new rows. Restoring such a
-//! legacy row is covered by [`restoring_a_legacy_snapshot_emits_clean_payloads`].
+//! legacy row is covered by [`restore_legacy_deletion`].
 
 use super::*;
 
@@ -876,15 +876,27 @@ async fn every_route_and_event_honours_the_contract() {
     assert_eq!(seen, expected, "event types the scenario emitted");
 }
 
+/// Which kind of entity a legacy-restore test deletes and restores. Each one
+/// takes a different arm of `audit::restore_one_delete`; a board or column
+/// deletion is a cascade, so its restore replays the whole batch.
+#[derive(Clone, Copy, Debug)]
+enum Deleted {
+    Board,
+    Column,
+    Card,
+}
+
 /// Restoring a deletion recorded before #472 must not put its legacy
 /// `d'…'` timestamps back on the wire.
 ///
 /// The restore used to broadcast, and snapshot, the *audit snapshot* it was
 /// recreating from. Old snapshots still hold SurrealQL literals until #471's
-/// data migration rewrites them, so this plants one — rewriting a real delete
-/// row's snapshot timestamps to the pre-#472 form — and restores it.
-#[tokio::test]
-async fn restoring_a_legacy_snapshot_emits_clean_payloads() {
+/// data migration rewrites them, so this plants them — rewriting every real
+/// delete row's snapshot timestamps to the pre-#472 form — then restores
+/// `target`'s deletion and checks the response, every event it caused, and
+/// the recreated entity read back. The recreated entity must also carry a
+/// fresh `created_at` (the schema default), not the deleted row's.
+async fn restore_legacy_deletion(target: Deleted) {
     let (server, mut rx, db) = contract_server().await;
     let (board, column) = setup_board_and_column(&server).await;
     let card: shared::Card = server
@@ -895,77 +907,140 @@ async fn restoring_a_legacy_snapshot_emits_clean_payloads() {
         })
         .await
         .json();
+
+    // Delete the target. Deleting a board or column cascades to what it
+    // holds, and records one delete row per entity under a shared batch.
+    let (delete_path, entity_id, original_created_at, created_event) = match target {
+        Deleted::Board => (
+            format!("/api/boards/{}", board.name),
+            board.id.clone(),
+            board.created_at.clone(),
+            "board_created",
+        ),
+        Deleted::Column => (
+            format!("/api/columns/{}", column.id),
+            column.id.clone(),
+            column.created_at.clone(),
+            "column_created",
+        ),
+        Deleted::Card => (
+            format!("/api/cards/{}", card.id),
+            card.id.clone(),
+            card.created_at.clone(),
+            "card_created",
+        ),
+    };
     server
-        .delete(&format!("/api/cards/{}", card.id))
+        .delete(&delete_path)
         .await
         .assert_status(StatusCode::NO_CONTENT);
 
-    // The board's history, since a deleted card's own history route 404s.
-    let history: Vec<shared::AuditLogEntry> = server
-        .get(&format!("/api/boards/{}/history", board.name))
-        .await
-        .json();
-    let delete_row = history
-        .iter()
-        .find(|row| row.action == "delete" && row.entity_id == card.id)
-        .expect("card has a delete row");
-
-    // Exactly what `Datetime::to_string()` wrote before #472.
+    // Exactly what `Datetime::to_string()` wrote before #472, planted on
+    // every delete row so each entity a batch restore recreates has a legacy
+    // snapshot behind it.
     let legacy = "d'2026-05-07T01:27:04.823026281Z'";
     db.query(
-        "UPDATE type::thing('audit_log', $id) SET \
-         snapshot_before.created_at = $legacy, snapshot_before.updated_at = $legacy",
+        "UPDATE audit_log SET \
+         snapshot_before.created_at = $legacy, snapshot_before.updated_at = $legacy \
+         WHERE action = 'delete'",
     )
-    .bind(("id", delete_row.id.clone()))
     .bind(("legacy", legacy))
     .await
-    .expect("plant legacy snapshot")
+    .expect("plant legacy snapshots")
     .check()
-    .expect("plant legacy snapshot");
+    .expect("plant legacy snapshots");
 
-    // The plant took: the history route now serves the legacy row (expected
-    // until #471), which is what makes the restore below a real test.
-    let planted: Vec<shared::AuditLogEntry> = server
-        .get(&format!("/api/boards/{}/history", board.name))
+    // Found through the database: a deleted board's history route 404s.
+    let mut found = db
+        .query("SELECT * FROM audit_log WHERE action = 'delete' AND entity_id = $id")
+        .bind(("id", entity_id.clone()))
         .await
-        .json();
-    let planted_row = planted
-        .iter()
-        .find(|row| row.id == delete_row.id)
-        .expect("planted row");
+        .expect("find delete row");
+    let rows: Vec<crate::models::DbAuditLog> = found.take(0).expect("delete rows");
+    let [delete_row] = rows.as_slice() else {
+        panic!("{target:?}: expected one delete row, got {}", rows.len());
+    };
+    // The plant took, which is what makes the restore below a real test.
     assert_eq!(
-        planted_row.snapshot_before.as_ref().unwrap()["created_at"],
-        legacy
+        delete_row.snapshot_before.as_ref().expect("snapshot")["created_at"],
+        legacy,
+        "{target:?}: legacy snapshot planted"
     );
 
     // Only the restore's own events matter from here.
     while rx.try_recv().is_ok() {}
 
+    let context = format!("POST /api/audit/:id/restore (legacy {target:?})");
     let restored = body(
         server
-            .post(&format!("/api/audit/{}/restore", delete_row.id))
+            .post(&format!("/api/audit/{}/restore", delete_row.id.id.to_raw()))
             .await,
         StatusCode::OK,
-        "POST /api/audit/:id/restore (legacy snapshot)",
+        &context,
     );
-    assert_list_of(
-        &restored,
-        Shape::AuditEntry,
-        "POST /api/audit/:id/restore (legacy snapshot)",
-    );
+    assert_list_of(&restored, Shape::AuditEntry, &context);
 
     let mut seen = BTreeSet::new();
     drain_events(&mut rx, &mut seen);
     assert!(
-        seen.contains("card_created"),
-        "restore announced the card: {seen:?}"
+        seen.contains(created_event),
+        "{target:?}: restore announced {created_event}: {seen:?}"
     );
 
-    // And the recreated card itself reads back clean.
-    let fetched = body(
-        server.get(&format!("/api/cards/{}", card.id)).await,
-        StatusCode::OK,
-        "GET /api/cards/:id (restored)",
+    // The recreated entity reads back clean, with a fresh `created_at`.
+    let (fetched, shape) = match target {
+        Deleted::Board => (
+            body(
+                server.get(&format!("/api/boards/{}", board.name)).await,
+                StatusCode::OK,
+                "GET /api/boards/:slug (restored)",
+            ),
+            Shape::Board,
+        ),
+        Deleted::Column => {
+            let columns = body(
+                server
+                    .get(&format!("/api/boards/{}/columns", board.name))
+                    .await,
+                StatusCode::OK,
+                "GET /api/boards/:slug/columns (restored)",
+            );
+            let restored = columns
+                .as_array()
+                .expect("columns list")
+                .iter()
+                .find(|c| c["id"] == column.id.as_str())
+                .expect("restored column listed")
+                .clone();
+            (restored, Shape::Column)
+        }
+        Deleted::Card => (
+            body(
+                server.get(&format!("/api/cards/{}", card.id)).await,
+                StatusCode::OK,
+                "GET /api/cards/:id (restored)",
+            ),
+            Shape::Card,
+        ),
+    };
+    assert_shape(&fetched, shape, &format!("{target:?} (restored)"));
+    assert_ne!(
+        fetched["created_at"], original_created_at,
+        "{target:?}: the recreated row has its own created_at"
     );
-    assert_shape(&fetched, Shape::Card, "GET /api/cards/:id (restored)");
+}
+
+#[tokio::test]
+async fn restoring_a_legacy_board_deletion_emits_clean_payloads() {
+    restore_legacy_deletion(Deleted::Board).await;
+}
+
+#[tokio::test]
+async fn restoring_a_legacy_column_deletion_emits_clean_payloads() {
+    restore_legacy_deletion(Deleted::Column).await;
+}
+
+#[tokio::test]
+async fn restoring_a_legacy_card_deletion_emits_clean_payloads() {
+    restore_legacy_deletion(Deleted::Card).await;
 }
