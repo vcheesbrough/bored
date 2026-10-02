@@ -210,6 +210,13 @@ RUN openssl req -x509 -newkey rsa:4096 \
 ENV BORED__SERVER__TLS_CERT=/app/cert.pem
 ENV BORED__SERVER__TLS_KEY=/app/key.pem
 ENV BORED__SERVER__STATIC_DIR=/app/dist
+# SurrealKV's value cache. Left unset, SurrealDB sizes it at
+# max(16 MiB, memory/2 − 1 GiB) — 14.5 GB on mini, with no container limit
+# (card #470). Board data is a few MB, so 64 MiB is ample. SurrealDB parses
+# the KiB/MiB/GiB suffix itself and silently falls back to that default on a
+# value it cannot parse; check the startup log line
+# "Setting maximum value cache size: 67108864" after changing it.
+ENV SURREAL_SURREALKV_MAX_VALUE_CACHE_SIZE=64MiB
 EXPOSE 443
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD ["busybox", "wget", "--quiet", "--spider", "--no-check-certificate", "https://localhost:443/health"]

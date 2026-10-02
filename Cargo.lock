@@ -702,6 +702,7 @@ dependencies = [
  "sovereign-config-provider",
  "strum",
  "surrealdb",
+ "surrealkv",
  "tempfile",
  "time",
  "tokio",
