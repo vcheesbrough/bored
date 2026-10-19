@@ -22,6 +22,7 @@ echo "\$*" >> "$WORK_DIR/calls"
 env | grep '^OTEL_' >> "$WORK_DIR/otel" || true
 case "\$*" in
   "inspect -f"*) cat "$WORK_DIR/mounts" ;;
+  "run --rm -v"*) [ "\$(cat "$WORK_DIR/store")" = yes ] && exit 0; exit 1 ;;
   inspect*) [ -s "$WORK_DIR/mounts" ] || exit 1 ;;
   *--check-empty*) exit "\$(cat "$WORK_DIR/check-status")" ;;
   *--surreal*) exit "\$(cat "$WORK_DIR/import-status")" ;;
@@ -34,9 +35,10 @@ failures=0
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1" >&2; failures=$((failures + 1)); }
 
-# Run the script with the given check and import statuses, and the backend
+# Run the script with the given check and import statuses, the backend
 # container's mounts as $3 (default: the SurrealDB build, mounting the old
-# store; "none" for no container at all); echo its status.
+# store; "none" for no container at all), and whether the old volume holds a
+# store as $4 (default yes); echo its status.
 run_case() {
   : > "$WORK_DIR/calls"
   : > "$WORK_DIR/otel"
@@ -47,6 +49,7 @@ run_case() {
     none) : > "$WORK_DIR/mounts" ;;
     *) echo "$3 " > "$WORK_DIR/mounts" ;;
   esac
+  echo "${4:-yes}" > "$WORK_DIR/store"
   status=0
   PATH="$WORK_DIR/bin:$PATH" BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
     OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
@@ -122,6 +125,14 @@ if [ "$status" = 1 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
   pass "an empty postgres behind a postgres-era backend refuses to re-import"
 else
   fail "re-import guard: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- ... unless the old volume holds no store: nothing could be re-imported ---
+status=$(run_case 0 0 some-other-volume no)
+if [ "$status" = 0 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
+  pass "a postgres-era environment with an empty old volume deploys on"
+else
+  fail "empty old volume: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
 # --- no backend container at all (a new host) imports -------------------------

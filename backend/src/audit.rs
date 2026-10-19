@@ -38,6 +38,18 @@ enum Parent {
     Column,
 }
 
+/// A restore insert's error: a foreign-key violation means the parent went
+/// between `row_exists` and the insert — [`PARENT_GONE`], like the check
+/// itself; anything else classifies as usual.
+fn parent_gone_or(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(database) = &error
+        && database.code().as_deref() == Some("23503")
+    {
+        return PARENT_GONE;
+    }
+    error.into()
+}
+
 /// Whether the parent row `id` exists.
 async fn row_exists(db: &Db, parent: Parent, id: &str) -> Result<bool, sqlx::Error> {
     // One literal statement per table: a table name cannot be a bound
@@ -424,7 +436,10 @@ async fn restore_one_delete(
                 DbOperation::Insert,
                 "columns",
             ))
-            .await?;
+            .await
+            // The parent can still vanish between the check above and this
+            // insert; that is the same 422, not a 500.
+            .map_err(parent_gone_or)?;
             // The recreated row, not the snapshot — see the board arm above.
             let c = created
                 .ok_or_else(|| ApiError::internal("restore created no column row"))?
@@ -499,7 +514,10 @@ async fn restore_one_delete(
                 DbOperation::Insert,
                 "cards",
             ))
-            .await?;
+            .await
+            // The parent can still vanish between the check above and this
+            // insert; that is the same 422, not a 500.
+            .map_err(parent_gone_or)?;
             let created =
                 created.ok_or_else(|| ApiError::internal("restore created no card row"))?;
             // A kept number can be above the sequence — a card deleted before

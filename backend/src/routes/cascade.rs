@@ -84,21 +84,29 @@ pub(crate) async fn delete_cards(
         let entity_id = card.id.clone();
         // The card may have been moved out of this column (or deleted) since
         // the sweep read it; then it is no longer this cascade's to delete.
-        // Re-read just before acting, and delete by id *and* column below, so
-        // a moved card is never removed from its new home — and so the audit
-        // row snapshots the card as it is now, not as the sweep first saw it
-        // (an edit made meanwhile would otherwise be lost on restore).
+        // So each card is re-read *and locked* (`FOR UPDATE`) in a transaction
+        // that lasts until its row is deleted: a concurrent move or edit waits
+        // for the lock and then finds the card gone, instead of slipping in
+        // between the audit row below and the delete. The re-read also makes
+        // the audit row snapshot the card as it is now, not as the sweep first
+        // saw it (an edit made meanwhile would otherwise be lost on restore).
+        //
+        // The links and the audit row go through the pool, outside the
+        // transaction: neither touches the locked `cards` row (deleting a
+        // referencing link row takes no lock on the card), so there is nothing
+        // for them to wait on.
+        let mut tx = state.db.begin().await?;
         let current: Option<DbCard> =
-            sqlx::query_as("SELECT * FROM cards WHERE id = $1 AND column_id = $2")
+            sqlx::query_as("SELECT * FROM cards WHERE id = $1 AND column_id = $2 FOR UPDATE")
                 .bind(&entity_id)
                 .bind(&card.column_id)
-                .fetch_optional(&state.db)
+                .fetch_optional(&mut *tx)
                 .traced(DbQuery::new(name, DbOperation::Select, "cards"))
                 .await?;
         let Some(card) = current else {
+            // Nothing locked; dropping `tx` just ends it.
             continue;
         };
-        let column_id = card.column_id.clone();
         crate::routes::links::cascade_delete_card_links(
             state,
             claims,
@@ -126,12 +134,16 @@ pub(crate) async fn delete_cards(
         )
         .await?;
 
-        sqlx::query("DELETE FROM cards WHERE id = $1 AND column_id = $2")
+        let deleted = sqlx::query("DELETE FROM cards WHERE id = $1")
             .bind(&entity_id)
-            .bind(&column_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .traced(DbQuery::new(name, DbOperation::Delete, "cards"))
             .await?;
+        // The row is locked by this transaction, so it must still be there.
+        if deleted.rows_affected() != 1 {
+            return Err(ApiError::internal("locked card vanished before its delete"));
+        }
+        tx.commit().await?;
     }
     Ok(())
 }
