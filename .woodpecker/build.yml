@@ -309,9 +309,8 @@ steps:
           BORED_HOST=bored-dev.desync.link \
           BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db PG_VOLUME=bored-dev-pg
         docker pull "registry.desync.link/bored:$$BORED_IMAGE_TAG"
-        sovereign-config render /bored/devops/dev/otel /bored/devops/dev/compose -- sh -c '
-          ./scripts/migrate-from-surreal.sh -p bored-dev -f deploy/docker-compose.yml &&
-          ./scripts/compose-up-with-otel.sh -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120'
+        sovereign-config render /bored/devops/dev/otel /bored/devops/dev/compose -- \
+          ./scripts/deploy-app.sh -p bored-dev -f deploy/docker-compose.yml
       # The client-telemetry ingest (otlp-collector-oidc, card #416): its
       # own compose project, started after the app and *never* part of the
       # deploy gate — no `--wait`, and a failure (the store unreadable, the
@@ -370,9 +369,8 @@ steps:
           APP_ENV=prod BORED_HOST=bored.desync.link \
           BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db PG_VOLUME=bored-prod-pg
         docker pull "registry.desync.link/bored:$$BORED_IMAGE_TAG"
-        sovereign-config render /bored/devops/prod/otel /bored/devops/prod/compose -- sh -c '
-          ./scripts/migrate-from-surreal.sh -p bored -f deploy/docker-compose.yml &&
-          ./scripts/compose-up-with-otel.sh -p bored -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120'
+        sovereign-config render /bored/devops/prod/otel /bored/devops/prod/compose -- \
+          ./scripts/deploy-app.sh -p bored -f deploy/docker-compose.yml
       # The client-telemetry ingest, exactly as on dev (see deploy-dev).
       - |
         APP_ENV=prod BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored \
