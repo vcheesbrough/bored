@@ -131,6 +131,25 @@ if ! printf '%s' "$verified" | jq -e --argjson current "$current" \
   echo "ERROR: the outpost lost providers it had before this patch" >&2
   echo "       before=${current}" >&2
   echo "       now=${verified}" >&2
+  # Put them back straight away rather than leave every other LAN service
+  # without auth until someone notices: write the union of what was there
+  # before, what is there now (a concurrent attach may have added its own),
+  # and ours — then re-check. The step still fails either way, so the
+  # incident is seen.
+  restore=$(jq -nc --argjson a "$current" --argjson b "$verified" --argjson pk "$provider_pk" \
+    '($a + $b + [$pk]) | unique')
+  echo "==> restoring the outpost's providers: ${restore}" >&2
+  api PATCH "/outposts/instances/${outpost_pk}/" \
+    --data "$(jq -nc --argjson providers "$restore" '{providers: $providers}')" >/dev/null || true
+  restored=$(
+    api GET "/outposts/instances/?name__iexact=$(urlencode "$OUTPOST_NAME")" |
+      jq -c '.results[0].providers // []'
+  )
+  if printf '%s' "$restored" | jq -e --argjson want "$restore" '($want - .) == []' >/dev/null; then
+    echo "       restored; the outpost serves ${restored}" >&2
+  else
+    echo "ERROR: the restore did not take — restore by hand: providers=${restore}" >&2
+  fi
   exit 1
 fi
 

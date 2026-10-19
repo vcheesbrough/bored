@@ -92,11 +92,18 @@ class Handler(BaseHTTPRequestHandler):
                 # The failure every comment in this repo is about: our provider
                 # attached, everyone else's gone. Returned only once the PATCH
                 # has happened, so the pre-write read still sees a full list.
+                # A *second* PATCH (the script's restore) does take, so the
+                # test can check what the restore wrote and that it verified.
                 try:
-                    open(f"{WORK}/patched")
-                    providers = [NEW_PK]
+                    with open(f"{WORK}/patch-count") as handle:
+                        count = int(handle.read())
                 except FileNotFoundError:
-                    pass
+                    count = 0
+                if count == 1:
+                    providers = [NEW_PK]
+                elif count >= 2:
+                    with open(f"{WORK}/patched") as handle:
+                        providers = json.load(handle)["providers"]
             else:
                 # After a successful patch the read-back reflects it.
                 try:
@@ -118,6 +125,13 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or b"{}")
         with open(f"{WORK}/patched", "w") as handle:
             json.dump(payload, handle)
+        try:
+            with open(f"{WORK}/patch-count") as handle:
+                count = int(handle.read())
+        except FileNotFoundError:
+            count = 0
+        with open(f"{WORK}/patch-count", "w") as handle:
+            handle.write(str(count + 1))
         return self._json(200, {"pk": "outpost-uuid", **payload})
 
 
@@ -143,7 +157,7 @@ check() {
 
 run_mode() {
   echo "$1" > "$WORK/mode"
-  rm -f "$WORK/patched"
+  rm -f "$WORK/patched" "$WORK/patch-count"
   set +e
   AUTHENTIK_URL="http://127.0.0.1:${PORT}" \
   AUTHENTIK_TOKEN=stub-token \
@@ -193,6 +207,11 @@ check "$(grep -q 'lost providers it had before' "$WORK/out" && echo ok)" \
   "says the outpost lost providers"
 check "$(grep -q 'before=\[1,5,7,9\]' "$WORK/out" && echo ok)" \
   "prints the list it had before, so it can be restored"
+restored=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["providers"])' "$WORK/patched")
+check "$([ "$restored" = "[1, 5, 7, 9, 42]" ] && echo ok)" \
+  "writes the lost providers back (got $restored)"
+check "$(grep -q 'restored; the outpost serves' "$WORK/out" && echo ok)" \
+  "verifies the restore took"
 
 if [ "$failures" -gt 0 ]; then
   echo
