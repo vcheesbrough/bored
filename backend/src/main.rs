@@ -138,6 +138,15 @@ fn main() -> Result<(), StartupError> {
         // Telemetry comes up first, from the `OTEL_*` variables alone, so the
         // sovereign-config call below has a span and every later line is
         // correlated. An invalid variable set stops the process here.
+        // rustls needs a crypto provider installed before any TLS handshake,
+        // and both ring and aws-lc-rs are in the dependency tree, so it
+        // cannot pick one itself. Installed here, before *either* path:
+        // serving and `migrate-from-surreal` both build config, which opens
+        // the sovereign-config TLS client (card #471 — the import panicked
+        // when this lived in `run()` only).
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("failed to install rustls crypto provider");
         let telemetry = observability::init()?;
         // `bored-backend migrate-from-surreal …` is the one-off SurrealDB
         // import (card #471); anything else, including no arguments, serves.
@@ -204,13 +213,6 @@ async fn guarded<T>(
 /// Load config, connect the database, build the app, serve until SIGTERM or
 /// Ctrl-C, then drain.
 async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
-    // rustls needs a crypto provider installed before any TLS handshakes.
-    // `ring` is the default provider — this call must happen before any
-    // TLS config is created.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
-
     // Composition root: build the layered config once, before any other task
     // is scheduled, then hand each validated DTO to the feature that owns it.
     // Every downstream component receives its typed config, never raw env or
