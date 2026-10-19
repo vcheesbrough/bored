@@ -101,7 +101,8 @@ else
   fail "docker env PGWEB_NEW_PASSWORD: $(cat "$WORK_DIR/docker-pw")"
 fi
 if grep -q "SET log_statement = 'none';" "$WORK_DIR/docker-stdin" \
-    && grep -q "SET log_min_error_statement = 'panic';" "$WORK_DIR/docker-stdin"; then
+    && grep -q "SET log_min_error_statement = 'panic';" "$WORK_DIR/docker-stdin" \
+    && grep -q "SET log_min_duration_statement = -1;" "$WORK_DIR/docker-stdin"; then
   pass "the provisioning session keeps the statement out of the server log"
 else
   fail "no log suppression in: $(cat "$WORK_DIR/docker-stdin")"

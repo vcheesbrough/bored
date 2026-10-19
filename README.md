@@ -144,6 +144,9 @@ A read-only [pgweb](https://github.com/sosedoff/pgweb) at **`https://<host>/dbco
 1. **LAN/VPN only** (`lan-vpn-only@docker`), with a rate limit.
 2. **Authentik** forward auth through the proxy provider `bored-sql-console-<env>`. Only members of the group **`bored-<env>-sql-console`** get past it; add or remove people in Authentik.
 3. **pgweb's own basic auth** as a backstop, which keeps the console closed if Authentik is ever not in front of it. Traefik injects that credential after Authentik approves, so nobody is prompted twice.
+   - Its limits: the credential sits in the container's Traefik label. Anyone who can `docker inspect` on mini, or read Traefik's API or dashboard, can read it, but they already control the host.
+   - Other containers on `proxy-backend` can reach pgweb directly, skipping the LAN and Authentik gates. For them the backstop is the only gate, and its random 64-hex-character password is what holds.
+   - Behind every gate, the console can still only read (the grants below).
 
 The container's healthcheck goes red if an unauthenticated request is ever *not* refused.
 

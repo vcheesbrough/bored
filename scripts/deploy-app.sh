@@ -106,8 +106,9 @@ if [ "$console" = on ]; then
   #   appears in `ps` on the agent host;
   # * not in this script's SQL text — psql's \getenv reads it from that env;
   # * not in Postgres's log — the server does receive the plain statement, and
-  #   would log it with the password if logging statements or if it failed, so
-  #   this session turns both off first (allowed: `bored` is a superuser).
+  #   would log it with the password if logging statements, logging slow ones,
+  #   or if it failed, so this session turns all three off first (allowed:
+  #   `bored` is a superuser).
   # Nothing in this block may echo it either: it does not come from
   # `from_secret`, so Woodpecker does not mask it in the step log.
   echo "==> provisioning the bored_pgweb login"
@@ -116,6 +117,7 @@ if [ "$console" = on ]; then
     psql -v ON_ERROR_STOP=1 -q -U bored -d bored <<'SQL'
 SET log_statement = 'none';
 SET log_min_error_statement = 'panic';
+SET log_min_duration_statement = -1;
 \getenv pgweb_pw PGWEB_NEW_PASSWORD
 ALTER ROLE bored_pgweb WITH LOGIN PASSWORD :'pgweb_pw';
 SQL
