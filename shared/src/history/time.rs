@@ -34,25 +34,6 @@ const MONTHS: [&str; 12] = [
 // 1970-01-01 was a Thursday → day 0 maps to weekday 4 with this Sun=0 convention.
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-/// Strip the SurrealQL `d'…'` wrapper if present; otherwise return the input unchanged.
-///
-/// **Legacy input only.** Since card #472 the API sends plain RFC 3339
-/// (`"2026-05-07T01:27:04.823026Z"`), which passes through untouched. Before
-/// it, every timestamp went out as a SurrealQL datetime literal such as
-/// `"d'2026-05-07T01:27:04.823026281Z'"`, which JS `Date.parse` rejects.
-///
-/// The live API no longer produces that form, but audit rows recorded before
-/// #472 still hold it *inside* their `snapshot_before` / `snapshot_after`
-/// JSON, and those are only rewritten by card #471's data migration. The SPA
-/// does not read timestamps out of snapshots today, so for now this is a
-/// defensive no-op; it is kept until #471 lands and can be removed after it.
-pub fn strip_surreal_wrapper(raw: &str) -> &str {
-    let raw = raw.trim();
-    raw.strip_prefix("d'")
-        .and_then(|s| s.strip_suffix('\''))
-        .unwrap_or(raw)
-}
-
 /// Format the relative / "Today / Yesterday / weekday / older" string.
 pub fn format_history_time(now_ms: i64, then_ms: i64, local_offset_minutes: i32) -> String {
     let delta = now_ms - then_ms;
@@ -176,33 +157,6 @@ mod tests {
         let doy = (153 * m_internal as u64 + 2) / 5 + d as u64 - 1;
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         era * 146_097 + doe as i64 - 719_468
-    }
-
-    #[test]
-    fn strip_surreal_wrapper_unwraps() {
-        assert_eq!(
-            strip_surreal_wrapper("d'2026-05-07T01:27:04.823Z'"),
-            "2026-05-07T01:27:04.823Z"
-        );
-        assert_eq!(
-            strip_surreal_wrapper("2026-05-07T01:27:04.823Z"),
-            "2026-05-07T01:27:04.823Z"
-        );
-    }
-
-    /// The post-#472 wire format (fixed microseconds) is passed through
-    /// unchanged, and a pre-#472 literal of the same instant unwraps to the
-    /// nanosecond text it carried.
-    #[test]
-    fn strip_surreal_wrapper_handles_both_api_formats() {
-        assert_eq!(
-            strip_surreal_wrapper("2026-10-02T16:17:12.643091Z"),
-            "2026-10-02T16:17:12.643091Z"
-        );
-        assert_eq!(
-            strip_surreal_wrapper("d'2026-10-02T16:17:12.643091493Z'"),
-            "2026-10-02T16:17:12.643091493Z"
-        );
     }
 
     #[test]

@@ -374,17 +374,90 @@ fn blank_as_none_rejects_a_malformed_fallible_leaf() {
 }
 
 // ---------------------------------------------------------------------------
+// database (card #471)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn database_loads_from_env_with_port_name_and_user_defaults() {
+    let config = cfg(&[
+        ("BORED__DATABASE__HOST", "bored-db"),
+        ("BORED__DATABASE__PASSWORD", "s3cret"),
+    ]);
+    let database: DatabaseConfig = load_group(&config, "database").expect("should load");
+
+    assert_eq!(database.host, "bored-db");
+    assert_eq!(database.port, 5432);
+    assert_eq!(database.name, "bored");
+    assert_eq!(database.user, "bored");
+    assert_eq!(database.password, "s3cret");
+}
+
+#[test]
+fn database_sovereign_leaves_load_and_coerce_the_port() {
+    let config = cfg_with_sovereign(
+        &[
+            ("database.host", "db.internal"),
+            ("database.port", "6543"),
+            ("database.name", "bored_prod"),
+            ("database.user", "bored_app"),
+            ("database.password", "from-the-store"),
+        ],
+        &[],
+    );
+    let database: DatabaseConfig = load_group(&config, "database").expect("should load");
+
+    assert_eq!(database.host, "db.internal");
+    assert_eq!(database.port, 6543);
+    assert_eq!(database.name, "bored_prod");
+    assert_eq!(database.user, "bored_app");
+    assert_eq!(database.password, "from-the-store");
+}
+
+#[test]
+fn database_without_a_host_or_password_fails_to_load() {
+    // No defaults for either: a backend that cannot say where its data lives
+    // must not start.
+    let no_host = cfg(&[("BORED__DATABASE__PASSWORD", "s3cret")]);
+    assert!(load_group::<DatabaseConfig>(&no_host, "database").is_err());
+
+    let no_password = cfg(&[("BORED__DATABASE__HOST", "bored-db")]);
+    assert!(load_group::<DatabaseConfig>(&no_password, "database").is_err());
+
+    // A blank value is as good as absent (it would fail at connect time
+    // with a far less helpful message).
+    let blank = cfg(&[
+        ("BORED__DATABASE__HOST", "bored-db"),
+        ("BORED__DATABASE__PASSWORD", "   "),
+    ]);
+    assert!(load_group::<DatabaseConfig>(&blank, "database").is_err());
+}
+
+#[test]
+fn database_debug_redacts_the_password() {
+    let config = cfg(&[
+        ("BORED__DATABASE__HOST", "bored-db"),
+        ("BORED__DATABASE__PASSWORD", "never-print-me"),
+    ]);
+    let database: DatabaseConfig = load_group(&config, "database").expect("should load");
+    let rendered = format!("{database:?}");
+
+    assert!(!rendered.contains("never-print-me"), "{rendered}");
+    assert!(rendered.contains("[REDACTED]"), "{rendered}");
+    // Control: the rest of the struct is still rendered.
+    assert!(rendered.contains("bored-db"), "{rendered}");
+}
+
+// ---------------------------------------------------------------------------
 // server
 // ---------------------------------------------------------------------------
 
 #[test]
-fn server_defaults_to_http_3000_with_dist_and_data_paths() {
+fn server_defaults_to_http_3000_with_dist() {
     let config = cfg(&[]);
     let server: ServerConfig = load_group(&config, "server").expect("should load");
 
     assert_eq!(server.http_port, 3000);
     assert_eq!(server.static_dir, "./dist");
-    assert_eq!(server.database_path, "/data/bored.db");
     assert!(server.tls_pair().is_none());
 }
 
@@ -395,14 +468,12 @@ fn server_maps_kebab_keys_and_coerces_port() {
         ("BORED__SERVER__TLS-CERT", "/app/cert.pem"),
         ("BORED__SERVER__TLS-KEY", "/app/key.pem"),
         ("BORED__SERVER__STATIC-DIR", "/app/dist"),
-        ("BORED__SERVER__DATABASE-PATH", "/data/other.db"),
     ]);
     let server: ServerConfig = load_group(&config, "server").expect("should load");
 
     assert_eq!(server.http_port, 9001);
     assert_eq!(server.tls_pair(), Some(("/app/cert.pem", "/app/key.pem")));
     assert_eq!(server.static_dir, "/app/dist");
-    assert_eq!(server.database_path, "/data/other.db");
 }
 
 #[test]
@@ -566,7 +637,6 @@ fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
             ("BORED__SERVER__TLS_CERT", "/app/cert.pem"),
             ("BORED__SERVER__TLS_KEY", "/app/key.pem"),
             ("BORED__SERVER__STATIC_DIR", "/app/dist"),
-            ("BORED__SERVER__DATABASE_PATH", "/data/other.db"),
         ]),
         "server",
     )
@@ -574,7 +644,6 @@ fn every_multi_word_leaf_accepts_a_shell_safe_snake_case_name() {
     assert_eq!(server.http_port, 9001);
     assert!(server.tls_pair().is_some());
     assert_eq!(server.static_dir, "/app/dist");
-    assert_eq!(server.database_path, "/data/other.db");
 }
 
 /// Both spellings must reach the same field — kebab for sovereign-config/compose

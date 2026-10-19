@@ -12,14 +12,13 @@ use axum::{
     http::StatusCode,
 };
 use std::collections::HashSet;
-use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
-use crate::db::{DbOperation, DbQuery, Traced as _};
+use crate::db::{Db, DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
-use crate::models::{DbCard, DbCardCounter, DbColumn};
+use crate::models::{DbCard, DbColumn};
 use crate::routes::boards::{AppState, editor_sub};
 
 use position::{POSITION_GAP, compute_sparse_position, compute_top_position};
@@ -36,47 +35,71 @@ fn normalize_tags(raw: &[String]) -> Result<Vec<String>, ApiError> {
 }
 
 /// Load a card, mapping "no such card" onto 404 and a database fault onto 500.
-async fn load_card(db: &Surreal<Db>, card_id: &str) -> Result<DbCard, ApiError> {
-    let card: Option<DbCard> = db
-        .select(("cards", card_id))
-        .traced(DbQuery::new(
-            "cards.load_card",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?;
-    card.ok_or(ApiError::NotFound)
+async fn load_card(db: &Db, card_id: &str) -> Result<DbCard, ApiError> {
+    select_card(db, card_id, "cards.load_card")
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+/// One card by id, or `None`; `name` is the call site, for the span.
+async fn select_card(
+    db: &Db,
+    card_id: &str,
+    name: &'static str,
+) -> Result<Option<DbCard>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM cards WHERE id = $1")
+        .bind(card_id)
+        .fetch_optional(db)
+        .traced(DbQuery::new(name, DbOperation::Select, "cards"))
+        .await
+}
+
+/// One column by id, or `None`; `name` is the call site, for the span.
+async fn select_column(
+    db: &Db,
+    col_id: &str,
+    name: &'static str,
+) -> Result<Option<DbColumn>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM columns WHERE id = $1")
+        .bind(col_id)
+        .fetch_optional(db)
+        .traced(DbQuery::new(name, DbOperation::Select, "columns"))
+        .await
+}
+
+/// A column's cards, top first. `id` breaks ties between equal positions so
+/// the order is stable (duplicates are possible — see [`reorder_cards`]).
+async fn column_cards(
+    db: &Db,
+    col_id: &str,
+    name: &'static str,
+) -> Result<Vec<DbCard>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM cards WHERE column_id = $1 ORDER BY position, id")
+        .bind(col_id)
+        .fetch_all(db)
+        .traced(DbQuery::new(name, DbOperation::Select, "cards"))
+        .await
 }
 
 /// Load a column the request named, mapping "no such column" onto 404.
 ///
 /// Use this for a column the caller asked for; use [`find_column`] for one the
 /// server looks up on its own behalf.
-async fn load_column(db: &Surreal<Db>, col_id: &str) -> Result<DbColumn, ApiError> {
-    let column: Option<DbColumn> = db
-        .select(("columns", col_id))
-        .traced(DbQuery::new(
-            "cards.load_column",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?;
-    column.ok_or(ApiError::NotFound)
+async fn load_column(db: &Db, col_id: &str) -> Result<DbColumn, ApiError> {
+    select_column(db, col_id, "cards.load_column")
+        .await?
+        .ok_or(ApiError::NotFound)
 }
 
 /// Look up a column that may legitimately be gone.
 ///
-/// A card's own column is read to find its board, but a cascade delete can
-/// remove the column while the card row is still around. That is not the
-/// caller's fault, so it is `Ok(None)` rather than a 404 — the callers fall
-/// back to an empty board id, which no connected client is scoped to.
-async fn find_column(db: &Surreal<Db>, col_id: &str) -> Result<Option<DbColumn>, ApiError> {
-    db.select(("columns", col_id))
-        .traced(DbQuery::new(
-            "cards.find_column",
-            DbOperation::Select,
-            "columns",
-        ))
+/// A card's own column is read to find its board. The foreign key means a
+/// card's column cannot be deleted from under it, but the card itself can be
+/// deleted between two reads, and that is not the caller's fault — so a
+/// missing column is `Ok(None)` rather than a 404, and the callers fall back
+/// to an empty board id, which no connected client is scoped to.
+async fn find_column(db: &Db, col_id: &str) -> Result<Option<DbColumn>, ApiError> {
+    select_column(db, col_id, "cards.find_column")
         .await
         .map_err(ApiError::from)
 }
@@ -93,7 +116,7 @@ fn snapshot(card: &shared::Card) -> Result<serde_json::Value, ApiError> {
 /// in between — 404, the same answer the caller would have given had the delete
 /// landed first.
 async fn persist_update(
-    db: &Surreal<Db>,
+    db: &Db,
     card_id: String,
     editor: String,
     write: CardWrite,
@@ -101,17 +124,20 @@ async fn persist_update(
     let statement = write.statement();
     let card: Option<DbCard> = write
         .bind(
-            db.query(statement)
-                .bind(("card_id", card_id))
-                .bind(("editor", editor)),
+            // Audited: `statement` interpolates only column names, all
+            // `&'static str` literals chosen by `CardUpdate::plan`; every value
+            // is a bound parameter (see `CardWrite::statement`).
+            sqlx::query_as(sqlx::AssertSqlSafe(statement))
+                .bind(card_id)
+                .bind(editor),
         )
+        .fetch_optional(db)
         .traced(DbQuery::new(
             "cards.persist_update",
             DbOperation::Update,
             "cards",
         ))
-        .await?
-        .take(0)?;
+        .await?;
     card.ok_or(ApiError::NotFound)
 }
 
@@ -120,27 +146,30 @@ async fn persist_update(
 /// Unlike [`persist_update`] the fields are fixed, so the statement is a
 /// constant rather than something assembled per request.
 ///
-/// Takes its ids by value, as [`persist_update`] does: `.bind` needs owned
-/// values, and the caller is finished with both by this point.
+/// Takes its ids by value, as [`persist_update`] does: the caller is
+/// finished with both by this point.
 async fn persist_move(
-    db: &Surreal<Db>,
+    db: &Db,
     card_id: String,
     col_id: String,
     position: i32,
     editor: String,
 ) -> Result<DbCard, ApiError> {
-    let card: Option<DbCard> = db
-        .query(
-            "UPDATE type::thing('cards', $card_id) \
-             SET column = type::thing('columns', $col_id), position = $position, last_edited_by = $editor",
-        )
-        .bind(("card_id", card_id))
-        .bind(("col_id", col_id))
-        .bind(("position", position))
-        .bind(("editor", editor))
-        .traced(DbQuery::new("cards.persist_move", DbOperation::Update, "cards"))
-        .await?
-        .take(0)?;
+    let card: Option<DbCard> = sqlx::query_as(
+        "UPDATE cards SET column_id = $2, position = $3, last_edited_by = $4 \
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(card_id)
+    .bind(col_id)
+    .bind(position)
+    .bind(editor)
+    .fetch_optional(db)
+    .traced(DbQuery::new(
+        "cards.persist_move",
+        DbOperation::Update,
+        "cards",
+    ))
+    .await?;
     card.ok_or(ApiError::NotFound)
 }
 
@@ -183,7 +212,7 @@ fn announce_renumbered(state: &AppState, board_id: &str, col_id: &str, renumbere
     let positions = renumbered
         .into_iter()
         .map(|card| shared::CardPosition {
-            id: card.id.id.to_raw(),
+            id: card.id,
             position: card.position,
         })
         .collect();
@@ -240,33 +269,13 @@ pub async fn list_cards(
     Path(col_id): Path<String>,
 ) -> Result<Json<Vec<shared::Card>>, ApiError> {
     // Verify the column exists before returning its cards.
-    let column: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .traced(DbQuery::new(
-            "cards.list_cards",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?;
+    let column = select_column(&state.db, &col_id, "cards.list_cards").await?;
 
     if column.is_none() {
         return Err(ApiError::NotFound);
     }
 
-    let cards: Vec<DbCard> = state
-        .db
-        .query(
-            "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
-        )
-        .bind(("id", col_id))
-        .traced(DbQuery::new(
-            "cards.list_cards",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+    let cards = column_cards(&state.db, &col_id, "cards.list_cards").await?;
 
     Ok(Json(cards.into_iter().map(DbCard::into_api).collect()))
 }
@@ -276,11 +285,7 @@ pub async fn get_card(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> Result<Json<shared::Card>, ApiError> {
-    let card: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .traced(DbQuery::new("cards.get_card", DbOperation::Select, "cards"))
-        .await?;
+    let card = select_card(&state.db, &card_id, "cards.get_card").await?;
 
     match card {
         Some(c) => Ok(Json(c.into_api())),
@@ -297,17 +302,20 @@ pub async fn get_card_by_number(
     State(state): State<AppState>,
     Path(number): Path<u32>,
 ) -> Result<Json<shared::Card>, ApiError> {
-    let card: Option<DbCard> = state
-        .db
-        .query("SELECT * FROM cards WHERE number = $number LIMIT 1")
-        .bind(("number", number as i64))
+    // `number` is an `integer` column; a path value above `i32::MAX` cannot
+    // name any card, so it is a plain 404 rather than an overflow.
+    let Ok(number) = i32::try_from(number) else {
+        return Err(ApiError::NotFound);
+    };
+    let card: Option<DbCard> = sqlx::query_as("SELECT * FROM cards WHERE number = $1")
+        .bind(number)
+        .fetch_optional(&state.db)
         .traced(DbQuery::new(
             "cards.get_card_by_number",
             DbOperation::Select,
             "cards",
         ))
-        .await?
-        .take(0)?;
+        .await?;
 
     match card {
         Some(c) => Ok(Json(c.into_api())),
@@ -322,78 +330,48 @@ pub async fn create_card(
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardRequest>,
 ) -> Result<(StatusCode, Json<shared::Card>), ApiError> {
-    let column: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .traced(DbQuery::new(
-            "cards.create_card",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?;
+    let column = select_column(&state.db, &col_id, "cards.create_card").await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let column = match column {
         Some(c) => c,
         None => return Err(ApiError::NotFound),
     };
-    let board_id = column.board.id.to_raw();
+    let board_id = column.board_id;
 
-    // Normalize before claiming a card number so a rejected tag list cannot
-    // burn a number from the global counter.
+    // Normalize before writing anything so a rejected tag list costs nothing.
     let tags = normalize_tags(&payload.tags)?;
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
 
-    // Claim the next card number by atomically incrementing the global counter.
-    // SurrealDB record-level mutations are atomic, so concurrent creates cannot
-    // receive the same count value.
-    let counter: Option<DbCardCounter> = state
-        .db
-        .query("UPDATE card_counter:global SET count += 1 RETURN AFTER")
-        .traced(DbQuery::new(
-            "cards.create_card",
-            DbOperation::Update,
-            "card_counter",
-        ))
-        .await?
-        .take(0)?;
-    let card_number = counter.map(|c| c.count).unwrap_or(1);
-
     // Compute the sparse position for inserting at the TOP of the column.
-    // This is done before the CREATE so the position is known up front;
-    // the two-step approach is safe because card IDs are ULIDs and the
-    // counter increment above already serialises concurrent creates.
+    // This is done before the INSERT so the position is known up front;
+    // card IDs are ULIDs, so two concurrent creates cannot collide on id.
     let placement = compute_top_position(&state.db, &col_id).await?;
     announce_renumbered(&state, &board_id, &col_id, placement.renumbered);
     let top_pos = placement.position;
 
-    let card: Option<DbCard> = state
-        .db
-        .query(
-            "CREATE type::thing('cards', $id) SET \
-             column = type::thing('columns', $col_id), \
-             body = $body, \
-             number = $number, \
-             position = $position, \
-             tags = $tags, \
-             last_edited_by = $editor",
-        )
-        .bind(("id", id))
-        .bind(("col_id", col_id))
-        .bind(("body", payload.body))
-        .bind(("number", card_number))
-        .bind(("position", top_pos))
-        .bind(("tags", tags))
-        .bind(("editor", editor))
-        .traced(DbQuery::new(
-            "cards.create_card",
-            DbOperation::Create,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+    // `number` is left to its column default, `nextval('card_number_seq')`:
+    // a sequence hands every caller a distinct value however many creates run
+    // at once, and a failed insert leaves a gap rather than a duplicate.
+    let card: Option<DbCard> = sqlx::query_as(
+        "INSERT INTO cards (id, column_id, body, position, tags, last_edited_by) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+    )
+    .bind(&id)
+    .bind(&col_id)
+    .bind(&payload.body)
+    .bind(top_pos)
+    .bind(&tags)
+    .bind(&editor)
+    .fetch_optional(&state.db)
+    .traced(DbQuery::new(
+        "cards.create_card",
+        DbOperation::Insert,
+        "cards",
+    ))
+    .await?;
 
     match card {
         Some(c) => {
@@ -453,17 +431,17 @@ pub async fn update_card(
     let snapshot_before = snapshot(&existing.clone().into_api())?;
 
     // Always look up the current column so we have the board ID for the SSE event.
-    let current_col = find_column(&state.db, &existing.column.id.to_raw()).await?;
+    let current_col = find_column(&state.db, &existing.column_id).await?;
     let board_id = current_col
         .as_ref()
-        .map(|c| c.board.id.to_raw())
+        .map(|c| c.board_id.clone())
         .unwrap_or_default();
 
     // Validate target column if provided, and guard against cross-board moves.
     if let Some(col_id) = payload.column_id.as_deref() {
         let target_col = load_column(&state.db, col_id).await?;
         if let Some(ref current_col) = current_col
-            && current_col.board.id.to_raw() != target_col.board.id.to_raw()
+            && current_col.board_id != target_col.board_id
         {
             return Err(ApiError::UNPROCESSABLE);
         }
@@ -509,28 +487,20 @@ pub async fn delete_card(
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
-    let existing: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .traced(DbQuery::new(
-            "cards.delete_card",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?;
+    let existing = select_card(&state.db, &card_id, "cards.delete_card").await?;
 
     let existing = match existing {
         Some(e) => e,
         None => return Err(ApiError::NotFound),
     };
 
-    let board_id = state
-        .db
-        .select::<Option<DbColumn>>(("columns", existing.column.id.to_raw()))
+    // Best effort, as before: a failed lookup leaves the board unknown rather
+    // than failing the delete.
+    let board_id = select_column(&state.db, &existing.column_id, "cards.delete_card")
         .await
         .ok()
         .flatten()
-        .map(|c| c.board.id.to_raw())
+        .map(|c| c.board_id)
         .unwrap_or_default();
 
     // A link cannot outlive either of its cards. Remove this card's links —
@@ -560,23 +530,25 @@ pub async fn delete_card(
     )
     .await?;
 
-    match state
-        .db
-        .delete::<Option<DbCard>>(("cards", &card_id))
-        .await?
-    {
+    let deleted: Option<DbCard> = sqlx::query_as("DELETE FROM cards WHERE id = $1 RETURNING *")
+        .bind(&card_id)
+        .fetch_optional(&state.db)
+        .traced(DbQuery::new(
+            "cards.delete_card",
+            DbOperation::Delete,
+            "cards",
+        ))
+        .await?;
+    match deleted {
         Some(deleted) => {
             // Look up the column to find the board ID for the SSE event.
-            // The column may have been cascade-deleted with its board, so
-            // fall back to an empty string if it's gone — SSE delivery is
+            // Fall back to an empty string if it's gone — SSE delivery is
             // best-effort and no connected client will be scoped to a
             // non-existent board anyway.
-            let board_id = state
-                .db
-                .select::<Option<DbColumn>>(("columns", deleted.column.id.to_raw()))
+            let board_id = select_column(&state.db, &deleted.column_id, "cards.delete_card")
                 .await
                 .unwrap_or(None)
-                .map(|c| c.board.id.to_raw())
+                .map(|c| c.board_id)
                 .unwrap_or_default();
             let _ = state.events.send(BroadcastEvent {
                 board_id,
@@ -613,16 +585,16 @@ pub async fn move_card(
 
     // Capture the source column ID before the update so the event tells
     // subscribers which column to remove the card from.
-    let from_column_id = existing.column.id.to_raw();
+    let from_column_id = existing.column_id.clone();
 
     // Board ID for the SSE event — always available from the target column.
-    let board_id = target_col.board.id.to_raw();
+    let board_id = target_col.board_id.clone();
 
     // Guard: target column must belong to the same board as the card's current
     // column. A card whose own column has vanished has nothing to compare
     // against, so it is let through rather than wedged.
     if let Some(current_col) = find_column(&state.db, &from_column_id).await?
-        && current_col.board.id.to_raw() != board_id
+        && current_col.board_id != board_id
     {
         return Err(ApiError::UNPROCESSABLE);
     }
@@ -692,10 +664,10 @@ pub async fn move_card(
 /// * otherwise the column is renumbered to `(i + 1) * POSITION_GAP`, the same
 ///   scheme `rebalance_column` uses. `cards.position` has no unique index and
 ///   both `PUT /api/cards/:id` and audit restore can write an arbitrary value,
-///   so duplicates are possible, and `ORDER BY position ASC` has no tiebreak.
-///   A column holding duplicates therefore has no defined order to be "already
-///   sorted" in: it is rewritten even when the requested order matches what the
-///   database happened to return.
+///   so duplicates are possible. Only the server's `id` tiebreak orders them,
+///   and the browser — which places cards by position alone — cannot see it.
+///   A column holding duplicates is therefore rewritten even when the
+///   requested order matches what the database returned.
 ///
 /// Distinct final positions are what lets the browser reposition cards from
 /// `CardMoved` alone, without a dedicated bulk SSE event.
@@ -710,36 +682,16 @@ pub async fn reorder_cards(
     claims: Extension<Claims>,
     Json(payload): Json<shared::CardsReorderRequest>,
 ) -> Result<Json<Vec<shared::Card>>, ApiError> {
-    let column: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .traced(DbQuery::new(
-            "cards.reorder_cards",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?;
+    let column = select_column(&state.db, &col_id, "cards.reorder_cards").await?;
 
     let Some(column) = column else {
         return Err(ApiError::NotFound);
     };
-    let board_id = column.board.id.to_raw();
+    let board_id = column.board_id;
 
     // Current contents of the column, top first — the same query `list_cards`
     // uses, so the caller is ordering exactly what it was shown.
-    let current: Vec<DbCard> = state
-        .db
-        .query(
-            "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
-        )
-        .bind(("id", col_id.clone()))
-        .traced(DbQuery::new(
-            "cards.reorder_cards",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+    let current = column_cards(&state.db, &col_id, "cards.reorder_cards").await?;
 
     // Requested ids that really are in this column, in the order asked for and
     // without repeats, followed by everything the caller left out in its
@@ -747,22 +699,21 @@ pub async fn reorder_cards(
     let mut seen: HashSet<String> = HashSet::new();
     let mut target: Vec<&DbCard> = Vec::with_capacity(current.len());
     for wanted in &payload.order {
-        if let Some(card) = current.iter().find(|c| &c.id.id.to_raw() == wanted)
+        if let Some(card) = current.iter().find(|c| &c.id == wanted)
             && seen.insert(wanted.clone())
         {
             target.push(card);
         }
     }
     for card in &current {
-        if !seen.contains(&card.id.id.to_raw()) {
+        if !seen.contains(&card.id) {
             target.push(card);
         }
     }
 
-    // Are the current positions unambiguous? `ORDER BY position ASC` has no
-    // tiebreak, so as soon as two cards share a value the order above is
-    // whatever the database happened to return — not something to preserve or
-    // to compare against.
+    // Are the current positions unambiguous? As soon as two cards share a
+    // value, the order above rests on the `id` tiebreak alone, which browsers
+    // never see — not something to preserve or to compare against.
     let existing: Vec<i32> = current.iter().map(|c| c.position).collect();
     let unambiguous = existing.windows(2).all(|w| w[0] < w[1]);
 
@@ -809,26 +760,28 @@ pub async fn reorder_cards(
             if card.position == position {
                 continue;
             }
-            let card_id = card.id.id.to_raw();
+            let card_id = card.id.clone();
             let snapshot_before = serde_json::to_value((*card).clone().into_api())?;
 
-            // RETURN AFTER in the same statement: never write a position without a
+            // RETURNING in the same statement: never write a position without a
             // confirmed row to audit, and never audit a write that did not land.
             // The WHERE clause re-asserts the column so a card moved out from under
             // this request matches zero rows rather than being dragged back.
-            let updated: Vec<DbCard> = state
-                .db
-                .query(
-                    "UPDATE type::thing('cards', $id) SET position = $pos, last_edited_by = $editor \
-                     WHERE column = type::thing('columns', $col_id) RETURN AFTER",
-                )
-                .bind(("id", card_id.clone()))
-                .bind(("pos", position))
-                .bind(("col_id", col_id.clone()))
-                .bind(("editor", editor.clone()))
-                .traced(DbQuery::new("cards.reorder_cards", DbOperation::Update, "cards"))
-                .await?
-                .take(0)?;
+            let updated: Vec<DbCard> = sqlx::query_as(
+                "UPDATE cards SET position = $2, last_edited_by = $3 \
+                 WHERE id = $1 AND column_id = $4 RETURNING *",
+            )
+            .bind(&card_id)
+            .bind(position)
+            .bind(&editor)
+            .bind(&col_id)
+            .fetch_all(&state.db)
+            .traced(DbQuery::new(
+                "cards.reorder_cards",
+                DbOperation::Update,
+                "cards",
+            ))
+            .await?;
             let mut it = updated.into_iter();
             let Some(card_after) = it.next() else {
                 // Zero rows means the card left this column between the SELECT
@@ -904,19 +857,7 @@ pub async fn reorder_cards(
     // surface as the 500 it is.
     outcome?;
 
-    let ordered: Vec<DbCard> = state
-        .db
-        .query(
-            "SELECT * FROM cards WHERE column = type::thing('columns', $id) ORDER BY position ASC",
-        )
-        .bind(("id", col_id))
-        .traced(DbQuery::new(
-            "cards.reorder_cards",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+    let ordered = column_cards(&state.db, &col_id, "cards.reorder_cards").await?;
 
     Ok(Json(ordered.into_iter().map(DbCard::into_api).collect()))
 }

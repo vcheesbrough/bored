@@ -31,11 +31,32 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Used in the sse_handler return-type bound (Stream<Item=…>).
 futures-util = "0.3"
 url = "2"
-surrealdb = { version = "2", features = ["kv-mem", "kv-surrealkv"] }
+# Postgres (card #471). The same driver and feature set as v-note's
+# `crates/server`, less `uuid` (bored's ids are ULID text) and
+# `tls-rustls-ring` (the database sits on the deployment's private network,
+# never across a public one). `migrate` embeds `backend/migrations/` in the
+# binary via `sqlx::migrate!`, which runs them at startup.
+sqlx = { version = "0.9", default-features = false, features = [
+    "chrono",
+    "derive",
+    "json",
+    "macros",
+    "migrate",
+    "postgres",
+    "runtime-tokio",
+] }
+# `timestamptz` columns decode to `chrono::DateTime<Utc>` (sqlx's `chrono`
+# feature). Already in the tree through sqlx; named here so the row types can
+# spell the type.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Read-only, and only by the one-off `migrate-from-surreal` subcommand
+# (`surreal_migration.rs`), which copies the old SurrealKV store into
+# Postgres. Nothing on the serving path opens it. Delete it together with the
+# subcommand once both environments are migrated (card #471's follow-up).
+surrealdb = { version = "2", default-features = false, features = ["kv-surrealkv"] }
 ulid = "1"
 # `EnumIter` / `EnumCount` on `error::ErrorType`, so tests (and #415's metric
 # setup) can walk every variant without a hand-kept list that could drift.
-# Already in the dependency tree via surrealdb; this adds no new crate.
 strum = { version = "0.27", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -118,10 +139,7 @@ axum-test = "15"
 # dependency tree; this adds no new crate.
 regex = "1"
 serial_test = "3"
-# The storage engine under SurrealDB, opened directly by the `!ts` key-leak
-# test (card #470) so it counts keys without going through SurrealDB — an
-# oracle independent of the code under test. Pinned with `=` to the version
-# surrealdb-core resolves to in Cargo.lock, so the test reads the same on-disk
-# format the backend writes; bump it together with surrealdb.
-surrealkv = "=0.9.3"
+# The migration tests (`surreal_migration.rs`) seed a source store in memory.
+# Dev-only: the shipped binary only ever opens a SurrealKV directory.
+surrealdb = { version = "2", default-features = false, features = ["kv-mem"] }
 tempfile = "3"

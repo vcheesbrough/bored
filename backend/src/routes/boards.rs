@@ -5,12 +5,11 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use surrealdb::{Surreal, engine::local::Db};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::audit;
 use crate::auth::{AuthConfig, AuthSessionManager, Claims, JwksCache};
-use crate::db::{DbOperation, DbQuery, Traced as _};
+use crate::db::{Db, DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BROADCAST_CAPACITY, BoardEvent, BroadcastEvent};
 use crate::models::{DbBoard, DbCard, DbColumn};
@@ -18,13 +17,14 @@ use crate::models::{DbBoard, DbCard, DbColumn};
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 ///
 /// `Clone` is required by Axum — it clones the state per-request. All fields
-/// are cheap to clone: `Surreal<Db>` is an `Arc`-backed handle, the broadcast
-/// `Sender<T>` is also `Arc`-backed, and the auth/JWKS handles are explicit Arcs.
+/// are cheap to clone: the Postgres pool is an `Arc`-backed handle, the
+/// broadcast `Sender<T>` is also `Arc`-backed, and the auth/JWKS handles are
+/// explicit Arcs.
 #[derive(Clone)]
 pub struct AppState {
-    /// SurrealDB embedded database handle. Every operation on this handle is
-    /// async and goes through SurrealDB's internal connection pool.
-    pub db: Surreal<Db>,
+    /// The Postgres connection pool (`db.rs`). Every query borrows a
+    /// connection from it for the duration of the call.
+    pub db: Db,
     /// Broadcast sender for real-time board events. Calling `.send(event)` delivers
     /// a clone of the event to every currently-subscribed SSE client. We ignore the
     /// error returned when there are no subscribers (that just means nobody is
@@ -69,7 +69,7 @@ pub struct AppState {
 impl AppState {
     /// Create a new `AppState` with a fresh broadcast channel.
     /// Auth defaults to disabled — `with_auth()` enables it.
-    pub fn new(db: Surreal<Db>) -> Self {
+    pub fn new(db: Db) -> Self {
         // `broadcast::channel` returns (Sender, Receiver). We keep the Sender
         // in AppState and drop the initial Receiver — new receivers are created
         // by calling `sender.subscribe()` in the SSE handler.
@@ -127,21 +127,16 @@ pub(crate) fn is_valid_board_name(name: &str) -> bool {
 /// Look up a board by its name (slug). Returns `None` when no board has that name.
 /// The name is now the stable URL identifier; the internal ULID primary key is
 /// only used for DB record operations.
-pub(crate) async fn find_board_by_slug(
-    db: &Surreal<Db>,
-    slug: &str,
-) -> Result<Option<DbBoard>, ApiError> {
-    // Bind an owned String so the value outlives the async query chain
-    // (SurrealDB's bind requires 'static, which &str does not satisfy).
-    db.query("SELECT * FROM boards WHERE name = $slug LIMIT 1")
-        .bind(("slug", slug.to_owned()))
+pub(crate) async fn find_board_by_slug(db: &Db, slug: &str) -> Result<Option<DbBoard>, ApiError> {
+    sqlx::query_as("SELECT * FROM boards WHERE name = $1")
+        .bind(slug)
+        .fetch_optional(db)
         .traced(DbQuery::new(
             "boards.find_board_by_slug",
             DbOperation::Select,
             "boards",
         ))
-        .await?
-        .take(0)
+        .await
         .map_err(ApiError::from)
 }
 
@@ -151,9 +146,10 @@ pub(crate) async fn find_board_by_slug(
 pub async fn list_boards(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<shared::Board>>, ApiError> {
-    let boards: Vec<DbBoard> = state
-        .db
-        .select("boards")
+    // Ordered by id — a ULID, so creation order — because the API has always
+    // listed boards in that order (SurrealDB returned a table scan by key).
+    let boards: Vec<DbBoard> = sqlx::query_as("SELECT * FROM boards ORDER BY id")
+        .fetch_all(&state.db)
         .traced(DbQuery::new(
             "boards.list_boards",
             DbOperation::Select,
@@ -177,20 +173,21 @@ pub async fn create_board(
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
 
-    let board: Option<DbBoard> = state
-        .db
-        .create(("boards", &id))
-        .content(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
-        .traced(DbQuery::new(
-            "boards.create_board",
-            DbOperation::Create,
-            "boards",
-        ))
-        .await?;
-
-    // SurrealDB returns the created row; `None` here would mean the create
-    // silently wrote nothing, which no known failure mode produces.
-    let board = board.ok_or_else(|| ApiError::internal("create returned no board row"))?;
+    // A duplicate name trips `board_name_unique`, which `error.rs` turns into
+    // the 409 this route has always returned.
+    let board: DbBoard = sqlx::query_as(
+        "INSERT INTO boards (id, name, last_edited_by) VALUES ($1, $2, $3) RETURNING *",
+    )
+    .bind(&id)
+    .bind(&payload.name)
+    .bind(&editor)
+    .fetch_one(&state.db)
+    .traced(DbQuery::new(
+        "boards.create_board",
+        DbOperation::Insert,
+        "boards",
+    ))
+    .await?;
 
     let api_board = board.into_api();
     let snapshot_after = serde_json::to_value(api_board.clone())?;
@@ -251,20 +248,23 @@ pub async fn update_board(
         None => return Err(ApiError::NotFound),
     };
 
-    let board_ulid = existing.id.id.to_raw();
+    let board_ulid = existing.id.clone();
     let editor = editor_sub(&claims);
     let snapshot_before = serde_json::to_value(existing.clone().into_api())?;
 
-    let board: Option<DbBoard> = state
-        .db
-        .update(("boards", &board_ulid))
-        .merge(serde_json::json!({ "name": payload.name, "last_edited_by": editor }))
-        .traced(DbQuery::new(
-            "boards.update_board",
-            DbOperation::Update,
-            "boards",
-        ))
-        .await?;
+    let board: Option<DbBoard> = sqlx::query_as(
+        "UPDATE boards SET name = $2, last_edited_by = $3 WHERE id = $1 RETURNING *",
+    )
+    .bind(&board_ulid)
+    .bind(&payload.name)
+    .bind(&editor)
+    .fetch_optional(&state.db)
+    .traced(DbQuery::new(
+        "boards.update_board",
+        DbOperation::Update,
+        "boards",
+    ))
+    .await?;
 
     match board {
         Some(b) => {
@@ -310,26 +310,25 @@ pub async fn delete_board(
         Some(b) => b,
         None => return Err(ApiError::NotFound),
     };
-    let id = board_record.id.id.to_raw();
+    let id = board_record.id.clone();
     let batch = audit::new_batch_group();
 
-    let cards: Vec<DbCard> = state
-        .db
-        .query(
-            "SELECT * FROM cards WHERE column.board = type::thing('boards', $bid) \
-             ORDER BY column ASC, position ASC",
-        )
-        .bind(("bid", id.clone()))
-        .traced(DbQuery::new(
-            "boards.delete_board",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+    let cards: Vec<DbCard> = sqlx::query_as(
+        "SELECT cards.* FROM cards JOIN columns ON columns.id = cards.column_id \
+         WHERE columns.board_id = $1 \
+         ORDER BY cards.column_id, cards.position, cards.id",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .traced(DbQuery::new(
+        "boards.delete_board",
+        DbOperation::Select,
+        "cards",
+    ))
+    .await?;
 
     for card in cards {
-        let entity_id = card.id.id.to_raw();
+        let entity_id = card.id.clone();
         // Links go first so their delete rows sit under the same batch as the
         // card they belonged to.
         crate::routes::links::cascade_delete_card_links(
@@ -359,9 +358,9 @@ pub async fn delete_board(
         )
         .await?;
 
-        let _: Option<DbCard> = state
-            .db
-            .delete(("cards", &entity_id))
+        sqlx::query("DELETE FROM cards WHERE id = $1")
+            .bind(&entity_id)
+            .execute(&state.db)
             .traced(DbQuery::new(
                 "boards.delete_board",
                 DbOperation::Delete,
@@ -370,22 +369,19 @@ pub async fn delete_board(
             .await?;
     }
 
-    let cols: Vec<DbColumn> = state
-        .db
-        .query(
-            "SELECT * FROM columns WHERE board = type::thing('boards', $bid) ORDER BY position ASC",
-        )
-        .bind(("bid", id.clone()))
-        .traced(DbQuery::new(
-            "boards.delete_board",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?
-        .take(0)?;
+    let cols: Vec<DbColumn> =
+        sqlx::query_as("SELECT * FROM columns WHERE board_id = $1 ORDER BY position, id")
+            .bind(&id)
+            .fetch_all(&state.db)
+            .traced(DbQuery::new(
+                "boards.delete_board",
+                DbOperation::Select,
+                "columns",
+            ))
+            .await?;
 
     for col in cols {
-        let entity_id = col.id.id.to_raw();
+        let entity_id = col.id.clone();
         let snapshot_before = serde_json::to_value(col.clone().into_api())?;
         audit::record_and_broadcast(
             &state.db,
@@ -405,9 +401,9 @@ pub async fn delete_board(
         )
         .await?;
 
-        let _: Option<DbColumn> = state
-            .db
-            .delete(("columns", &entity_id))
+        sqlx::query("DELETE FROM columns WHERE id = $1")
+            .bind(&entity_id)
+            .execute(&state.db)
             .traced(DbQuery::new(
                 "boards.delete_board",
                 DbOperation::Delete,
@@ -435,9 +431,9 @@ pub async fn delete_board(
     )
     .await?;
 
-    let _: Option<DbBoard> = state
-        .db
-        .delete(("boards", &id))
+    sqlx::query("DELETE FROM boards WHERE id = $1")
+        .bind(&id)
+        .execute(&state.db)
         .traced(DbQuery::new(
             "boards.delete_board",
             DbOperation::Delete,

@@ -10,12 +10,14 @@ mod boards;
 mod cards;
 mod columns;
 mod contract;
+pub(crate) mod db_support;
 mod errors;
 mod links;
 mod outbound_http;
 mod reorder;
 mod router;
 mod sse;
+mod storage;
 mod tags;
 
 // `super::*` imports everything from the parent module (the crate root,
@@ -31,7 +33,7 @@ use axum_test::TestServer;
 // Helper: create a TestServer backed by an in-memory database.
 // Called at the start of each test that needs a server.
 async fn test_app() -> TestServer {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     let router = app(state, "./dist", DeploymentInfo::new("dev", None)).await;
     TestServer::new(router).unwrap()
@@ -117,7 +119,7 @@ fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
 /// The default `fmt()` filter is INFO, which is deliberate: it is the level
 /// deployments run at, so anything this test sees is something production
 /// would see too.
-async fn capture_logs_async<T>(f: impl std::future::Future<Output = T>) -> (T, String) {
+pub(crate) async fn capture_logs_async<T>(f: impl std::future::Future<Output = T>) -> (T, String) {
     let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(BufferWriter(std::sync::Arc::clone(&buffer)))

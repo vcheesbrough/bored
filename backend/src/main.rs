@@ -6,8 +6,9 @@
 // attribute also outranks the `-D warnings` CI passes on the clippy command
 // line.
 //
-// surrealdb::Error is inherently >128 bytes; propagating it via `?` throughout
-// this crate is the intended usage of the driver, not something to box away.
+// `ApiError` (and the driver errors it is built from) can exceed clippy's
+// 128-byte threshold; propagating them via `?` throughout this crate is the
+// intended usage, not something to box away.
 #![allow(clippy::result_large_err)]
 
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
@@ -31,6 +32,7 @@ mod redact;
 mod routes;
 mod server_span;
 mod spa;
+mod surreal_migration;
 mod timestamp;
 
 use std::sync::Arc;
@@ -55,6 +57,11 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 enum StartupError {
     Config(config::ConfigError),
     Telemetry(observability::TelemetryError),
+    /// Postgres could not be reached, or its migrations failed. Carries the
+    /// error's class only (card #366: a driver message can quote values).
+    Database(&'static str),
+    /// `migrate-from-surreal` failed; its `Display` is already redacted.
+    Migration(surreal_migration::MigrationError),
     /// `run` panicked; the panic hook has already printed where.
     Panicked,
 }
@@ -64,6 +71,8 @@ impl std::fmt::Debug for StartupError {
         match self {
             StartupError::Config(error) => write!(f, "{error}"),
             StartupError::Telemetry(error) => write!(f, "{error}"),
+            StartupError::Database(class) => write!(f, "database unavailable ({class})"),
+            StartupError::Migration(error) => write!(f, "{error}"),
             StartupError::Panicked => write!(f, "panicked (see the message above on stderr)"),
         }
     }
@@ -80,6 +89,35 @@ impl From<config::ConfigError> for StartupError {
 impl From<observability::TelemetryError> for StartupError {
     fn from(error: observability::TelemetryError) -> Self {
         StartupError::Telemetry(error)
+    }
+}
+
+impl From<sqlx::Error> for StartupError {
+    fn from(error: sqlx::Error) -> Self {
+        StartupError::Database(error::database_error_type(&error).as_str())
+    }
+}
+
+impl From<sqlx::migrate::MigrateError> for StartupError {
+    fn from(error: sqlx::migrate::MigrateError) -> Self {
+        match error {
+            // The usual case: the database could not be reached at all.
+            sqlx::migrate::MigrateError::Execute(inner) => inner.into(),
+            // Anything else is a migration bookkeeping problem (a changed or
+            // missing migration file), named by its variant alone.
+            other => StartupError::Database(match other {
+                sqlx::migrate::MigrateError::VersionMismatch(_) => "migration_changed",
+                sqlx::migrate::MigrateError::VersionMissing(_) => "migration_missing",
+                sqlx::migrate::MigrateError::Dirty(_) => "migration_dirty",
+                _ => "migration_failed",
+            }),
+        }
+    }
+}
+
+impl From<surreal_migration::MigrationError> for StartupError {
+    fn from(error: surreal_migration::MigrationError) -> Self {
+        StartupError::Migration(error)
     }
 }
 
@@ -101,7 +139,15 @@ fn main() -> Result<(), StartupError> {
         // sovereign-config call below has a span and every later line is
         // correlated. An invalid variable set stops the process here.
         let telemetry = observability::init()?;
-        let outcome = guarded(run(&telemetry)).await;
+        // `bored-backend migrate-from-surreal …` is the one-off SurrealDB
+        // import (card #471); anything else, including no arguments, serves.
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let outcome = match args.split_first() {
+            Some((command, rest)) if command == "migrate-from-surreal" => {
+                guarded(migrate_from_surreal(rest)).await
+            }
+            _ => guarded(run(&telemetry)).await.map(|()| 0),
+        };
         // Always flush, whether we are here after a clean shutdown, a failed
         // startup or a panic — the telemetry of a process going down is the
         // most useful there is.
@@ -109,7 +155,25 @@ fn main() -> Result<(), StartupError> {
         outcome
     });
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
-    result
+    match result {
+        Ok(0) => Ok(()),
+        // A deliberate non-zero status (`--check-empty`'s "not empty"):
+        // nothing failed, so nothing is logged, but the caller sees the code.
+        Ok(code) => std::process::exit(i32::from(code)),
+        Err(error) => Err(error),
+    }
+}
+
+/// `migrate-from-surreal`: connect to the configured Postgres (running its
+/// migrations, so the schema exists) and run the import subcommand. Returns
+/// the process exit status.
+async fn migrate_from_surreal(args: &[String]) -> Result<u8, StartupError> {
+    let command = surreal_migration::Command::parse(args)?;
+    let cfg = tokio::task::block_in_place(config::build_config)?;
+    let database = config::load_group::<config::DatabaseConfig>(&cfg, "database")?;
+    drop(cfg);
+    let db = db::connect(&database).await?;
+    Ok(surreal_migration::run(command, &db).await?)
 }
 
 /// Run `work` (the process's whole life, `run`), turning a panic into
@@ -125,9 +189,9 @@ fn main() -> Result<(), StartupError> {
 /// internally synchronised. For a panic the default panic hook has already
 /// written its message to stderr; it is not repeated in the log line, because
 /// a panic message is built from whatever the code had in hand (#366).
-async fn guarded(
-    work: impl std::future::Future<Output = Result<(), StartupError>>,
-) -> Result<(), StartupError> {
+async fn guarded<T>(
+    work: impl std::future::Future<Output = Result<T, StartupError>>,
+) -> Result<T, StartupError> {
     let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(work))
         .await
         .unwrap_or(Err(StartupError::Panicked));
@@ -173,6 +237,7 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
         .then(|| config::load_group::<config::SessionConfig>(&cfg, "session"))
         .transpose()?;
     let server = config::load_group::<config::ServerConfig>(&cfg, "server")?;
+    let database = config::load_group::<config::DatabaseConfig>(&cfg, "database")?;
     // Optional: absent means the SPA is told telemetry is off (card #416).
     let client_telemetry = config::load_client_telemetry(&cfg)?;
     drop(cfg);
@@ -183,9 +248,9 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
     telemetry.set_log_level(&observability.log_level);
     telemetry.check_environment(&observability.environment)?;
 
-    let db = db::connect_persistent(&server.database_path)
-        .await
-        .expect("failed to connect to database");
+    // Connects and brings the schema up to date; an unreachable database or a
+    // failed migration stops startup here, before the listener binds.
+    let db = db::connect(&database).await?;
 
     // `oidc` is `None` when `oidc.issuer-url` is unset — auth-disabled mode,
     // useful for local hacking without a live IdP and for unit tests.
@@ -257,7 +322,7 @@ async fn with_oidc(
 
 // ── Integration tests ─────────────────────────────────────────────────────────
 // `#[cfg(test)]` means this entire module is only compiled when running tests.
-// Each test spins up a real Axum router with an in-memory SurrealDB — no mocking,
-// no fixtures, every test starts clean.
+// Each test spins up a real Axum router over a fresh Postgres database of its
+// own (`db::connect_test`) — no mocking, no fixtures, every test starts clean.
 #[cfg(test)]
 mod tests;

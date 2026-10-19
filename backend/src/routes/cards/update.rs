@@ -15,7 +15,7 @@
 //! Nothing here touches [`crate::models`] beyond reading the stored tag list,
 //! and nothing here is `async`.
 
-use surrealdb::{engine::local::Db, method::Query};
+use sqlx::{Postgres, postgres::PgArguments, query::QueryAs};
 
 use crate::error::ApiError;
 use crate::models::DbCard;
@@ -25,14 +25,15 @@ use super::normalize_tags;
 /// The `UPDATE` statement a request resolves to: which fields to write, and
 /// the values to bind to them.
 ///
-/// `set_parts` and the value fields are kept in step — a field is `Some` here
-/// exactly when `set_parts` carries the matching `$placeholder` — so
-/// [`Self::statement`] and [`Self::bind`] can never disagree about how many
-/// parameters the query has.
+/// `set_columns` and the value fields are kept in step — a field is `Some`
+/// here exactly when `set_columns` names its column — so [`Self::statement`]
+/// and [`Self::bind`] can never disagree about how many parameters the query
+/// has, or in which order.
 #[derive(Debug)]
 pub(super) struct CardWrite {
-    /// SQL `SET` fragments, e.g. `"body = $body"`, joined by [`Self::statement`].
-    set_parts: Vec<String>,
+    /// The columns to `SET`, in the fixed order [`Self::statement`] numbers
+    /// their parameters and [`Self::bind`] binds them.
+    set_columns: Vec<&'static str>,
     body: Option<String>,
     column_id: Option<String>,
     position: Option<i32>,
@@ -92,29 +93,28 @@ impl CardUpdate {
             .as_ref()
             .is_some_and(|new_tags| *new_tags != existing.tags);
 
-        // Build a single atomic UPDATE covering all changed fields.
-        let mut set_parts: Vec<String> = Vec::new();
+        // Build a single atomic UPDATE covering all changed fields. The editor
+        // is always stamped too, by `statement` — every successful mutation
+        // records who did it.
+        let mut set_columns: Vec<&'static str> = Vec::new();
 
         if payload.body.is_some() {
-            set_parts.push("body = $body".to_string());
+            set_columns.push("body");
         }
         if payload.column_id.is_some() {
-            set_parts.push("column = type::thing('columns', $col_id)".to_string());
+            set_columns.push("column_id");
         }
         if payload.position.is_some() {
-            set_parts.push("position = $position".to_string());
+            set_columns.push("position");
         }
         if tags_changed {
-            set_parts.push("tags = $tags".to_string());
+            set_columns.push("tags");
         }
 
         // Nothing changed — the caller returns the existing card unchanged.
-        if set_parts.is_empty() {
+        if set_columns.is_empty() {
             return Ok(None);
         }
-
-        // Always stamp the editor — every successful mutation records who did it.
-        set_parts.push("last_edited_by = $editor".to_string());
 
         // Layout-only changes are "move" (history toggles / filters). Body edits — alone or
         // combined with position/column in one PUT — stay "update" so audit_edit_session merge works.
@@ -143,11 +143,11 @@ impl CardUpdate {
 
         Ok(Some(Self {
             write: CardWrite {
-                set_parts,
+                set_columns,
                 body: payload.body,
                 column_id: payload.column_id,
                 position: payload.position,
-                // Bound only when it changed, matching the `set_parts` fragment.
+                // Bound only when it changed, matching `set_columns`.
                 tags: if tags_changed { tags } else { None },
             },
             audit: CardAudit {
@@ -159,34 +159,45 @@ impl CardUpdate {
 }
 
 impl CardWrite {
-    /// The `UPDATE` statement for this plan. The `$card_id` and `$editor`
-    /// parameters are the caller's to bind; everything else comes from
-    /// [`Self::bind`].
+    /// The `UPDATE` statement for this plan. `$1` (the card id) and `$2` (the
+    /// editor) are the caller's to bind; the changed fields follow from `$3`
+    /// in [`Self::bind`]'s order.
+    ///
+    /// Only column *names* are formatted in, and they are `&'static str`
+    /// literals from [`CardUpdate::plan`]; every value is a bound parameter.
     pub(super) fn statement(&self) -> String {
+        let assignments: Vec<String> = self
+            .set_columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| format!("{column} = ${}", index + 3))
+            .collect();
         format!(
-            "UPDATE type::thing('cards', $card_id) SET {}",
-            self.set_parts.join(", ")
+            "UPDATE cards SET {}, last_edited_by = $2 WHERE id = $1 RETURNING *",
+            assignments.join(", ")
         )
     }
 
     /// Bind this plan's values onto `q`, consuming the plan.
     ///
-    /// Each `if let` here pairs with a `set_parts` fragment pushed in
-    /// [`CardUpdate::plan`], so the statement never references a parameter that
-    /// was not bound. Bind order is irrelevant to SurrealDB — the parameters
-    /// are named — but is kept stable for readability.
-    pub(super) fn bind<'a>(self, mut q: Query<'a, Db>) -> Query<'a, Db> {
+    /// Each `if let` here pairs with a `set_columns` entry pushed in
+    /// [`CardUpdate::plan`], in the same order, so parameter `$n` in
+    /// [`Self::statement`] is always the value bound here in position `n`.
+    pub(super) fn bind<'q, T>(
+        self,
+        mut q: QueryAs<'q, Postgres, T, PgArguments>,
+    ) -> QueryAs<'q, Postgres, T, PgArguments> {
         if let Some(body) = self.body {
-            q = q.bind(("body", body));
+            q = q.bind(body);
         }
         if let Some(col_id) = self.column_id {
-            q = q.bind(("col_id", col_id));
+            q = q.bind(col_id);
         }
         if let Some(position) = self.position {
-            q = q.bind(("position", position));
+            q = q.bind(position);
         }
         if let Some(tags) = self.tags {
-            q = q.bind(("tags", tags));
+            q = q.bind(tags);
         }
         q
     }
@@ -195,22 +206,20 @@ impl CardWrite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use surrealdb::sql::{Datetime, Thing};
 
     /// A stored card carrying `tags`. Only the tag list is read by the planner;
     /// everything else is filler so the struct can be constructed.
     fn card_tagged(tags: &[&str]) -> DbCard {
         DbCard {
-            // `Thing` is SurrealDB's record id: a (table, id) pair.
-            id: Thing::from(("cards", "c1")),
-            column: Thing::from(("columns", "col")),
+            id: "c1".to_string(),
+            column_id: "col".to_string(),
             body: "stored body".to_string(),
             position: 1024,
-            number: Some(7),
+            number: 7,
             tags: tags.iter().map(|t| t.to_string()).collect(),
             last_edited_by: None,
-            created_at: Datetime::default(),
-            updated_at: Datetime::default(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            updated_at: chrono::DateTime::UNIX_EPOCH,
         }
     }
 
@@ -273,7 +282,7 @@ mod tests {
         assert_eq!(plan.audit.action, "update");
         assert_eq!(
             plan.write.statement(),
-            "UPDATE type::thing('cards', $card_id) SET tags = $tags, last_edited_by = $editor"
+            "UPDATE cards SET tags = $3, last_edited_by = $2 WHERE id = $1 RETURNING *"
         );
     }
 
@@ -287,7 +296,7 @@ mod tests {
         assert_eq!(plan.audit.action, "update");
         assert_eq!(
             plan.write.statement(),
-            "UPDATE type::thing('cards', $card_id) SET body = $body, last_edited_by = $editor"
+            "UPDATE cards SET body = $3, last_edited_by = $2 WHERE id = $1 RETURNING *"
         );
     }
 
@@ -411,8 +420,9 @@ mod tests {
 
     #[test]
     fn every_changed_field_lands_in_one_statement() {
-        // The whole update is a single atomic `UPDATE`, in a fixed fragment
-        // order, with `last_edited_by` always stamped last.
+        // The whole update is a single atomic `UPDATE`, in a fixed column
+        // order (parameters numbered to match), with `last_edited_by` always
+        // stamped last.
         let payload = shared::UpdateCardRequest {
             body: Some("new body".to_string()),
             position: Some(2048),
@@ -422,19 +432,19 @@ mod tests {
         };
         assert_eq!(
             plan_of(payload).write.statement(),
-            "UPDATE type::thing('cards', $card_id) SET \
-             body = $body, \
-             column = type::thing('columns', $col_id), \
-             position = $position, \
-             tags = $tags, \
-             last_edited_by = $editor"
+            "UPDATE cards SET \
+             body = $3, \
+             column_id = $4, \
+             position = $5, \
+             tags = $6, \
+             last_edited_by = $2 WHERE id = $1 RETURNING *"
         );
     }
 
     #[test]
     fn an_unchanged_tag_list_is_not_written_alongside_a_real_change() {
         // The card already has these tags, so the statement must not carry a
-        // `tags = $tags` fragment even though the request supplied the field.
+        // `tags = …` assignment even though the request supplied the field.
         let payload = shared::UpdateCardRequest {
             body: Some("new body".to_string()),
             tags: Some(vec!["alpha".to_string()]),
@@ -445,7 +455,7 @@ mod tests {
             .expect("the body change is a write");
         assert_eq!(
             plan.write.statement(),
-            "UPDATE type::thing('cards', $card_id) SET body = $body, last_edited_by = $editor"
+            "UPDATE cards SET body = $3, last_edited_by = $2 WHERE id = $1 RETURNING *"
         );
         // ...and because tags did not move, the edit session survives.
         assert_eq!(plan.audit.action, "update");

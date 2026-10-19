@@ -582,13 +582,6 @@ fn current_tz_label() -> String {
 /// Parse an audit timestamp into milliseconds since the Unix epoch.
 ///
 /// Takes the API's format since card #472 (`"2026-05-07T01:27:04.823026Z"`).
-/// It still accepts the pre-#472 SurrealQL literal
-/// (`"d'2026-05-07T01:27:04.823026281Z'"`) — see [`normalise_audit_ts`] —
-/// but only as a **defensive no-op**: this parses an audit row's own
-/// top-level `created_at`, which the API now always formats itself, so no
-/// caller can hand it the literal. Kept, like
-/// `shared::history::strip_surreal_wrapper`, until card #471 rewrites the
-/// legacy literals still stored inside old audit snapshots; remove after.
 ///
 /// Falls back to the current time when parsing fails so a malformed row
 /// still renders rather than blowing up the whole drawer.
@@ -603,16 +596,18 @@ fn parse_audit_ts(raw: &str) -> i64 {
     }
 }
 
-/// Turn either audit timestamp form into the plain millisecond-precision
-/// ISO string JS `Date` parses everywhere.
+/// Turn an audit timestamp into the plain millisecond-precision ISO string
+/// JS `Date` parses everywhere.
 ///
-/// Strips the legacy `d'…'` wrapper (a no-op on the current format), then
-/// trims fractional seconds to three digits: JS `Date.parse` is permissive
+/// Trims fractional seconds to three digits: JS `Date.parse` is permissive
 /// about longer fractions in modern engines, but trimming keeps the input
-/// portable. Pure string work, split out of [`parse_audit_ts`] so it can be
-/// unit-tested on the host target, where `js_sys::Date` is unavailable.
+/// portable. (The SurrealQL `d'…'` form this once also unwrapped is gone: the
+/// API stopped sending it in #472, and #471's migration rewrote the last of
+/// it out of stored history.) Pure string work, split out of
+/// [`parse_audit_ts`] so it can be unit-tested on the host target, where
+/// `js_sys::Date` is unavailable.
 fn normalise_audit_ts(raw: &str) -> String {
-    trim_fractional_seconds(shared::history::strip_surreal_wrapper(raw))
+    trim_fractional_seconds(raw.trim())
 }
 
 /// Truncate the fractional-seconds part of an ISO-8601 string to at most
@@ -649,16 +644,6 @@ mod tests {
     fn normalises_the_current_api_format() {
         assert_eq!(
             normalise_audit_ts("2026-10-02T16:17:12.643091Z"),
-            "2026-10-02T16:17:12.643Z"
-        );
-    }
-
-    /// The pre-#472 SurrealQL literal, nanoseconds: the defensive path. It
-    /// lands on the same string as the same instant in the new format.
-    #[test]
-    fn normalises_a_legacy_surreal_literal() {
-        assert_eq!(
-            normalise_audit_ts("d'2026-10-02T16:17:12.643091493Z'"),
             "2026-10-02T16:17:12.643Z"
         );
     }

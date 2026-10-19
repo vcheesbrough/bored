@@ -10,8 +10,8 @@
 //!   record id, an index or field name from our own schema may be logged; a
 //!   card body, tag, link reason or any other value a user typed may not;
 //! * **query names and call sites, never query text or bound values** — a
-//!   SurrealQL parse error quotes the query back, so it is reduced to its
-//!   variant name;
+//!   database error is reduced to its SQLSTATE code and the constraint and
+//!   table names (`error.rs`), a driver error to its variant name;
 //! * **URLs keep scheme, host, port and path, never the query string or
 //!   userinfo** — a query string is where OAuth codes, tokens and search
 //!   terms travel.
@@ -57,45 +57,11 @@ pub(crate) fn identifier(candidate: &str) -> &str {
     if is_identifier { candidate } else { REDACTED }
 }
 
-/// Render a SurrealDB record id as `table:id`, keeping each half only if it
-/// passes [`identifier`].
-///
-/// Takes the driver's own `Thing` (table + id) where the error carries one,
-/// so nothing has to be parsed back out of message text. Compound ids —
-/// arrays, objects, ranges — are never used by bored, so they are reduced to
-/// the marker rather than rendered (their rendering would include values).
-pub(crate) fn thing(thing: &surrealdb::sql::Thing) -> String {
-    // `Id` is the driver's enum of record-id shapes. Only the two plain
-    // scalar shapes are rendered; `match` forces a decision for every other
-    // shape the driver has today via the wildcard arm.
-    let id = match &thing.id {
-        surrealdb::sql::Id::String(s) => identifier(s).to_string(),
-        surrealdb::sql::Id::Number(n) => n.to_string(),
-        _ => REDACTED.to_string(),
-    };
-    format!("{}:{id}", identifier(&thing.tb))
-}
-
-/// As [`thing`], for the variants where the driver has already formatted the
-/// record id into a `String` (`FieldCheck`, `FieldValue`).
-///
-/// SurrealDB escapes an id it cannot print bare with `⟨…⟩` or backticks; such
-/// an id fails [`identifier`] and becomes the marker, which is the intent.
-pub(crate) fn record_string(record: &str) -> String {
-    // `split_once` returns the text either side of the *first* `:` — a table
-    // name never contains one — or `None` if there is no colon at all.
-    match record.split_once(':') {
-        Some((table, id)) => format!("{}:{}", identifier(table), identifier(id)),
-        None => REDACTED.to_string(),
-    }
-}
-
 /// The variant path of an error, read from its `Debug` rendering — e.g.
-/// `Db::IndexExists` or `Api::Query` — and nothing after it.
+/// `Protocol` or `Db::IndexExists` — and nothing after it.
 ///
-/// Why `Debug`: the driver's inner error enum has ~250 variants and is marked
-/// `#[non_exhaustive]`, so naming each one in a `match` is neither possible to
-/// keep complete nor worth it. Derived `Debug` always starts with the variant
+/// Why `Debug`: driver error enums are `#[non_exhaustive]` (sqlx's included),
+/// so naming each variant in a `match` cannot be kept complete. Derived `Debug` always starts with the variant
 /// name, and a variant name is an identifier we wrote into the driver, not
 /// data. The walk stops at the first character that is not part of a
 /// `Name(` chain — i.e. before the first quote, brace or space — so no field
@@ -108,7 +74,7 @@ pub(crate) fn variant_path(debug: &str) -> String {
     let mut path = String::new();
     // `rest` is a moving window over the unread part of the Debug string.
     let mut rest = debug;
-    // Two levels are enough (`surrealdb::Error` → the inner enum); a third
+    // Two levels are enough (an error → the inner enum it wraps); a third
     // would start reading into field types, which are not variant names.
     for _ in 0..2 {
         // Length of the leading run of identifier characters.
@@ -257,35 +223,6 @@ mod tests {
         ] {
             assert_eq!(identifier(text), REDACTED, "{text:?} must not pass");
         }
-    }
-
-    /// Each shape of the driver's record id: the two scalar shapes are
-    /// rendered, a compound shape (which renders its values) is not.
-    #[test]
-    fn things_render_scalar_ids_and_hide_compound_ones() {
-        use surrealdb::sql::{Array, Id, Thing, Value};
-
-        // `Thing::from((table, id))` is the driver's own constructor.
-        let string_id = Thing::from(("cards", Id::String("c1".to_string())));
-        assert_eq!(thing(&string_id), "cards:c1");
-
-        let number_id = Thing::from(("cards", Id::Number(42)));
-        assert_eq!(thing(&number_id), "cards:42");
-
-        // A string id that is free text, not an identifier.
-        let text_id = Thing::from(("cards", Id::String("a card body".to_string())));
-        assert_eq!(thing(&text_id), "cards:<redacted>");
-
-        // An array id would render its elements — user values.
-        let array_id = Thing::from(("cards", Id::Array(Array::from(vec![Value::from("SECRET")]))));
-        assert_eq!(thing(&array_id), "cards:<redacted>");
-    }
-
-    #[test]
-    fn record_strings_keep_table_and_plain_ids_only() {
-        assert_eq!(record_string("cards:c1"), "cards:c1");
-        assert_eq!(record_string("cards:⟨a card body⟩"), "cards:<redacted>");
-        assert_eq!(record_string("no colon here"), REDACTED);
     }
 
     #[test]

@@ -15,11 +15,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use surrealdb::{Surreal, engine::local::Db};
 
 use crate::audit;
 use crate::auth::Claims;
-use crate::db::{DbOperation, DbQuery, Traced as _};
+use crate::db::{Db, DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardLink, DbColumn};
@@ -40,120 +39,113 @@ const CYCLE: ApiError = ApiError::Unprocessable(Some("linking these cards would 
 /// duplicate.
 const ALREADY_LINKED: ApiError = ApiError::Conflict(Some(crate::error::ALREADY_LINKED_MESSAGE));
 
-/// Field list every link read uses. The card numbers are not stored on the
-/// link row; they are pulled through the record links at read time so the API
-/// type can carry them without a second query per link.
-const LINK_FIELDS: &str =
-    "*, predecessor.number AS predecessor_number, successor.number AS successor_number";
+/// The select every link read starts from, followed by `$rest` (a string
+/// literal: the WHERE / ORDER BY). The card numbers are not stored on the link
+/// row; they are joined in from the two cards so the API type can carry them
+/// without a second query per link. Inner joins are safe: the foreign keys
+/// cascade a card's deletion to its links, so both ends always exist.
+///
+/// A macro rather than a `const` + `format!` so the whole statement is still
+/// one string literal (`concat!` runs at compile time), which is what sqlx
+/// accepts as SQL without an injection audit.
+macro_rules! link_select {
+    ($rest:literal) => {
+        concat!(
+            "SELECT l.*, p.number AS predecessor_number, s.number AS successor_number \
+             FROM card_links l \
+             JOIN cards p ON p.id = l.predecessor_id \
+             JOIN cards s ON s.id = l.successor_id ",
+            $rest
+        )
+    };
+}
 
-/// One link by id, with the card numbers projected in.
-async fn load_link(
-    db: &Surreal<Db>,
-    link_id: &str,
-) -> Result<Option<DbCardLink>, surrealdb::Error> {
-    db.query(format!(
-        "SELECT {LINK_FIELDS} FROM card_links WHERE id = type::thing('card_links', $id) LIMIT 1"
-    ))
-    .bind(("id", link_id.to_string()))
-    .traced(DbQuery::new(
-        "links.load_link",
-        DbOperation::Select,
-        "card_links",
-    ))
-    .await?
-    .take(0)
+/// One link by id, with the card numbers joined in.
+async fn load_link(db: &Db, link_id: &str) -> Result<Option<DbCardLink>, sqlx::Error> {
+    sqlx::query_as(link_select!("WHERE l.id = $1"))
+        .bind(link_id)
+        .fetch_optional(db)
+        .traced(DbQuery::new(
+            "links.load_link",
+            DbOperation::Select,
+            "card_links",
+        ))
+        .await
 }
 
 /// Every link on a board, oldest first. A link's board is the board of the
 /// cards it joins; both ends are always on the same one, so the predecessor
 /// alone is enough to scope the query.
-async fn board_links(
-    db: &Surreal<Db>,
-    board_ulid: &str,
-) -> Result<Vec<DbCardLink>, surrealdb::Error> {
-    db.query(format!(
-        "SELECT {LINK_FIELDS} FROM card_links \
-         WHERE predecessor.column.board = type::thing('boards', $bid) \
-         ORDER BY created_at ASC"
+async fn board_links(db: &Db, board_ulid: &str) -> Result<Vec<DbCardLink>, sqlx::Error> {
+    sqlx::query_as(link_select!(
+        "JOIN columns pc ON pc.id = p.column_id \
+         WHERE pc.board_id = $1 ORDER BY l.created_at, l.id"
     ))
-    .bind(("bid", board_ulid.to_string()))
+    .bind(board_ulid)
+    .fetch_all(db)
     .traced(DbQuery::new(
         "links.board_links",
         DbOperation::Select,
         "card_links",
     ))
-    .await?
-    .take(0)
+    .await
 }
 
 /// Every link with `card_id` at either end.
-async fn links_touching_card(
-    db: &Surreal<Db>,
-    card_id: &str,
-) -> Result<Vec<DbCardLink>, surrealdb::Error> {
-    db.query(format!(
-        "SELECT {LINK_FIELDS} FROM card_links \
-         WHERE predecessor = type::thing('cards', $cid) \
-            OR successor = type::thing('cards', $cid) \
-         ORDER BY created_at ASC"
+async fn links_touching_card(db: &Db, card_id: &str) -> Result<Vec<DbCardLink>, sqlx::Error> {
+    sqlx::query_as(link_select!(
+        "WHERE l.predecessor_id = $1 OR l.successor_id = $1 \
+         ORDER BY l.created_at, l.id"
     ))
-    .bind(("cid", card_id.to_string()))
+    .bind(card_id)
+    .fetch_all(db)
     .traced(DbQuery::new(
         "links.links_touching_card",
         DbOperation::Select,
         "card_links",
     ))
-    .await?
-    .take(0)
+    .await
+}
+
+/// One card by id, or `None`; `name` is the call site, for the span.
+async fn select_card(
+    db: &Db,
+    card_id: &str,
+    name: &'static str,
+) -> Result<Option<DbCard>, sqlx::Error> {
+    sqlx::query_as("SELECT * FROM cards WHERE id = $1")
+        .bind(card_id)
+        .fetch_optional(db)
+        .traced(DbQuery::new(name, DbOperation::Select, "cards"))
+        .await
 }
 
 /// The board a card sits on, via its column. `None` when the column has gone
-/// — possible mid-cascade, when the caller should treat the board as unknown
-/// rather than fail.
-async fn board_of_card(
-    db: &Surreal<Db>,
-    card: &DbCard,
-) -> Result<Option<String>, surrealdb::Error> {
-    let column: Option<DbColumn> = db
-        .select(("columns", card.column.id.to_raw()))
+/// — the caller should then treat the board as unknown rather than fail.
+async fn board_of_card(db: &Db, card: &DbCard) -> Result<Option<String>, sqlx::Error> {
+    let column: Option<DbColumn> = sqlx::query_as("SELECT * FROM columns WHERE id = $1")
+        .bind(&card.column_id)
+        .fetch_optional(db)
         .traced(DbQuery::new(
             "links.board_of_card",
             DbOperation::Select,
             "columns",
         ))
         .await?;
-    Ok(column.map(|c| c.board.id.to_raw()))
+    Ok(column.map(|c| c.board_id))
 }
 
 /// The board a link belongs to, via its predecessor card, falling back to the
-/// successor when the predecessor (or its column) is already gone — possible
-/// when the link outlives one of its ends mid-cascade. `None` only when
-/// neither end resolves to a board.
-async fn board_of_link(
-    db: &Surreal<Db>,
-    link: &DbCardLink,
-) -> Result<Option<String>, surrealdb::Error> {
-    let predecessor: Option<DbCard> = db
-        .select(("cards", link.predecessor.id.to_raw()))
-        .traced(DbQuery::new(
-            "links.board_of_link",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?;
+/// successor when the predecessor (or its column) is already gone. `None`
+/// only when neither end resolves to a board.
+async fn board_of_link(db: &Db, link: &DbCardLink) -> Result<Option<String>, sqlx::Error> {
+    let predecessor = select_card(db, &link.predecessor_id, "links.board_of_link").await?;
     if let Some(card) = predecessor
         && let Some(board_id) = board_of_card(db, &card).await?
     {
         return Ok(Some(board_id));
     }
-    let successor: Option<DbCard> = db
-        .select(("cards", link.successor.id.to_raw()))
-        .traced(DbQuery::new(
-            "links.board_of_link",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?;
+    let successor = select_card(db, &link.successor_id, "links.board_of_link").await?;
     match successor {
         Some(card) => board_of_card(db, &card).await,
         None => Ok(None),
@@ -175,7 +167,7 @@ pub async fn list_board_links(
         Some(b) => b,
         None => return Err(ApiError::NotFound),
     };
-    let links = board_links(&state.db, &board.id.id.to_raw()).await?;
+    let links = board_links(&state.db, &board.id).await?;
     Ok(Json(links.into_iter().map(DbCardLink::into_api).collect()))
 }
 
@@ -193,16 +185,9 @@ pub async fn create_card_link(
     claims: Extension<Claims>,
     Json(payload): Json<shared::CreateCardLinkRequest>,
 ) -> Result<(StatusCode, Json<shared::CardLink>), ApiError> {
-    let card: Option<DbCard> = state
-        .db
-        .select(("cards", &card_id))
-        .traced(DbQuery::new(
-            "links.create_card_link",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?;
-    let card = card.ok_or(ApiError::NotFound)?;
+    let card = select_card(&state.db, &card_id, "links.create_card_link")
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     // Checked before the other card is even loaded: a self-link is not a
     // missing card, and 404 would send the client looking for one.
@@ -210,16 +195,9 @@ pub async fn create_card_link(
         return Err(SELF_LINK);
     }
 
-    let other: Option<DbCard> = state
-        .db
-        .select(("cards", &payload.other_card_id))
-        .traced(DbQuery::new(
-            "links.create_card_link",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?;
-    let other = other.ok_or(ApiError::NotFound)?;
+    let other = select_card(&state.db, &payload.other_card_id, "links.create_card_link")
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     let board_id = board_of_card(&state.db, &card)
         .await?
@@ -248,7 +226,7 @@ pub async fn create_card_link(
         let existing = board_links(&state.db, &board_id).await?;
         let pairs: Vec<(String, String)> = existing
             .iter()
-            .map(|l| (l.predecessor.id.to_raw(), l.successor.id.to_raw()))
+            .map(|l| (l.predecessor_id.clone(), l.successor_id.clone()))
             .collect();
 
         // An exact duplicate is a conflict, not a cycle — checked first so the
@@ -267,62 +245,43 @@ pub async fn create_card_link(
         // The card lookups above ran before this lock was taken, so a
         // concurrent delete could have removed either card in the meantime —
         // cascade deletes do not hold `link_lock`. Re-check right before the
-        // write so the CREATE below never targets a card that is already
-        // gone (an orphan link, invisible or showing as `#0` on the board).
-        let predecessor_still_exists: Option<DbCard> = state
-            .db
-            .select(("cards", predecessor_id.as_str()))
-            .traced(DbQuery::new(
-                "links.create_card_link",
-                DbOperation::Select,
-                "cards",
-            ))
-            .await?;
-        let successor_still_exists: Option<DbCard> = state
-            .db
-            .select(("cards", successor_id.as_str()))
-            .traced(DbQuery::new(
-                "links.create_card_link",
-                DbOperation::Select,
-                "cards",
-            ))
-            .await?;
+        // write so a vanished card is the 404 it is, rather than the foreign
+        // key violation (a 500) the INSERT below would otherwise hit.
+        let predecessor_still_exists =
+            select_card(&state.db, &predecessor_id, "links.create_card_link").await?;
+        let successor_still_exists =
+            select_card(&state.db, &successor_id, "links.create_card_link").await?;
         if predecessor_still_exists.is_none() || successor_still_exists.is_none() {
             return Err(ApiError::NotFound);
         }
 
         let id = ulid::Ulid::new().to_string().to_lowercase();
-        state
-            .db
-            .query(
-                "CREATE type::thing('card_links', $id) SET \
-                 predecessor = type::thing('cards', $pred), \
-                 successor = type::thing('cards', $succ), \
-                 reason = $reason, \
-                 last_edited_by = $editor",
-            )
-            .bind(("id", id.clone()))
-            .bind(("pred", predecessor_id))
-            .bind(("succ", successor_id))
-            .bind(("reason", reason))
-            .bind(("editor", editor_sub(&claims)))
-            .traced(DbQuery::new(
-                "links.create_card_link",
-                DbOperation::Create,
-                "card_links",
-            ))
-            .await?
-            // Under the lock the duplicate check above should make the unique
-            // index unreachable; if it fires anyway, the right answer is still
-            // "already linked", not a server fault — which is what
-            // `error::classify` returns for a `card_links_pair` violation, so
-            // `?` alone is enough here.
-            .check()?;
+        sqlx::query(
+            "INSERT INTO card_links (id, predecessor_id, successor_id, reason, last_edited_by) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&id)
+        .bind(&predecessor_id)
+        .bind(&successor_id)
+        .bind(&reason)
+        .bind(editor_sub(&claims))
+        .execute(&state.db)
+        .traced(DbQuery::new(
+            "links.create_card_link",
+            DbOperation::Insert,
+            "card_links",
+        ))
+        // Under the lock the duplicate check above should make the unique
+        // constraint unreachable; if it fires anyway, the right answer is
+        // still "already linked", not a server fault — which is what
+        // `error::classify` returns for a `card_links_pair` violation, so `?`
+        // alone is enough here.
+        .await?;
         id
     };
 
-    // Re-read rather than use the CREATE's return: the projected card numbers
-    // only come from a SELECT.
+    // Re-read rather than use the INSERT's return: the card numbers are only
+    // joined in by `link_select!`.
     let link = load_link(&state.db, &created_id)
         .await?
         .ok_or_else(|| ApiError::internal("link vanished after create"))?
@@ -379,22 +338,17 @@ pub async fn update_card_link(
         .unwrap_or_default();
     let snapshot_before = serde_json::to_value(existing.into_api())?;
 
-    state
-        .db
-        .query(
-            "UPDATE type::thing('card_links', $id) SET \
-             reason = $reason, last_edited_by = $editor",
-        )
-        .bind(("id", link_id.clone()))
-        .bind(("reason", reason))
-        .bind(("editor", editor_sub(&claims)))
+    sqlx::query("UPDATE card_links SET reason = $2, last_edited_by = $3 WHERE id = $1")
+        .bind(&link_id)
+        .bind(&reason)
+        .bind(editor_sub(&claims))
+        .execute(&state.db)
         .traced(DbQuery::new(
             "links.update_card_link",
             DbOperation::Update,
             "card_links",
         ))
-        .await?
-        .check()?;
+        .await?;
 
     let link = load_link(&state.db, &link_id)
         .await?
@@ -455,7 +409,7 @@ async fn delete_one_link(
     link: DbCardLink,
     batch_group: Option<&str>,
 ) -> Result<(), ApiError> {
-    let link_id = link.id.id.to_raw();
+    let link_id = link.id.clone();
     let snapshot_before = serde_json::to_value(link.into_api())?;
     audit::record_and_broadcast(
         &state.db,
@@ -475,9 +429,9 @@ async fn delete_one_link(
     )
     .await?;
 
-    let _: Option<DbCardLink> = state
-        .db
-        .delete(("card_links", &link_id))
+    sqlx::query("DELETE FROM card_links WHERE id = $1")
+        .bind(&link_id)
+        .execute(&state.db)
         .traced(DbQuery::new(
             "links.delete_one_link",
             DbOperation::Delete,

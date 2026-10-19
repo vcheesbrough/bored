@@ -1,6 +1,6 @@
 # bored
 
-A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, SurrealDB embedded, OIDC auth, SSE real-time updates.
+A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, Postgres, OIDC auth, SSE real-time updates.
 
 ## Stack
 
@@ -9,7 +9,7 @@ A full-stack Rust Kanban board app. Axum backend, Leptos WASM frontend, SurrealD
 | `leptos` (CSR) | Frontend framework |
 | `trunk` | WASM build tool |
 | `axum` + `axum-server` (rustls) | Backend web framework with TLS |
-| `surrealdb` (embedded, `kv-surrealkv`) | Database — no separate container |
+| `sqlx` (Postgres) | Database access; schema migrations in `backend/migrations/`, applied at startup |
 | `jsonwebtoken` + `reqwest` | OIDC ID-token / access-token validation against cached JWKS |
 | `axum-extra` (cookies) | httpOnly auth cookie handling |
 | `tracing` + `tracing-subscriber` | Structured JSON logs to stdout, collected into Loki |
@@ -65,7 +65,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 **On every push or manual run**:
 
 1. **compute-version** — [`scripts/compute-release-tag.sh`](scripts/compute-release-tag.sh) writes `.release-tag` (see [Versioning](#versioning)).
-2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test -p backend -p shared`) run *inside* the Dockerfile's `backend-builder` stage, and the `scripts/test-*.sh` script tests inside its `frontend-builder` stage, so a green build implies a green check suite.
+2. **build** — builds and verifies the production image tagged with `.release-tag` **locally** (does *not* push). Lint (`cargo fmt --check`, `cargo clippy -D warnings`) and tests (`cargo test -p backend -p shared`) run *inside* the Dockerfile's `backend-builder` stage — against a throwaway Postgres that [`scripts/with-test-postgres.sh`](scripts/with-test-postgres.sh) starts beside the build and hands in as the `database_url` build secret — and the `scripts/test-*.sh` script tests inside its `frontend-builder` stage, so a green build implies a green check suite.
 3. **e2e** — runs `e2e/docker-compose.test.yml` (mock OIDC, the freshly-built local image behind a Traefik edge as in production, the telemetry ingest and a fake OTLP receiver, and Playwright). Reports are written to `/srv/dev/playwright-reports/<pipeline>-<branch>-<sha>/`. Each pipeline runs it as its own compose project, `bored-e2e-<pipeline number>`, so concurrent pipelines cannot tear down each other's stacks; [`scripts/prune-stale-e2e-projects.sh`](scripts/prune-stale-e2e-projects.sh) first removes projects hours old, which cancelled pipelines leak.
 4. **publish-image** — [`scripts/publish-release-image.sh`](scripts/publish-release-image.sh) refuses a version the registry already holds (or cannot rule out), then pushes the `.release-tag` image, and the same image as `:commit-<sha>`, to `registry.desync.link` **only after e2e passes**, so the registry never holds an image from a red e2e run (this is what makes the deployment-path `verify-image` existence check a genuine e2e-tested gate).
 
@@ -77,7 +77,7 @@ A push **never deploys** and pushes no git tag. Dev is deployed by hand, from an
 2. **find-commit-tag** — [`scripts/find-commit-tag.sh`](scripts/find-commit-tag.sh) lists the repo's git tags and writes the semver tag already on the commit, if any, to `.release-tag` with `.release-tag-reused=true` (else `false`). It logs only what it found; the plugin's `compute` mode, used for this before, also logged an invented `max(tag)+1` "allocation" no build ever has.
 3. **apply-authentik-blueprint-dev / -prod** — runs [`woodpecker-plugin-authentik-blueprint`](https://github.com/vcheesbrough/woodpecker-plugin-authentik-blueprint) so Authentik OAuth providers stay in sync before the app rolls out. A dev deploy, which may come from any branch, applies only [`authentik/blueprint-dev.yaml`](authentik/blueprint-dev.yaml) with only the dev client secret, so a dev deploy of an unmerged branch does not, by itself, touch prod Authentik state; the full dev-and-prod [`authentik/blueprint.yaml`](authentik/blueprint.yaml) is applied only by a prod deploy, which is limited to `main`. This guards against accidents, not a hostile branch: the branch controls its own pipeline YAML and receives the Authentik admin `authentik_api_token`, so a real boundary would need the secret broker to withhold that token and the prod secrets from non-`main` pipelines.
 4. **verify-image** — *promote, don't rebuild.* [`scripts/resolve-deploy-tag.sh`](scripts/resolve-deploy-tag.sh) settles `.release-tag`: the commit's existing git tag if it was deployed before, else the version label of `:commit-<sha>`. Then pull that image and re-assert its version/revision OCI labels. **This is the fail-closed gate:** a commit with no green push pipeline has no `:commit-<sha>` image, so the step refuses and says to let its push pipeline go green first. The revision-label check catches an image built from a different commit.
-5. **deploy-dev / deploy-prod** — run `docker compose -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120` against the host's docker socket, with the OIDC client secret, image tag, host name, and DB volume injected as env. The step succeeds only after the container is healthy. There is no SSH or `scp` step.
+5. **deploy-dev / deploy-prod** — render the telemetry and compose layers from sovereign-config, run [`scripts/migrate-from-surreal.sh`](scripts/migrate-from-surreal.sh) (starts Postgres; imports the old SurrealDB store only while Postgres is still empty — see [Database](#database)), then `docker compose -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120` against the host's docker socket. The step succeeds only after the containers are healthy. There is no SSH or `scp` step.
 6. **tag-release-dev / tag-release-prod** — *after* a successful deploy, `woodpecker-plugin-release-versions` (`push-tag` mode) creates and pushes the annotated git tag matching `.release-tag` (idempotent from plugin 0.1.1: on an already-tagged commit it logs `already exists at commit` and exits 0, so a redeploy or dev-then-prod of the same build tags once).
 
 The PR pipeline (`.woodpecker/pr-review.yml.disabled`) runs the Claude PR review agent on every pull request. It is **currently disabled** (renamed to `*.disabled`) because the agent image fails to pull; PR review is handled manually for now (see [`AGENTS.md`](AGENTS.md) §7). Re-enable by renaming back to `pr-review.yml`.
@@ -108,14 +108,30 @@ Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but val
 
 Two environments share the same compose file:
 
-| Env | URL | Container | DB volume | OIDC scope |
-|---|---|---|---|---|
-| dev | `https://bored-dev.desync.link` | `bored-dev` | `bored-dev-db` | `bored:dev:access` |
-| prod | `https://bored.desync.link` | `bored` | `bored-prod-db` | `bored:prod:access` |
+| Env | URL | Container | Postgres volume | Retired SurrealKV volume | OIDC scope |
+|---|---|---|---|---|---|
+| dev | `https://bored-dev.desync.link` | `bored-dev` | `bored-dev-pg` | `bored-dev-db` | `bored:dev:access` |
+| prod | `https://bored.desync.link` | `bored` | `bored-prod-pg` | `bored-prod-db` | `bored:prod:access` |
 
 The container runs its own rustls listener on port 443 with a self-signed cert; Traefik terminates the public-facing TLS (Let's Encrypt via `certresolver=myresolver`) and forwards HTTPS to the container. Docker probes `GET /health` on the internal listener every 10 seconds, allowing only that loopback probe to accept the self-signed certificate. After a 15-second startup grace period, three consecutive 3-second failures mark the container unhealthy. The health check never depends on telemetry. Traces, logs and metrics leave the process over OTLP (see [Telemetry](#telemetry)); logs are *also* written to stdout as JSON, which the homelab's Alloy collects from the container's Docker log stream into Loki, labelling it from the `observability.service.name` / `observability.deployment.environment` labels in `deploy/docker-compose.yml`. On `docker stop` the backend ends every SSE stream (browsers reconnect to the next container), stops accepting, drains open connections for up to 4 s, flushes telemetry and exits (`stop_grace_period: 15s`).
 
-**Memory.** The container is capped at 768 MB with no swap (`mem_limit` / `memswap_limit`), and the image sets SurrealKV's value cache to 64 MiB (`SURREAL_SURREALKV_MAX_VALUE_CACHE_SIZE`; the startup log line `Setting maximum value cache size: 67108864` confirms it took). The cap sits well above the backend's real ~530 MB peak because SurrealKV holds every key in memory, including ~824k `!ts` keys leaked by SurrealDB's changefeed tick before card #470 slowed that tick to once a day (`backend/src/db.rs`). Those keys stay until the Postgres migration replaces SurrealDB; lower the cap then, never before.
+**Memory.** The backend container is capped at 256 MB with no swap (`mem_limit` / `memswap_limit`). It was 768 MB while the embedded SurrealDB held its whole key index in memory (~530 MB peak, card #470); Postgres (card #471) took that out of the process. The backend reports its own resident memory as `process.memory.usage` — watch it before tightening the cap further.
+
+### Database
+
+Each environment runs its own Postgres 16 (`bored-db` in `deploy/docker-compose.yml`, pinned by digest) on a network private to the compose project; only the backend can reach it. The backend connects with the `database` config group (below) and applies [`backend/migrations/`](backend/migrations/) at startup with `sqlx::migrate!` — a failed migration or an unreachable database stops startup before the listener binds. `POSTGRES_PASSWORD` for the container is rendered from `/bored/devops/<env>/compose/POSTGRES_PASSWORD`, an **alias** of the backend's own `/bored/<env>/server/database/password`, so the two cannot disagree.
+
+**Schema decisions.** Ids are the API's lower-case ULIDs as `text`; timestamps are `timestamptz` (microseconds — exactly the API's wire format); `updated_at` is restamped by a trigger; card numbers come from `card_number_seq`, unique under concurrency and gap-tolerant. Foreign keys are deliberate: `columns → boards` and `cards → columns` are `ON DELETE RESTRICT` (the routes delete children themselves, audited, so a forgotten path fails instead of silently losing history), `card_links → cards` is `ON DELETE CASCADE` (a backstop; the routes delete and audit links first). `audit_log` has no foreign keys — history outlives what it describes. A restore whose parent is gone is a 422 saying which to restore first.
+
+**Backups.** The homelab's nightly backup (mini-config `backup-stack/pre-backup.sh`) takes `pg_dump -Fc` of each environment's database. To take one by hand:
+
+```bash
+docker exec bored-bored-db-1 pg_dump -U bored -Fc bored > bored-prod-$(date -u +%Y%m%d-%H%M%SZ).dump   # prod (project `bored`)
+docker exec bored-dev-bored-db-1 pg_dump -U bored -Fc bored > bored-dev-$(date -u +%Y%m%d-%H%M%SZ).dump
+# restore into an empty database: pg_restore -U bored -d bored --no-owner < file.dump
+```
+
+**The SurrealDB import (temporary).** Until card #471's follow-up removes it, each deploy runs [`scripts/migrate-from-surreal.sh`](scripts/migrate-from-surreal.sh): it starts Postgres and asks `bored-backend migrate-from-surreal --check-empty` whether it holds data. If it does, nothing else happens. If not, it stops the old backend and runs the import from the old SurrealKV volume (mounted read-only; the import copies it aside first), which writes every record in one transaction, rewrites pre-#472 `d'…'` timestamps in audit snapshots, reads everything back and commits only if per-table counts and a SHA-256 over every row match. Rows SurrealDB let dangle (a card whose column is gone, a link to a deleted card) cannot satisfy the foreign keys; they are skipped and listed by id in the `surreal migration committed` log line, with the counts, checksum and rewrite count.
 
 ### Environment variables
 
@@ -136,7 +152,7 @@ OTEL_*                           # handed to the container via deploy/otel.env (
 ```
 
 Everything else — OIDC settings, the session cookie key, log level, the database
-path — is resolved at startup from a layered configuration composition root
+password — is resolved at startup from a layered configuration composition root
 (`backend/src/config.rs`), **not** individual compose env vars. See
 [Runtime configuration](#runtime-configuration) below.
 
@@ -163,7 +179,7 @@ this reason.
 Bored's runtime config (OIDC, the browser session cookie key, observability settings) is resolved at
 startup through three layers, lowest priority first:
 
-1. **in-memory defaults** — ports, log level, database path, service name.
+1. **in-memory defaults** — ports, log level, the database's port/name/user, service name.
 2. **[sovereign-config](https://github.com/vcheesbrough/sovereign-config)** — added only when
    `SOVEREIGN_CONFIG_ACCESS_URL_FILE` (or `SOVEREIGN_CONFIG_ACCESS_URL`) is present and non-blank, so
    local dev, unit tests, and e2e (which have no sovereign-config server) fall back to defaults + env.
@@ -179,9 +195,12 @@ Each config group is written to its own sub-branch:
                                           # mcp/issuer-url, mcp/client-id
 /bored/{dev,prod}/server/session         # cookie-key (secret) — required whenever oidc is configured
 /bored/{dev,prod}/server/observability   # environment, log-level
+/bored/{dev,prod}/server/database        # password (secret); host comes from compose
+                                          # (BORED__DATABASE__HOST), port/name/user default to
+                                          # 5432 / bored / bored
 ```
 
-`server/*` (`http-port`, `tls-cert`, `tls-key`, `static-dir`, `database-path`) is **never** stored in
+`server/*` (`http-port`, `tls-cert`, `tls-key`, `static-dir`) is **never** stored in
 sovereign-config — it's image-internal and identical across deployments, set via defaults or the
 image's own `BORED__SERVER__*` env (see the `Dockerfile` runtime stage).
 
@@ -313,8 +332,16 @@ carries on. Client metrics are refused (`ALLOWED_METRIC_NAMES` empty).
 ## Local development
 
 ```bash
+# A Postgres for the backend (any 16.x works; this is the one CI and prod run)
+docker run -d --name bored-pg -e POSTGRES_USER=bored -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=bored \
+  -p 5432:5432 postgres:16-alpine
+
 # Backend (plain HTTP on :3000 by default; anonymous auth when oidc.issuer-url is unset)
-cargo run -p backend
+BORED__DATABASE__HOST=localhost BORED__DATABASE__PASSWORD=dev cargo run -p backend
+
+# Backend tests: each test creates its own database on the server DATABASE_URL names.
+# with-test-postgres.sh starts (and afterwards removes) a throwaway server for them.
+./scripts/with-test-postgres.sh cargo test -p backend -p shared
 
 # Frontend (requires trunk + the wasm32-unknown-unknown target)
 cd frontend && trunk serve

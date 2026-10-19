@@ -75,7 +75,10 @@ services:
       # No SOVEREIGN_CONFIG_ACCESS_URL[_FILE] here — the sovereign layer stays
       # off (config.rs falls back to defaults + env), proving the no-sovereign
       # fallback path e2e is meant to exercise.
-      BORED__SERVER__DATABASE_PATH: /tmp/bored-test.db
+      # Postgres (card #471): the throwaway `db` service below. A fixed test
+      # password — the database lives and dies with this stack.
+      BORED__DATABASE__HOST: db
+      BORED__DATABASE__PASSWORD: bored-e2e
       BORED__OBSERVABILITY__ENVIRONMENT: test
       # Deliberately no APP_VERSION override. The frontend reloads itself when
       # /api/info reports a version its own bundle was not built from (see
@@ -93,8 +96,30 @@ services:
       BORED__OIDC__REQUIRED_SCOPE: bored:test:access
       BORED__OIDC__END_SESSION_URL: http://mock-oidc:8080/default/end-session
     depends_on:
-      - mock-oidc
-      - receiver
+      mock-oidc:
+        condition: service_started
+      receiver:
+        condition: service_started
+      db:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
+  # The backend's database (card #471): the production image and digest, on
+  # tmpfs because nothing here outlives the run.
+  db:
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    environment:
+      POSTGRES_DB: bored
+      POSTGRES_USER: bored
+      POSTGRES_PASSWORD: bored-e2e
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bored -d bored"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
     networks:
       - e2e-net
 

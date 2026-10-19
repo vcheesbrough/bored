@@ -441,12 +441,8 @@ fn drain_events(rx: &mut Receiver<BroadcastEvent>, seen: &mut BTreeSet<&'static 
 
 /// A server on a fresh in-memory database, plus a receiver subscribed before
 /// any request and a handle on the database for tests that plant rows.
-async fn contract_server() -> (
-    TestServer,
-    Receiver<BroadcastEvent>,
-    surrealdb::Surreal<surrealdb::engine::local::Db>,
-) {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+async fn contract_server() -> (TestServer, Receiver<BroadcastEvent>, crate::db::Db) {
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db.clone());
     let rx = state.events.subscribe();
     let server =
@@ -961,30 +957,29 @@ async fn restore_legacy_deletion(target: Deleted) {
     // every delete row so each entity a batch restore recreates has a legacy
     // snapshot behind it.
     let legacy = "d'2026-05-07T01:27:04.823026281Z'";
-    db.query(
-        "UPDATE audit_log SET \
-         snapshot_before.created_at = $legacy, snapshot_before.updated_at = $legacy \
+    sqlx::query(
+        "UPDATE audit_log SET snapshot_before = snapshot_before \
+         || jsonb_build_object('created_at', $1::text, 'updated_at', $1::text) \
          WHERE action = 'delete'",
     )
-    .bind(("legacy", legacy))
+    .bind(legacy)
+    .execute(&db)
     .await
-    .expect("plant legacy snapshots")
-    .check()
     .expect("plant legacy snapshots");
 
     // Found through the database: a deleted board's history route 404s.
-    let mut found = db
-        .query("SELECT * FROM audit_log WHERE action = 'delete' AND entity_id = $id")
-        .bind(("id", entity_id.clone()))
-        .await
-        .expect("find delete row");
-    let rows: Vec<crate::models::DbAuditLog> = found.take(0).expect("delete rows");
+    let rows: Vec<crate::models::DbAuditLog> =
+        sqlx::query_as("SELECT * FROM audit_log WHERE action = 'delete' AND entity_id = $1")
+            .bind(&entity_id)
+            .fetch_all(&db)
+            .await
+            .expect("find delete row");
     let [delete_row] = rows.as_slice() else {
         panic!("{target:?}: expected one delete row, got {}", rows.len());
     };
     // The plant took, which is what makes the restore below a real test.
     assert_eq!(
-        delete_row.snapshot_before.as_ref().expect("snapshot")["created_at"],
+        delete_row.snapshot_before.as_ref().expect("snapshot").0["created_at"],
         legacy,
         "{target:?}: legacy snapshot planted"
     );
@@ -995,7 +990,7 @@ async fn restore_legacy_deletion(target: Deleted) {
     let context = format!("POST /api/audit/:id/restore (legacy {target:?})");
     let restored = body(
         server
-            .post(&format!("/api/audit/{}/restore", delete_row.id.id.to_raw()))
+            .post(&format!("/api/audit/{}/restore", delete_row.id))
             .await,
         StatusCode::OK,
         &context,

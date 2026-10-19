@@ -41,26 +41,25 @@ const MAX_UNIX_SECS: i64 = 253_402_300_799;
 /// The largest microsecond count that still fits in one second.
 const MAX_MICROS: u32 = 999_999;
 
-/// Format a SurrealDB datetime for the public API.
+/// Format a stored instant for the public API.
 ///
-/// This is what every `into_api()` in `models.rs` calls. It only *reads* the
-/// instant out of the driver's type — `Datetime` is a thin wrapper around
-/// `chrono::DateTime<Utc>` (the `.0` field) — and hands the two numbers that
-/// fully describe it to [`format_utc_micros`], which knows nothing about
-/// SurrealDB.
+/// This is what every `into_api()` in `models.rs` calls. A `timestamptz`
+/// column decodes to `chrono::DateTime<Utc>`; this reads the two numbers that
+/// fully describe the instant out of it and hands them to
+/// [`format_utc_micros`], which knows nothing about the database.
 ///
-/// `timestamp()` and `timestamp_subsec_nanos()` are inherent methods on
-/// chrono's `DateTime`, which is why this file can call them without bored
-/// depending on `chrono` directly.
-pub fn api_timestamp(datetime: &surrealdb::sql::Datetime) -> String {
-    format_utc_micros(datetime.0.timestamp(), datetime.0.timestamp_subsec_nanos())
+/// Postgres already stores microseconds, so the truncation below is a no-op for
+/// anything read back from it; it still matters for an instant built in
+/// memory, and it keeps the output rule in one place.
+pub fn api_timestamp(datetime: &chrono::DateTime<chrono::Utc>) -> String {
+    format_utc_micros(datetime.timestamp(), datetime.timestamp_subsec_nanos())
 }
 
 /// Format an instant given as Unix seconds plus a sub-second nanosecond count.
 ///
-/// The arguments are the storage-neutral description of an instant, so when
-/// card #471 moves storage to Postgres the new row type can call this directly
-/// and the output stays byte-identical.
+/// The arguments are the storage-neutral description of an instant, which is
+/// how the format survived the move from SurrealDB to Postgres (card #471)
+/// byte-identical.
 ///
 /// - `unix_secs` is whole seconds since `1970-01-01T00:00:00Z`; negative is
 ///   before the epoch. It is the *floor*, so `-0.5 s` is `(-1, 500_000_000)`.
@@ -72,7 +71,7 @@ pub fn api_timestamp(datetime: &surrealdb::sql::Datetime) -> String {
 ///   real instant.
 ///
 /// Instants outside the years 0000–9999 cannot be written as RFC 3339 at all
-/// (the year is exactly four digits). The API only ever stores `time::now()`,
+/// (the year is exactly four digits). The API only ever stores "now",
 /// so this cannot happen in practice; if it ever does, the value saturates to
 /// the nearest representable instant rather than emitting a malformed string
 /// or panicking a request.
@@ -122,22 +121,23 @@ mod tests {
     //! Every expected string here is written out by hand (an independent
     //! oracle): none of them is produced by calling the formatter, the `time`
     //! crate, or anything else on the implementation's side. Inputs given as
-    //! text are parsed by SurrealDB's own datetime parser, which is a
-    //! different code path from the one under test.
+    //! text are parsed by chrono's RFC 3339 parser, which is a different code
+    //! path from the one under test.
 
     use super::*;
 
-    /// Parse an RFC 3339 string with SurrealDB's parser, then format it.
-    fn via_surreal(input: &str) -> String {
-        let datetime = surrealdb::sql::Datetime::try_from(input)
-            .unwrap_or_else(|()| panic!("test input {input:?} is not a datetime"));
+    /// Parse an RFC 3339 string with chrono's parser, then format it.
+    fn via_chrono(input: &str) -> String {
+        let datetime = chrono::DateTime::parse_from_rfc3339(input)
+            .unwrap_or_else(|_| panic!("test input {input:?} is not a datetime"))
+            .with_timezone(&chrono::Utc);
         api_timestamp(&datetime)
     }
 
     #[test]
     fn nanoseconds_are_truncated_to_microseconds() {
         assert_eq!(
-            via_surreal("2026-10-02T16:17:12.643091493Z"),
+            via_chrono("2026-10-02T16:17:12.643091493Z"),
             "2026-10-02T16:17:12.643091Z"
         );
     }
@@ -146,7 +146,7 @@ mod tests {
     fn truncation_never_rounds_up() {
         // .999999999 would round to the next second; truncation keeps it put.
         assert_eq!(
-            via_surreal("2026-10-02T16:17:12.643091999Z"),
+            via_chrono("2026-10-02T16:17:12.643091999Z"),
             "2026-10-02T16:17:12.643091Z"
         );
     }
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn zero_sub_seconds_are_written_out() {
         assert_eq!(
-            via_surreal("2026-01-01T00:00:00Z"),
+            via_chrono("2026-01-01T00:00:00Z"),
             "2026-01-01T00:00:00.000000Z"
         );
     }
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn short_fractions_are_padded() {
         assert_eq!(
-            via_surreal("2026-05-07T01:27:04.5Z"),
+            via_chrono("2026-05-07T01:27:04.5Z"),
             "2026-05-07T01:27:04.500000Z"
         );
     }
@@ -171,7 +171,7 @@ mod tests {
     fn leap_day_at_the_last_nanosecond_stays_on_the_leap_day() {
         // Rounding would carry this into 1 March; truncation must not.
         assert_eq!(
-            via_surreal("2024-02-29T23:59:59.999999999Z"),
+            via_chrono("2024-02-29T23:59:59.999999999Z"),
             "2024-02-29T23:59:59.999999Z"
         );
     }
@@ -180,7 +180,7 @@ mod tests {
     fn a_non_utc_offset_is_converted_to_utc() {
         // 01:30 at +02:00 is 23:30 UTC on the previous day.
         assert_eq!(
-            via_surreal("2026-03-01T01:30:00.25+02:00"),
+            via_chrono("2026-03-01T01:30:00.25+02:00"),
             "2026-02-28T23:30:00.250000Z"
         );
     }

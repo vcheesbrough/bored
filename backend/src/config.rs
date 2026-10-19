@@ -1,7 +1,7 @@
 //! Runtime configuration loaded from layered sources.
 //!
 //! Config is assembled from three layers (lowest priority first):
-//!   1. in-memory defaults (ports, log level, database path, environment);
+//!   1. in-memory defaults (ports, log level, database port/name/user, environment);
 //!   2. the managed [`sovereign-config`] subtree — added **only** when the access
 //!      URL is present (`SOVEREIGN_CONFIG_ACCESS_URL_FILE` / `SOVEREIGN_CONFIG_ACCESS_URL`),
 //!      so local dev, unit tests and e2e (which have no sovereign-config server)
@@ -9,7 +9,7 @@
 //!   3. environment overrides under the `BORED__` prefix with a `__` nesting separator.
 //!
 //! Each top-level group is its own self-contained DTO deserialized from its own
-//! sub-branch (`oidc`, `session`, `observability`, `server`) — there is no umbrella
+//! sub-branch (`oidc`, `session`, `observability`, `server`, `database`) — there is no umbrella
 //! config struct. Every leaf in sovereign-config is text; rich field types (`u16`,
 //! `Option<String>`, …) fold presence + coercion checks into deserialization, and each DTO
 //! additionally implements [`ValidatedConfig`] for the residual checks the type
@@ -262,7 +262,11 @@ fn apply_defaults(
         // Plain-HTTP fallback port; TLS (when configured) always binds :443.
         ("server.http-port", "3000"),
         ("server.static-dir", "./dist"),
-        ("server.database-path", "/data/bored.db"),
+        // Postgres (card #471). Host and password have no default: a backend
+        // that cannot say where its data lives must not start.
+        ("database.port", "5432"),
+        ("database.name", "bored"),
+        ("database.user", "bored"),
     ];
     let mut builder = builder;
     for (key, value) in defaults {
@@ -497,7 +501,6 @@ pub struct ServerConfig {
     pub tls_key: Option<String>,
     /// Directory the compiled WASM frontend is served from.
     pub static_dir: String,
-    pub database_path: String,
 }
 
 impl ServerConfig {
@@ -513,7 +516,6 @@ impl ServerConfig {
 impl ValidatedConfig for ServerConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         require_non_empty("server.static-dir", &self.static_dir)?;
-        require_non_empty("server.database-path", &self.database_path)?;
         if self.http_port == 0 {
             return Err(ConfigError::invalid("server.http-port", "must not be 0"));
         }
@@ -528,6 +530,55 @@ impl ValidatedConfig for ServerConfig {
             )),
             _ => Ok(()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// database
+// ---------------------------------------------------------------------------
+
+/// `database` group — where the Postgres server is and how to log in (card
+/// #471). Read field by field, as v-note does, rather than as one URL: the
+/// password then needs no escaping and no URL holding it is ever formatted.
+///
+/// In sovereign-config it lives at `/bored/{env}/server/database/*`; the deploy
+/// renders `POSTGRES_PASSWORD` for the database container from an alias of the
+/// same `password` leaf, so the two can never disagree. `BORED__DATABASE__*`
+/// overrides each field (e2e sets them all).
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DatabaseConfig {
+    pub host: String,
+    /// Text in every source (see the module docs); coerced here.
+    pub port: u16,
+    pub name: String,
+    pub user: String,
+    pub password: String,
+}
+
+/// Manual `Debug` so accidental `{:?}` formatting cannot leak the password.
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("name", &self.name)
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ValidatedConfig for DatabaseConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        require_non_empty("database.host", &self.host)?;
+        require_non_empty("database.name", &self.name)?;
+        require_non_empty("database.user", &self.user)?;
+        require_non_empty("database.password", &self.password)?;
+        if self.port == 0 {
+            return Err(ConfigError::invalid("database.port", "must not be 0"));
+        }
+        Ok(())
     }
 }
 
