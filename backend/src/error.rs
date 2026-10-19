@@ -43,6 +43,14 @@ const CARD_LINKS_PAIR: &str = "card_links_pair";
 /// SQLSTATE `23505`, `unique_violation`.
 const UNIQUE_VIOLATION: &str = "23505";
 
+/// SQLSTATE `23503`, `foreign_key_violation`.
+const FOREIGN_KEY_VIOLATION: &str = "23503";
+
+/// The foreign key from a card to its column. A write that violates it named
+/// (or raced) a column that no longer exists — the caller's 404, exactly what
+/// the route answers when it sees the column missing up front.
+const CARDS_COLUMN_FKEY: &str = "cards_column_id_fkey";
+
 /// The body the link routes return for a duplicate link. Lives here because
 /// both the classifier below and `routes::links` (which checks for duplicates
 /// before writing) have to produce the same response.
@@ -213,18 +221,19 @@ fn classify(error: sqlx::Error) -> ApiError {
     }
 }
 
-/// The client-facing conflict a unique violation stands for, if `error` is one
-/// of the two this API translates; `None` for anything else.
+/// The client error a constraint violation stands for, if `error` is one of
+/// the three this API translates (two unique constraints → 409, a card's
+/// missing column → 404); `None` for anything else.
 fn unique_index_conflict(error: &sqlx::Error) -> Option<ApiError> {
     let sqlx::Error::Database(database) = error else {
         return None;
     };
-    if database.code().as_deref() != Some(UNIQUE_VIOLATION) {
-        return None;
-    }
-    match database.constraint() {
-        Some(BOARD_NAME_UNIQUE) => Some(ApiError::CONFLICT),
-        Some(CARD_LINKS_PAIR) => Some(ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE))),
+    match (database.code().as_deref(), database.constraint()) {
+        (Some(UNIQUE_VIOLATION), Some(BOARD_NAME_UNIQUE)) => Some(ApiError::CONFLICT),
+        (Some(UNIQUE_VIOLATION), Some(CARD_LINKS_PAIR)) => {
+            Some(ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE)))
+        }
+        (Some(FOREIGN_KEY_VIOLATION), Some(CARDS_COLUMN_FKEY)) => Some(ApiError::NotFound),
         _ => None,
     }
 }

@@ -201,10 +201,18 @@ async fn migrate_store(path: &Path, target: &Db) -> Result<Report, MigrationErro
     if crate::db::has_data(target).await? {
         return Err(MigrationError::NotEmpty);
     }
-    // A fresh environment's volume has no store in it: nothing to move.
+    // A fresh environment's volume is empty: nothing to move. Only *empty*
+    // counts — a volume holding anything else but not the store means the path
+    // is wrong, and carrying on would bring the backend up on an empty
+    // database and report success.
     if !path.exists() {
-        tracing::warn!("no SurrealDB store at the given path; nothing to migrate");
-        return Ok(Report::default());
+        if volume_is_empty(path)? {
+            tracing::warn!("the SurrealDB volume is empty; nothing to migrate");
+            return Ok(Report::default());
+        }
+        return Err(MigrationError::Usage(
+            "no SurrealDB store at the given path, but its volume is not empty",
+        ));
     }
     let scratch = std::env::temp_dir().join(format!(
         "bored-surreal-{}",
@@ -230,6 +238,19 @@ async fn migrate_store(path: &Path, target: &Db) -> Result<Report, MigrationErro
     let mut report = result?;
     report.source_found = true;
     Ok(report)
+}
+
+/// Whether the directory holding `path` (the mounted volume) has nothing in
+/// it at all. A missing parent counts as empty.
+fn volume_is_empty(path: &Path) -> Result<bool, MigrationError> {
+    let Some(volume) = path.parent() else {
+        return Ok(true);
+    };
+    match std::fs::read_dir(volume) {
+        Ok(mut entries) => Ok(entries.next().is_none()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Recursively copy `from` (a directory) to `to`.
@@ -1122,14 +1143,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_store_migrates_nothing() {
+    async fn an_empty_volume_migrates_nothing() {
         let target = crate::db::connect_test().await.expect("target db");
-        let missing = std::env::temp_dir().join("bored-no-such-store");
-        let code = run(Command::Migrate { surreal: missing }, &target)
-            .await
-            .expect("a missing store is not an error");
+        let volume = tempfile::tempdir().expect("temp dir");
+        let code = run(
+            Command::Migrate {
+                surreal: volume.path().join("bored.db"),
+            },
+            &target,
+        )
+        .await
+        .expect("an empty volume is not an error");
         assert_eq!(code, 0);
         assert!(!crate::db::has_data(&target).await.unwrap());
+    }
+
+    /// A volume with something in it but no store at the path is a wrong
+    /// path, not a fresh environment: it must fail rather than let the new
+    /// backend start on an empty database.
+    #[tokio::test]
+    async fn a_missing_store_in_a_non_empty_volume_fails() {
+        let target = crate::db::connect_test().await.expect("target db");
+        let volume = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(volume.path().join("other.db")).unwrap();
+        let error = run(
+            Command::Migrate {
+                surreal: volume.path().join("bored.db"),
+            },
+            &target,
+        )
+        .await
+        .expect_err("a wrong path must fail");
+        assert!(matches!(error, MigrationError::Usage(_)), "{error}");
     }
 
     #[test]

@@ -372,6 +372,23 @@ mod tests {
         .await;
         assert!(!logs.contains("marker-7d1c"), "SQL text was logged: {logs}");
         assert!(!logs.contains("pg_sleep"), "SQL text was logged: {logs}");
+
+        // Control: the same statement on a connection with sqlx's default
+        // logging *does* log its SQL, so the capture above could have seen it.
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let noisy: PgConnectOptions = url.parse().expect("url");
+        let noisy = pool_options(1).connect_lazy_with(noisy);
+        let (_, control) = crate::tests::capture_logs_async(async {
+            sqlx::query("SELECT pg_sleep(1.2), 'marker-7d1c' AS probe")
+                .execute(&noisy)
+                .await
+                .expect("slow query runs")
+        })
+        .await;
+        assert!(
+            control.contains("marker-7d1c"),
+            "control: default sqlx logging should log the slow SQL: {control}"
+        );
     }
 
     /// The schema is really there after `connect_test` (a control for the

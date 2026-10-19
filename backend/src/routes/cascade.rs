@@ -75,6 +75,22 @@ pub(crate) async fn delete_cards(
 ) -> Result<(), ApiError> {
     for card in cards {
         let entity_id = card.id.clone();
+        // The card may have been moved out of this column (or deleted) since
+        // the sweep read it; then it is no longer this cascade's to delete.
+        // Re-read just before acting, and delete by id *and* column below, so
+        // a moved card is never removed from its new home.
+        let still_here: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM cards WHERE id = $1 AND column_id = $2)",
+        )
+        .bind(&entity_id)
+        .bind(&card.column_id)
+        .fetch_one(&state.db)
+        .traced(DbQuery::new(name, DbOperation::Select, "cards"))
+        .await?;
+        if !still_here {
+            continue;
+        }
+        let column_id = card.column_id.clone();
         crate::routes::links::cascade_delete_card_links(
             state,
             claims,
@@ -102,8 +118,9 @@ pub(crate) async fn delete_cards(
         )
         .await?;
 
-        sqlx::query("DELETE FROM cards WHERE id = $1")
+        sqlx::query("DELETE FROM cards WHERE id = $1 AND column_id = $2")
             .bind(&entity_id)
+            .bind(&column_id)
             .execute(&state.db)
             .traced(DbQuery::new(name, DbOperation::Delete, "cards"))
             .await?;

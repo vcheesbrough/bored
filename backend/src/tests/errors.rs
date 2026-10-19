@@ -537,17 +537,20 @@ async fn an_unmapped_unique_index_keeps_index_and_table_but_not_the_value() {
     assert!(logs.contains("table=cards"), "table missing: {logs}");
 }
 
-/// A foreign key the request broke (here: a card for a column that does not
-/// exist) is a 500 the log line can place: constraint and table, no values.
+/// A foreign key the API does not translate (here: a link to a card that does
+/// not exist) is a 500 the log line can place: constraint and table, no
+/// values.
 #[tokio::test]
 async fn a_foreign_key_violation_names_its_constraint() {
     let db = db::connect_test().await.expect("test db");
-    let error =
-        sqlx::query("INSERT INTO cards (id, column_id, body, position) VALUES ('c1', $1, 'b', 1)")
-            .bind(SENSITIVE)
-            .execute(&db)
-            .await
-            .expect_err("there is no such column");
+    seed_cards(&db).await;
+    let error = sqlx::query(
+        "INSERT INTO card_links (id, predecessor_id, successor_id) VALUES ('l1', 'card-a', $1)",
+    )
+    .bind(SENSITIVE)
+    .execute(&db)
+    .await
+    .expect_err("there is no such card");
     assert!(
         format!("{error:?}").contains(SENSITIVE),
         "premise: the detail quotes the missing key, got: {error:?}"
@@ -559,9 +562,23 @@ async fn a_foreign_key_violation_names_its_constraint() {
     assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
     assert!(logs.contains("sqlstate=23503"), "code missing: {logs}");
     assert!(
-        logs.contains("constraint=cards_column_id_fkey"),
+        logs.contains("constraint=card_links_successor_id_fkey"),
         "constraint missing: {logs}"
     );
+}
+
+/// A card written into a column that is gone — a create racing the column's
+/// delete — is the 404 the route gives a missing column, not a 500.
+#[tokio::test]
+async fn a_card_for_a_vanished_column_is_not_found() {
+    let db = db::connect_test().await.expect("test db");
+    let error = sqlx::query(
+        "INSERT INTO cards (id, column_id, body, position) VALUES ('c1', 'gone', 'b', 1)",
+    )
+    .execute(&db)
+    .await
+    .expect_err("there is no such column");
+    assert!(matches!(ApiError::from(error), ApiError::NotFound));
 }
 
 #[tokio::test]
