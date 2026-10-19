@@ -24,6 +24,8 @@ set -eu
 
 # Nothing in here reads input. `docker compose run` would otherwise attach
 # stdin, which in CI is the rest of the step's own script (see deploy-app.sh).
+# This line is the fix; the `-T` on the runs below only drops the pseudo-TTY
+# (there is no terminal in CI) and does not, by itself, detach stdin.
 exec < /dev/null
 
 : "${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}"
