@@ -32,6 +32,7 @@ cat "$WORK_DIR/docker-stdin-\$\$" >> "$WORK_DIR/docker-stdin"
 echo "docker \$*" >> "$WORK_DIR/calls"
 env | grep '^OTEL_' >> "$WORK_DIR/docker-otel" || true
 env | grep '^PGWEB_AUTH_B64=' >> "$WORK_DIR/docker-b64" || true
+env | grep '^PGWEB_NEW_PASSWORD=' >> "$WORK_DIR/docker-pw" || true
 exit 0
 FAKE
 chmod +x "$WORK_DIR/bin/docker"
@@ -45,6 +46,7 @@ reset() {
   : > "$WORK_DIR/docker-stdin"
   : > "$WORK_DIR/docker-otel"
   : > "$WORK_DIR/docker-b64"
+  : > "$WORK_DIR/docker-pw"
   rm -f "$WORK_DIR"/*.status
 }
 
@@ -61,9 +63,10 @@ reset
 run COMPOSE_PROFILES=
 expected="migrate-from-surreal -p bored-dev -f deploy/docker-compose.yml
 compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120 bored-db bored
-docker compose -p bored-dev -f deploy/docker-compose.yml --profile sqltool rm -sf sqltool"
+docker compose -p bored-dev -f deploy/docker-compose.yml --profile sqltool rm -sf sqltool
+docker compose -p bored-dev -f deploy/docker-compose.yml exec -T bored-db psql -v ON_ERROR_STOP=1 -q -U bored -d bored -c ALTER ROLE bored_pgweb NOLOGIN"
 if [ "$status" = 0 ] && [ "$(cat "$WORK_DIR/calls")" = "$expected" ]; then
-  pass "without the profile: import check, backend up (named services), console removed"
+  pass "without the profile: import check, backend up (named services), console removed, login disabled"
 else
   fail "console off: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
@@ -71,7 +74,7 @@ fi
 # --- console on: provision the role, then start the console -------------------
 reset
 run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
-exec_line=$(grep -n 'exec -T -e PGWEB_NEW_PASSWORD=db-pw-123 bored-db psql' "$WORK_DIR/calls" | cut -d: -f1)
+exec_line=$(grep -n 'exec -T -e PGWEB_NEW_PASSWORD bored-db psql' "$WORK_DIR/calls" | cut -d: -f1)
 up_line=$(grep -n 'up -d --force-recreate --no-deps --wait --wait-timeout 60 sqltool' "$WORK_DIR/calls" | cut -d: -f1)
 backend_line=$(grep -n '^compose-up-with-otel' "$WORK_DIR/calls" | cut -d: -f1)
 if [ "$status" = 0 ] && [ -n "$exec_line" ] && [ -n "$up_line" ] \
@@ -86,6 +89,22 @@ if grep -q "ALTER ROLE bored_pgweb WITH LOGIN PASSWORD :'pgweb_pw';" "$WORK_DIR/
   pass "the password reaches psql through \\getenv, never in the SQL text"
 else
   fail "provisioning SQL: $(cat "$WORK_DIR/docker-stdin")"
+fi
+if grep -q 'db-pw-123' "$WORK_DIR/calls"; then
+  fail "the password appeared on a docker command line"
+else
+  pass "the password never appears on a command line"
+fi
+if grep -qx 'PGWEB_NEW_PASSWORD=db-pw-123' "$WORK_DIR/docker-pw"; then
+  pass "docker gets the password through its environment"
+else
+  fail "docker env PGWEB_NEW_PASSWORD: $(cat "$WORK_DIR/docker-pw")"
+fi
+if grep -q "SET log_statement = 'none';" "$WORK_DIR/docker-stdin" \
+    && grep -q "SET log_min_error_statement = 'panic';" "$WORK_DIR/docker-stdin"; then
+  pass "the provisioning session keeps the statement out of the server log"
+else
+  fail "no log suppression in: $(cat "$WORK_DIR/docker-stdin")"
 fi
 # base64 of "console:auth-pw", written out by hand.
 if grep -qx 'PGWEB_AUTH_B64=Y29uc29sZTphdXRoLXB3' "$WORK_DIR/docker-b64"; then

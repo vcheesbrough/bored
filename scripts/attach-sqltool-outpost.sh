@@ -86,9 +86,10 @@ if printf '%s' "$before" | jq -e --argjson pk "$provider_pk" 'index($pk) != null
 fi
 
 # Re-read immediately before the write rather than reusing `$before` from the
-# lookup above. The PATCH sends the whole list, and this step runs on **every
-# branch push**, so two overlapping pipelines can both read the same list and
-# have the second clobber what the first added.
+# lookup above. The PATCH sends the whole list, and other deployments (bored's
+# other environment, v-note's) attach their own providers the same way, so two
+# overlapping runs can both read the same list and have the second clobber what
+# the first added.
 #
 # ⚠️ This NARROWS that window; it does not close it. The endpoint offers no
 # compare-and-swap, so an interleaving between this read and the PATCH below is
@@ -100,15 +101,9 @@ current=$(
 )
 after=$(printf '%s' "$current" | jq -c --argjson pk "$provider_pk" '. + [$pk]')
 
-# Checked against the list just read, not against the one `$after` was derived
-# from — comparing a list to its own superset proves nothing.
-if ! printf '%s' "$after" | jq -e --argjson current "$current" \
-  '($current - .) == []' >/dev/null; then
-  echo "ERROR: refusing to write a provider list that drops existing entries" >&2
-  echo "       current=${current}" >&2
-  echo "       after=${after}" >&2
-  exit 1
-fi
+# (No pre-write "does the new list keep every old entry" check: `$after` is
+# built as `$current` plus one id, so it holds by construction and could never
+# fail. The verification after the write is the one that can catch damage.)
 
 echo "==> attaching provider ${provider_pk} to outpost ${outpost_pk}"
 api PATCH "/outposts/instances/${outpost_pk}/" \

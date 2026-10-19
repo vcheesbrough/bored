@@ -88,16 +88,28 @@ if [ "$console" = on ]; then
   # every deploy — rotating the credential is a change to the stored leaf.
   #
   # Over the database container's local socket, which the postgres image
-  # trusts, so no application credential is handled out here at all. The
-  # password travels as an env var on the exec, and psql's \getenv keeps it out
-  # of the statement text. Nothing in this block may echo it: it does not come
-  # from `from_secret`, so Woodpecker does not mask it in the log.
+  # trusts, so no application credential is handled out here at all.
+  #
+  # Where the password goes, and where it must not:
+  # * not on a command line — `-e PGWEB_NEW_PASSWORD` names the variable only,
+  #   so docker copies the value from this process's environment and it never
+  #   appears in `ps` on the agent host;
+  # * not in this script's SQL text — psql's \getenv reads it from that env;
+  # * not in Postgres's log — the server does receive the plain statement, and
+  #   would log it with the password if logging statements or if it failed, so
+  #   this session turns both off first (allowed: `bored` is a superuser).
+  # Nothing in this block may echo it either: it does not come from
+  # `from_secret`, so Woodpecker does not mask it in the step log.
   echo "==> provisioning the bored_pgweb login"
-  docker compose "$@" exec -T -e PGWEB_NEW_PASSWORD="$PGWEB_DB_PASSWORD" bored-db \
+  export PGWEB_NEW_PASSWORD="$PGWEB_DB_PASSWORD"
+  docker compose "$@" exec -T -e PGWEB_NEW_PASSWORD bored-db \
     psql -v ON_ERROR_STOP=1 -q -U bored -d bored <<'SQL'
+SET log_statement = 'none';
+SET log_min_error_statement = 'panic';
 \getenv pgweb_pw PGWEB_NEW_PASSWORD
 ALTER ROLE bored_pgweb WITH LOGIN PASSWORD :'pgweb_pw';
 SQL
+  unset PGWEB_NEW_PASSWORD
   # Recreated so it connects with the credential just set (nothing in the
   # compose model changed, so a plain `up` would leave a stale container).
   echo "==> starting the SQL console"
@@ -109,4 +121,10 @@ else
   # address it at all; `rm -sf` is a no-op when there is nothing to remove.
   echo "==> ensuring the SQL console is not running"
   docker compose "$@" --profile sqltool rm -sf sqltool
+  # And that its role cannot log in: with the console off nothing should be
+  # able to use that credential. Idempotent, so it runs on every such deploy;
+  # turning the profile back on restores the login (and password) above.
+  echo "==> disabling the bored_pgweb login"
+  docker compose "$@" exec -T bored-db \
+    psql -v ON_ERROR_STOP=1 -q -U bored -d bored -c 'ALTER ROLE bored_pgweb NOLOGIN' < /dev/null
 fi
