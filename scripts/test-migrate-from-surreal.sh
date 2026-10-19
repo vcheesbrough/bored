@@ -59,7 +59,7 @@ run_case() {
 }
 
 # --- already migrated: nothing is stopped, nothing imported -------------------
-status=$(run_case 3 0)
+status=$(run_case 3 0 some-other-volume)
 if [ "$status" = 0 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
   pass "a non-empty database skips the import and leaves the backend running"
 else
@@ -69,6 +69,14 @@ if grep -q 'compose -p bored-dev -f deploy/docker-compose.yml up -d --wait --wai
   pass "postgres is brought up first, with the caller's project arguments"
 else
   fail "db start: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- data in postgres behind a SurrealDB build (a rollback) stops the deploy ---
+status=$(run_case 3 0)
+if [ "$status" = 1 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
+  pass "postgres data behind a rolled-back SurrealDB build stops the deploy"
+else
+  fail "rollback guard: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
 # --- empty: stop the old backend, then import ---------------------------------

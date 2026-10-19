@@ -2,7 +2,7 @@
 //! tree so the "every database call is traced" scan (which covers product
 //! code) does not read it.
 
-use crate::db::{Db, MIGRATOR, pool_options, quiet};
+use crate::db::{Db, MIGRATOR, pool_options, quiet, with_session_limits};
 
 /// A fresh, fully migrated database of its own for one test.
 ///
@@ -22,7 +22,7 @@ pub(crate) async fn connect_test() -> Result<Db, sqlx::Error> {
         "backend tests need Postgres: run them through `scripts/with-test-postgres.sh`, \
          or set DATABASE_URL to a server this user may CREATE DATABASE on",
     );
-    let admin = quiet(url.parse()?);
+    let admin = with_session_limits(quiet(url.parse()?));
     let name = format!(
         "bored_test_{}",
         ulid::Ulid::new().to_string().to_lowercase()

@@ -2405,16 +2405,27 @@ fn nothing_outside_the_telemetry_module_imports_the_sdk() {
 #[tokio::test]
 async fn the_pool_gauge_reports_used_and_idle_connections() {
     let db = crate::db::connect_test().await.expect("test db");
-    // Hold one connection, so at least one is in use while we collect.
+    // Hold two connections: nothing else uses this pool, so exactly two are
+    // in use — a number the test knows independently of the pool's counters.
     let held = db.acquire().await.expect("a connection");
+    let held_too = db.acquire().await.expect("a second connection");
 
     // This test's own pool: tests run in parallel, and the gauge reports
     // whichever pool was opened last.
     let (used, idle) = metrics::pool_usage_of(&db);
-    assert!(used >= 1, "the held connection is in use: used={used}");
-    assert!(idle >= 0);
-    // Independent oracle: the pool's own count of open connections.
-    assert_eq!(used + idle, i64::from(db.size()));
+    assert_eq!(used, 2, "the two held connections are in use");
+    // Control: release one and the gauge follows. The pool takes a released
+    // connection back on a task of its own, so allow it a moment.
+    drop(held_too);
+    let mut after = metrics::pool_usage_of(&db);
+    for _ in 0..50 {
+        if after.0 == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        after = metrics::pool_usage_of(&db);
+    }
+    assert_eq!(after, (1, idle + 1));
 
     let series = all_series(&collect_metrics());
     let states: BTreeSet<String> = series

@@ -90,7 +90,16 @@ pub async fn create_column(
         DbOperation::Insert,
         "columns",
     ))
-    .await?;
+    .await
+    // The board can go between the lookup above and this insert (a create
+    // racing the board's delete): that is the 404 a missing board already
+    // gets, not a foreign-key 500.
+    .map_err(|error| match &error {
+        sqlx::Error::Database(database) if database.code().as_deref() == Some("23503") => {
+            ApiError::NotFound
+        }
+        _ => ApiError::from(error),
+    })?;
 
     match column {
         Some(c) => {

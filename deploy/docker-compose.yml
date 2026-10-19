@@ -125,10 +125,15 @@ services:
     environment:
       POSTGRES_DB: bored
       POSTGRES_USER: bored
-      # Rendered by the deploy from /bored/devops/<env>/compose, an alias of
-      # the very leaf the backend reads (/bored/<env>/server/database/password),
-      # so the two can never disagree. Never in git.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (rendered from /bored/devops/<env>/compose)}
+      # A file, not the variable itself, so the password is not in the
+      # container's environment (the same convention as the backend's
+      # SOVEREIGN_CONFIG_ACCESS_URL_FILE). The secret below is rendered by the
+      # deploy from /bored/devops/<env>/compose, an alias of the very leaf the
+      # backend reads (/bored/<env>/server/database/password), so the two can
+      # never disagree. Never in git.
+      POSTGRES_PASSWORD_FILE: /run/secrets/POSTGRES_PASSWORD
+    secrets:
+      - POSTGRES_PASSWORD
     volumes:
       - bored-pg:/var/lib/postgresql/data
     # Only on the private network: nothing outside this project can reach it.
@@ -186,3 +191,7 @@ secrets:
   # rather than leaving the connection URL in the container's process env.
   SOVEREIGN_CONFIG_ACCESS_URL_FILE:
     environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
+  # Rendered into the deploy's environment by `sovereign-config render
+  # /bored/devops/<env>/compose` (card #471); compose materialises it as a file.
+  POSTGRES_PASSWORD:
+    environment: POSTGRES_PASSWORD

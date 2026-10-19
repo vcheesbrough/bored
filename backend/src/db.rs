@@ -194,7 +194,7 @@ pub(crate) fn pool_options(max_connections: u32) -> PgPoolOptions {
 /// rather than from a URL: a password with `@` or `/` in it then needs no
 /// escaping, and no URL holding the password is ever formatted.
 fn connect_options(config: &DatabaseConfig) -> PgConnectOptions {
-    quiet(
+    with_session_limits(quiet(
         PgConnectOptions::new()
             .host(&config.host)
             .port(config.port)
@@ -204,7 +204,7 @@ fn connect_options(config: &DatabaseConfig) -> PgConnectOptions {
             // Shows up in `pg_stat_activity`, which tells the backend's
             // connections apart from the SQL console's and a `psql` session's.
             .application_name("bored"),
-    )
+    ))
 }
 
 /// Turn off sqlx's own statement logging. By default it logs every statement
@@ -216,6 +216,26 @@ pub(crate) fn quiet(options: PgConnectOptions) -> PgConnectOptions {
     options
         .log_statements(tracing::log::LevelFilter::Off)
         .log_slow_statements(tracing::log::LevelFilter::Off, Duration::ZERO)
+}
+
+/// Server-side limits on every connection, so nothing can wait forever:
+///
+/// * `statement_timeout` — no single statement runs longer than this; a
+///   runaway query fails (`57014`, a `db_engine` 500) instead of holding a
+///   connection.
+/// * `lock_timeout` — no wait for a row lock (the cascade's and rebalance's
+///   `FOR UPDATE`) lasts longer than this; the waiter fails instead.
+/// * `idle_in_transaction_session_timeout` — a transaction left open by a
+///   bug is ended by the server, releasing its locks.
+///
+/// bored's real statements take milliseconds; these are backstops, sized well
+/// clear of any legitimate request.
+pub(crate) fn with_session_limits(options: PgConnectOptions) -> PgConnectOptions {
+    options.options([
+        ("statement_timeout", "30s"),
+        ("lock_timeout", "15s"),
+        ("idle_in_transaction_session_timeout", "60s"),
+    ])
 }
 
 /// Open the pool and bring the schema up to date. Called once at startup.
@@ -390,6 +410,24 @@ mod tests {
             control.contains("marker-7d1c"),
             "control: default sqlx logging should log the slow SQL: {control}"
         );
+    }
+
+    /// Every connection carries the session limits (`with_session_limits`):
+    /// read back from the server, not from the options object.
+    #[tokio::test]
+    async fn connections_carry_the_session_limits() {
+        let db = connect_test().await.expect("test database");
+        for (setting, expected) in [
+            ("statement_timeout", "30s"),
+            ("lock_timeout", "15s"),
+            ("idle_in_transaction_session_timeout", "1min"),
+        ] {
+            let value: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SHOW {setting}")))
+                .fetch_one(&db)
+                .await
+                .expect("SHOW");
+            assert_eq!(value, expected, "{setting}");
+        }
     }
 
     /// The schema is really there after `connect_test` (a control for the

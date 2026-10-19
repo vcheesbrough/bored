@@ -650,3 +650,36 @@ async fn a_link_to_a_card_deleted_mid_create_is_not_found() {
         .await
         .assert_status(StatusCode::NOT_FOUND);
 }
+
+/// A column create racing its board's delete is a 404, not the foreign-key
+/// 500: a trigger deletes the board in the window after the route's lookup.
+#[tokio::test]
+async fn a_column_for_a_board_deleted_mid_create_is_not_found() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let board: shared::Board = server
+        .post("/api/boards")
+        .json(&shared::CreateBoardRequest {
+            name: "doomed".to_string(),
+        })
+        .await
+        .json();
+    for statement in [
+        "CREATE FUNCTION drop_board() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN DELETE FROM boards WHERE id = NEW.board_id; RETURN NEW; END $$",
+        "CREATE TRIGGER drop_board BEFORE INSERT ON columns \
+         FOR EACH ROW EXECUTE FUNCTION drop_board()",
+    ] {
+        sqlx::query(statement).execute(&db).await.expect("setup");
+    }
+    server
+        .post(&format!("/api/boards/{}/columns", board.name))
+        .json(&shared::CreateColumnRequest {
+            name: "c".to_string(),
+            position: 0,
+        })
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}

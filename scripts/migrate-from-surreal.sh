@@ -41,6 +41,23 @@ docker compose "$@" --profile surreal-migration run --rm --no-deps surreal-migra
   || status=$?
 case "$status" in
   3)
+    # Data in Postgres while the deployed backend is still the SurrealDB build
+    # means the environment was rolled back after its cut-over: anything
+    # written since lives only in SurrealDB, and deploying on would silently
+    # drop it. Stop, and leave the reconciliation to a person (README §
+    # Database, "Rolling back").
+    if docker inspect "$BORED_CONTAINER_NAME" > /dev/null 2>&1; then
+      mounts=$(docker inspect -f '{{range .Mounts}}{{.Name}} {{end}}' "$BORED_CONTAINER_NAME")
+      case " $mounts " in
+        *" $DB_VOLUME "*)
+          echo "ERROR: postgres already holds data, but $BORED_CONTAINER_NAME is a SurrealDB" >&2
+          echo "       build (it mounts $DB_VOLUME): the environment was rolled back after" >&2
+          echo "       its move to postgres. Deploying would drop what was written to" >&2
+          echo "       SurrealDB since. Reconcile by hand (README § Database) first." >&2
+          exit 1
+          ;;
+      esac
+    fi
     echo "postgres already holds bored data; no import needed"
     exit 0
     ;;
