@@ -607,3 +607,46 @@ async fn a_parent_deleted_during_a_restore_is_the_same_422() {
         "restore the board or column this belonged to first"
     );
 }
+
+/// A link create racing the deletion of one of its cards — the card goes
+/// after the route's re-check but before the INSERT — is a 404, not the
+/// foreign-key 500. A trigger deletes the successor in exactly that window.
+#[tokio::test]
+async fn a_link_to_a_card_deleted_mid_create_is_not_found() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (_board, column) = setup_board_and_column(&server).await;
+    let path = format!("/api/columns/{}/cards", column.id);
+    let mut ids = Vec::new();
+    for body in ["a", "b"] {
+        let card: shared::Card = server
+            .post(&path)
+            .json(&shared::CreateCardRequest {
+                body: body.to_string(),
+                ..Default::default()
+            })
+            .await
+            .json();
+        ids.push(card.id);
+    }
+    for statement in [
+        "CREATE FUNCTION drop_successor() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN DELETE FROM cards WHERE id = NEW.successor_id; RETURN NEW; END $$",
+        "CREATE TRIGGER drop_successor BEFORE INSERT ON card_links \
+         FOR EACH ROW EXECUTE FUNCTION drop_successor()",
+    ] {
+        sqlx::query(statement).execute(&db).await.expect("setup");
+    }
+
+    server
+        .post(&format!("/api/cards/{}/links", ids[0]))
+        .json(&shared::CreateCardLinkRequest {
+            other_card_id: ids[1].clone(),
+            direction: shared::LinkDirection::Successor,
+            reason: None,
+        })
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}

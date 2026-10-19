@@ -93,9 +93,13 @@ pub(super) struct Placement {
 /// column would bury the move that caused it.
 ///
 /// One transaction, with the column's cards locked (`FOR UPDATE`) as they are
-/// read: a concurrent move or rebalance of the same column waits rather than
-/// interleaving its writes with these, and the renumbering lands all at once
-/// or not at all — never a half-renumbered column.
+/// read. That buys two things and no more: the renumbering lands all at once
+/// or not at all (never a half-renumbered column), and two rebalances of the
+/// same column run one after the other instead of interleaving. It does not
+/// serialise moves: a move computes its position from a read taken outside
+/// this transaction, as it always has, so two simultaneous moves into one gap
+/// can still pick the same position (positions have no unique constraint and
+/// `reorder_cards` repairs duplicates).
 async fn rebalance_column(db: &Db, col_id: &str) -> Result<Vec<DbCard>, sqlx::Error> {
     let mut tx = db.begin().await?;
     let cards: Vec<DbCard> =

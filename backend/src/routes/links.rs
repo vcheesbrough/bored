@@ -245,8 +245,10 @@ pub async fn create_card_link(
         // The card lookups above ran before this lock was taken, so a
         // concurrent delete could have removed either card in the meantime —
         // cascade deletes do not hold `link_lock`. Re-check right before the
-        // write so a vanished card is the 404 it is, rather than the foreign
-        // key violation (a 500) the INSERT below would otherwise hit.
+        // write so a vanished card is the 404 it is. The re-check narrows the
+        // window but cannot close it — a card can still go between it and the
+        // INSERT — so the INSERT's own foreign-key violation maps to the same
+        // 404 below.
         let predecessor_still_exists =
             select_card(&state.db, &predecessor_id, "links.create_card_link").await?;
         let successor_still_exists =
@@ -274,9 +276,15 @@ pub async fn create_card_link(
         // Under the lock the duplicate check above should make the unique
         // constraint unreachable; if it fires anyway, the right answer is
         // still "already linked", not a server fault — which is what
-        // `error::classify` returns for a `card_links_pair` violation, so `?`
-        // alone is enough here.
-        .await?;
+        // `error::classify` returns for a `card_links_pair` violation. A
+        // foreign-key violation is a card deleted since the re-check: 404.
+        .await
+        .map_err(|error| match &error {
+            sqlx::Error::Database(database) if database.code().as_deref() == Some("23503") => {
+                ApiError::NotFound
+            }
+            _ => ApiError::from(error),
+        })?;
         id
     };
 
