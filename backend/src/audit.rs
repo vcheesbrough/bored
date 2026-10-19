@@ -500,10 +500,26 @@ async fn restore_one_delete(
                 "cards",
             ))
             .await?;
+            let created =
+                created.ok_or_else(|| ApiError::internal("restore created no card row"))?;
+            // A kept number can be above the sequence — a card deleted before
+            // the import, whose number only history remembered. Move the
+            // sequence past it, so a later new card cannot be handed the same
+            // number. `GREATEST` never moves it backwards.
+            sqlx::query(
+                "SELECT setval('card_number_seq', GREATEST($1::bigint, \
+                 (SELECT last_value FROM card_number_seq)))",
+            )
+            .bind(i64::from(created.number))
+            .execute(db)
+            .traced(DbQuery::new(
+                "audit.restore_one_delete",
+                DbOperation::Update,
+                "card_number_seq",
+            ))
+            .await?;
             // The recreated row, not the snapshot — see the board arm above.
-            let card = created
-                .ok_or_else(|| ApiError::internal("restore created no card row"))?
-                .into_api();
+            let card = created.into_api();
             let after = serde_json::to_value(card.clone())?;
             let mut out = Vec::new();
             let entry = record_and_broadcast(

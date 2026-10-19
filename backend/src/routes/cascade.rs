@@ -29,32 +29,39 @@ use crate::routes::boards::AppState;
 pub(crate) const ATTEMPTS: usize = 5;
 
 /// What a parent's `DELETE` did.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Removed {
-    /// The row was deleted.
-    Deleted,
+#[derive(Debug)]
+pub(crate) enum Removed<T> {
+    /// The row was deleted; this is it as it stood at that moment (so its
+    /// audit snapshot holds any rename made while the cascade ran).
+    Deleted(T),
     /// No such row — a concurrent delete got there first.
     Gone,
     /// A child appeared since the sweep (`foreign_key_violation`).
     HasChildren,
 }
 
-/// Run `statement` (a `DELETE … WHERE id = $1`) and say what it did, turning
-/// the restricting foreign key's violation into [`Removed::HasChildren`].
-pub(crate) async fn delete_parent(
+/// Run `statement` (a `DELETE … WHERE id = $1 RETURNING *`) and say what it
+/// did, turning the restricting foreign key's violation into
+/// [`Removed::HasChildren`].
+pub(crate) async fn delete_parent<T>(
     db: &Db,
     statement: &'static str,
     id: &str,
     query: DbQuery,
-) -> Result<Removed, ApiError> {
-    match sqlx::query(statement)
+) -> Result<Removed<T>, ApiError>
+where
+    // What `query_as` needs of a row type: decodable from a Postgres row, and
+    // movable across the await (`Send + Unpin`).
+    T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+{
+    match sqlx::query_as::<_, T>(statement)
         .bind(id)
-        .execute(db)
+        .fetch_optional(db)
         .traced(query)
         .await
     {
-        Ok(result) if result.rows_affected() == 0 => Ok(Removed::Gone),
-        Ok(_) => Ok(Removed::Deleted),
+        Ok(Some(row)) => Ok(Removed::Deleted(row)),
+        Ok(None) => Ok(Removed::Gone),
         // 23503 is `foreign_key_violation`.
         Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23503") => {
             Ok(Removed::HasChildren)

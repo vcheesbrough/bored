@@ -248,14 +248,14 @@ pub async fn delete_column(
             "columns.delete_column",
         )
         .await?;
-        removed = delete_parent(
+        removed = delete_parent::<DbColumn>(
             &state.db,
-            "DELETE FROM columns WHERE id = $1",
+            "DELETE FROM columns WHERE id = $1 RETURNING *",
             &col_id,
             DbQuery::new("columns.delete_column", DbOperation::Delete, "columns"),
         )
         .await?;
-        if removed != Removed::HasChildren {
+        if !matches!(removed, Removed::HasChildren) {
             break;
         }
     }
@@ -263,8 +263,8 @@ pub async fn delete_column(
         Removed::HasChildren => return Err(STILL_BUSY),
         // Someone else deleted it meanwhile; their delete has its own row.
         Removed::Gone => {}
-        Removed::Deleted => {
-            let col_snap = serde_json::to_value(existing.into_api())?;
+        Removed::Deleted(deleted) => {
+            let col_snap = serde_json::to_value(deleted.into_api())?;
             record_parent_delete(
                 &state, &claims, &board_id, "column", &col_id, col_snap, &batch,
             )

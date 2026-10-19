@@ -21,6 +21,8 @@ cat > "$WORK_DIR/bin/docker" <<FAKE
 echo "\$*" >> "$WORK_DIR/calls"
 env | grep '^OTEL_' >> "$WORK_DIR/otel" || true
 case "\$*" in
+  "inspect -f"*) cat "$WORK_DIR/mounts" ;;
+  inspect*) [ -s "$WORK_DIR/mounts" ] || exit 1 ;;
   *--check-empty*) exit "\$(cat "$WORK_DIR/check-status")" ;;
   *--surreal*) exit "\$(cat "$WORK_DIR/import-status")" ;;
 esac
@@ -32,14 +34,21 @@ failures=0
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1" >&2; failures=$((failures + 1)); }
 
-# Run the script with the given check and import statuses; echo its status.
+# Run the script with the given check and import statuses, and the backend
+# container's mounts as $3 (default: the SurrealDB build, mounting the old
+# store; "none" for no container at all); echo its status.
 run_case() {
   : > "$WORK_DIR/calls"
   : > "$WORK_DIR/otel"
   echo "$1" > "$WORK_DIR/check-status"
   echo "$2" > "$WORK_DIR/import-status"
+  case "${3:-old}" in
+    old) echo "bored-dev-db " > "$WORK_DIR/mounts" ;;
+    none) : > "$WORK_DIR/mounts" ;;
+    *) echo "$3 " > "$WORK_DIR/mounts" ;;
+  esac
   status=0
-  PATH="$WORK_DIR/bin:$PATH" BORED_CONTAINER_NAME=bored-dev \
+  PATH="$WORK_DIR/bin:$PATH" BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
     OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
     sh "$UNDER_TEST" -p bored-dev -f deploy/docker-compose.yml > "$WORK_DIR/out" 2>&1 || status=$?
   echo "$status"
@@ -105,6 +114,22 @@ if [ -s "$WORK_DIR/otel" ]; then
   fail "docker saw OTEL variables: $(cut -d= -f1 "$WORK_DIR/otel" | sort -u | tr '\n' ' ')"
 else
   pass "docker never sees the OTEL_* variables"
+fi
+
+# --- an environment already on postgres never re-imports ----------------------
+status=$(run_case 0 0 some-other-volume)
+if [ "$status" = 1 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
+  pass "an empty postgres behind a postgres-era backend refuses to re-import"
+else
+  fail "re-import guard: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- no backend container at all (a new host) imports -------------------------
+status=$(run_case 0 0 none)
+if [ "$status" = 0 ] && grep -q -- '--surreal /surreal/bored.db' "$WORK_DIR/calls"; then
+  pass "a new environment with no backend container runs the import"
+else
+  fail "new environment: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
 if [ "$failures" -ne 0 ]; then

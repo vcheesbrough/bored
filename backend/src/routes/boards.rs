@@ -347,16 +347,16 @@ pub async fn delete_board(
                 ))
                 .await?;
         for col in cols {
-            let col_removed = delete_parent(
+            let col_removed = delete_parent::<DbColumn>(
                 &state.db,
-                "DELETE FROM columns WHERE id = $1",
+                "DELETE FROM columns WHERE id = $1 RETURNING *",
                 &col.id,
                 DbQuery::new("boards.delete_board", DbOperation::Delete, "columns"),
             )
             .await?;
-            if col_removed == Removed::Deleted {
-                let entity_id = col.id.clone();
-                let snapshot_before = serde_json::to_value(col.into_api())?;
+            if let Removed::Deleted(deleted) = col_removed {
+                let entity_id = deleted.id.clone();
+                let snapshot_before = serde_json::to_value(deleted.into_api())?;
                 record_parent_delete(
                     &state,
                     &claims,
@@ -370,22 +370,22 @@ pub async fn delete_board(
             }
         }
 
-        removed = delete_parent(
+        removed = delete_parent::<DbBoard>(
             &state.db,
-            "DELETE FROM boards WHERE id = $1",
+            "DELETE FROM boards WHERE id = $1 RETURNING *",
             &id,
             DbQuery::new("boards.delete_board", DbOperation::Delete, "boards"),
         )
         .await?;
-        if removed != Removed::HasChildren {
+        if !matches!(removed, Removed::HasChildren) {
             break;
         }
     }
     match removed {
         Removed::HasChildren => return Err(STILL_BUSY),
         Removed::Gone => {}
-        Removed::Deleted => {
-            let board_snap = serde_json::to_value(board_record.into_api())?;
+        Removed::Deleted(deleted) => {
+            let board_snap = serde_json::to_value(deleted.into_api())?;
             record_parent_delete(&state, &claims, &id, "board", &id, board_snap, &batch).await?;
         }
     }

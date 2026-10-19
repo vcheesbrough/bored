@@ -1,7 +1,7 @@
 #!/bin/sh
 # The guarded, one-off SurrealDB -> Postgres import of a deploy (card #471).
 #
-# Usage: BORED_CONTAINER_NAME=<old backend container> \
+# Usage: BORED_CONTAINER_NAME=<backend container> DB_VOLUME=<old store volume> \
 #            migrate-from-surreal.sh <docker compose project args...>
 #   e.g. migrate-from-surreal.sh -p bored-dev -f deploy/docker-compose.yml
 #
@@ -23,6 +23,7 @@
 set -eu
 
 : "${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}"
+: "${DB_VOLUME:?DB_VOLUME is required}"
 
 # The docker CLI is OpenTelemetry-instrumented: with the rendered OTEL_*
 # variables in its environment it would export its own spans under the
@@ -44,13 +45,35 @@ case "$status" in
     exit 0
     ;;
   0)
-    echo "postgres is empty; importing the SurrealDB store"
     ;;
   *)
     echo "ERROR: the import's emptiness check failed (exit $status)" >&2
     exit "$status"
     ;;
 esac
+
+# Import only at the cut-over: while the deployed backend is still the
+# SurrealDB build, i.e. still mounts the old store's volume. Once an
+# environment runs on Postgres, an empty Postgres means its data was lost or
+# is mid-restore, and re-importing the retired store would quietly bring back
+# months-old data and report success. Refuse instead: restore the pg_dump
+# (mini-config RECOVERY.md step 11b). No backend container at all is a new
+# host or environment, where the old volume is empty (a restore skips its
+# tar) and the import is a no-op.
+if docker inspect "$BORED_CONTAINER_NAME" > /dev/null 2>&1; then
+  mounts=$(docker inspect -f '{{range .Mounts}}{{.Name}} {{end}}' "$BORED_CONTAINER_NAME")
+  case " $mounts " in
+    *" $DB_VOLUME "*) ;;
+    *)
+      echo "ERROR: postgres is empty, but $BORED_CONTAINER_NAME already runs on postgres" >&2
+      echo "       (it does not mount $DB_VOLUME). Refusing to re-import the retired" >&2
+      echo "       SurrealDB store; restore the latest pg_dump instead (mini-config" >&2
+      echo "       RECOVERY.md step 11b), then redeploy." >&2
+      exit 1
+      ;;
+  esac
+fi
+echo "postgres is empty; importing the SurrealDB store"
 
 # The old backend may already be gone (a first deploy, or a retry after a
 # failed import); that is fine.

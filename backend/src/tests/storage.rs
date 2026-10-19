@@ -450,3 +450,56 @@ async fn a_card_moved_out_mid_delete_survives_in_its_new_column() {
     .unwrap();
     assert_eq!(deleted_cards, vec!["k-first".to_string()]);
 }
+
+/// Restoring a card whose number is above the sequence (deleted before the
+/// import, so only history held its number) moves the sequence past it: the
+/// next new card gets a fresh number rather than a duplicate.
+#[tokio::test]
+async fn restoring_a_card_numbered_above_the_sequence_moves_the_sequence() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (_board, column) = setup_board_and_column(&server).await;
+    let path = format!("/api/columns/{}/cards", column.id);
+    let card: shared::Card = server
+        .post(&path)
+        .json(&shared::CreateCardRequest {
+            body: "historic".to_string(),
+            ..Default::default()
+        })
+        .await
+        .json();
+    server
+        .delete(&format!("/api/cards/{}", card.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    // Make the deleted card's snapshot carry a number far above the sequence.
+    sqlx::query(
+        "UPDATE audit_log SET snapshot_before = jsonb_set(snapshot_before, '{number}', '500') \
+         WHERE action = 'delete'",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let delete_row: String = sqlx::query_scalar("SELECT id FROM audit_log WHERE action = 'delete'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    server
+        .post(&format!("/api/audit/{delete_row}/restore"))
+        .await
+        .assert_status_ok();
+    let restored: shared::Card = server.get(&format!("/api/cards/{}", card.id)).await.json();
+    assert_eq!(restored.number, 500, "the free number is kept");
+
+    let next: shared::Card = server
+        .post(&path)
+        .json(&shared::CreateCardRequest {
+            body: "new".to_string(),
+            ..Default::default()
+        })
+        .await
+        .json();
+    assert_eq!(next.number, 501);
+}
