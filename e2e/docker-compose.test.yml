@@ -226,6 +226,12 @@ services:
       REQUIRED_SCOPE: bored:test:access
       # What the fake OTLP receiver wrote (card #416's telemetry spec).
       OTLP_OUT: /otlp/otlp.jsonl
+      # The read-only SQL console (card #473), reached directly: this stack's
+      # Traefik edge routes only the app, and there is no Authentik here. The
+      # spec plays Traefik's part and sends the basic-auth backstop itself.
+      SQL_CONSOLE_URL: http://sqltool:8081/dbconsole
+      SQL_CONSOLE_AUTH_USER: console
+      SQL_CONSOLE_AUTH_PASS: console-test-password
     volumes:
       - ${REPORT_DIR:-./playwright-report}:/e2e/playwright-report
       - otlp-out:/otlp:ro
@@ -234,6 +240,75 @@ services:
         condition: service_healthy
       mock-oidc:
         condition: service_started
+      sqltool:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
+  # Sets the read-only console role's password, as scripts/deploy-app.sh does
+  # in a real environment (card #473). The role itself comes from the
+  # migration the *backend* runs at startup, so this waits for that migration
+  # rather than for the backend's health.
+  sqltool-provision:
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    environment:
+      PGPASSWORD: bored-e2e
+      # Matches sqltool's connection string below. A test-only credential on a
+      # throwaway database, so it is literal here — deployments take it from
+      # sovereign-config.
+      PGWEB_NEW_PASSWORD: pgweb-test-password
+    command:
+      - sh
+      - -ec
+      - |
+        until psql -h db -U bored -d bored -tAc "SELECT COALESCE((SELECT success FROM _sqlx_migrations WHERE version = 20261020000000), false)" 2>/dev/null | grep -q t; do sleep 1; done
+        psql -v ON_ERROR_STOP=1 -h db -U bored -d bored <<'SQL'
+        \getenv pgweb_pw PGWEB_NEW_PASSWORD
+        ALTER ROLE bored_pgweb WITH LOGIN PASSWORD :'pgweb_pw';
+        SQL
+        # Created as `bored` *after* the migration ran its GRANTs, so the
+        # console can read it only if ALTER DEFAULT PRIVILEGES took — the claim
+        # that later migrations' tables stay readable without a new grant.
+        psql -v ON_ERROR_STOP=1 -h db -U bored -d bored \
+          -c "CREATE TABLE IF NOT EXISTS e2e_default_privileges_probe (i int)"
+        touch /tmp/provisioned
+        exec tail -f /dev/null
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/provisioned"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - e2e-net
+
+  # The console itself, configured exactly as deploy/docker-compose.yml ships
+  # it: the read-only role (never `bored`), read-only mode, a locked session,
+  # and basic auth on.
+  sqltool:
+    image: sosedoff/pgweb@sha256:a5256d416e2e8b92d69a4459058e3eca33a9f075d8325491644411d0bc3bd70b
+    environment:
+      PGWEB_DATABASE_URL: postgres://bored_pgweb:pgweb-test-password@db:5432/bored?sslmode=disable
+      PGWEB_URL_PREFIX: dbconsole
+      PGWEB_LOCK_SESSION: "1"
+      PGWEB_AUTH_USER: console
+      PGWEB_AUTH_PASS: console-test-password
+    command:
+      - --bind=0.0.0.0
+      - --listen=8081
+      - --readonly
+      - --skip-open
+      - --log-format=json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/dbconsole/api/info | grep -q 401"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+    depends_on:
+      sqltool-provision:
+        condition: service_healthy
     networks:
       - e2e-net
 
