@@ -68,12 +68,27 @@ else
   fail "import path: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
-# --- a failed import fails the deploy -----------------------------------------
+# --- a failed import fails the deploy, with the old backend back up -----------
 status=$(run_case 0 1)
 if [ "$status" != 0 ]; then
   pass "a failed import fails the script"
 else
   fail "a failed import was reported as success"
+fi
+import_line=$(grep -n -- '--surreal /surreal/bored.db' "$WORK_DIR/calls" | cut -d: -f1)
+start_line=$(grep -n 'start bored-dev' "$WORK_DIR/calls" | cut -d: -f1)
+if [ -n "$start_line" ] && [ "$start_line" -gt "$import_line" ]; then
+  pass "a failed import restarts the old backend"
+else
+  fail "no restart after a failed import: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- a successful import does not restart the old backend ---------------------
+run_case 0 0 > /dev/null
+if grep -q 'start bored-dev' "$WORK_DIR/calls"; then
+  fail "the old backend was restarted after a successful import"
+else
+  pass "a successful import leaves the old backend stopped for compose up"
 fi
 
 # --- a failed check fails the deploy without stopping anything ----------------

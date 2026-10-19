@@ -1024,6 +1024,36 @@ mod tests {
         assert!(!crate::db::has_data(&target).await.unwrap());
     }
 
+    /// What Postgres stores differing from what was meant to be written —
+    /// here a trigger quietly altering board names — fails verification, and
+    /// the transaction leaves nothing behind. This is the import's central
+    /// guarantee, so it is driven for real rather than assumed.
+    #[tokio::test]
+    async fn a_checksum_mismatch_rolls_everything_back() {
+        let source = seeded_store().await;
+        let target = crate::db::connect_test().await.expect("target db");
+        for statement in [
+            "CREATE FUNCTION tamper() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN NEW.name := NEW.name || '-tampered'; RETURN NEW; END $$",
+            "CREATE TRIGGER tamper BEFORE INSERT ON boards \
+             FOR EACH ROW EXECUTE FUNCTION tamper()",
+        ] {
+            sqlx::query(statement)
+                .execute(&target)
+                .await
+                .expect("trigger");
+        }
+
+        let error = migrate(&source, &target)
+            .await
+            .expect_err("a tampered write must not verify");
+        assert!(
+            matches!(&error, MigrationError::Verification(message) if message.contains("checksum")),
+            "{error}"
+        );
+        assert!(!crate::db::has_data(&target).await.unwrap());
+    }
+
     /// Duplicate card numbers keep the number on the earliest card and give
     /// the later ones fresh numbers above the counter.
     #[tokio::test]

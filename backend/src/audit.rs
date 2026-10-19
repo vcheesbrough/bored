@@ -471,13 +471,20 @@ async fn restore_one_delete(
             if !row_exists(db, Parent::Column, &card.column_id).await? {
                 return Err(PARENT_GONE);
             }
-            // The card keeps its old number. A number in the snapshot that
-            // does not fit the column (it never could be issued) is a
-            // malformed snapshot: 422, like any other unreadable one.
-            let number = i32::try_from(card.number).map_err(|_| ApiError::UNPROCESSABLE)?;
+            // The card keeps its old number when it can. It cannot when the
+            // number is no longer free (a snapshot taken before the import
+            // renumbered a duplicate, card #471) or was never a real one (0,
+            // or too large to have been issued): then it gets a fresh number
+            // from the sequence, as a new card would, rather than tripping
+            // `cards_number_unique`. `CASE` evaluates `nextval` only on the
+            // branch that needs it, so a kept number burns no sequence value.
+            let number = i32::try_from(card.number).unwrap_or(0);
             let created: Option<DbCard> = sqlx::query_as(
                 "INSERT INTO cards (id, column_id, body, position, number, tags, last_edited_by) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+                 VALUES ($1, $2, $3, $4, \
+                     CASE WHEN $5 > 0 AND NOT EXISTS (SELECT 1 FROM cards WHERE number = $5) \
+                          THEN $5 ELSE nextval('card_number_seq')::integer END, \
+                     $6, $7) RETURNING *",
             )
             .bind(&card.id)
             .bind(&card.column_id)

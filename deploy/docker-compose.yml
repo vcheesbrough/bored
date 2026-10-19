@@ -135,7 +135,9 @@ services:
     networks:
       - bored-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bored -d bored"]
+      # `-h 127.0.0.1`: during first-time init the image runs a temporary
+      # server on the unix socket only, which a socket check would call ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bored -d bored"]
       interval: 5s
       timeout: 5s
       retries: 5

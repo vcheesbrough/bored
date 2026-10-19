@@ -13,8 +13,9 @@
 #   3. otherwise stop the old backend, so the SurrealKV store is quiescent and
 #      nothing is written after the copy is taken, and run the import.
 # The import refuses a non-empty database on its own as well, and writes in one
-# verified transaction, so a failure here leaves Postgres empty and the next
-# deploy simply tries again. The old volume is only ever mounted read-only.
+# verified transaction, so a failure here leaves Postgres empty; the script
+# then restarts the old backend and fails the deploy, and the next deploy tries
+# again. The old volume is only ever mounted read-only.
 #
 # Delete this script with the import subcommand once both environments are
 # migrated.
@@ -55,5 +56,15 @@ esac
 # failed import); that is fine.
 docker stop -t 15 "$BORED_CONTAINER_NAME" || echo "no running $BORED_CONTAINER_NAME to stop"
 
+status=0
 docker compose "$@" --profile surreal-migration run --rm --no-deps surreal-migrate \
-  --surreal /surreal/bored.db
+  --surreal /surreal/bored.db || status=$?
+if [ "$status" -ne 0 ]; then
+  # The import rolled back, so Postgres is still empty and the old store is
+  # untouched: put the old backend back in service before failing the deploy,
+  # rather than leaving the environment down until someone intervenes. The
+  # next deploy tries the import again.
+  echo "ERROR: the import failed (exit $status); restarting $BORED_CONTAINER_NAME on SurrealDB" >&2
+  docker start "$BORED_CONTAINER_NAME" || echo "ERROR: could not restart $BORED_CONTAINER_NAME" >&2
+  exit "$status"
+fi

@@ -204,3 +204,186 @@ async fn restoring_a_card_into_a_deleted_column_is_refused() {
     let restored: shared::Card = server.get(&format!("/api/cards/{}", card.id)).await.json();
     assert_eq!(restored.number, card.number, "the card keeps its number");
 }
+
+/// A restored card whose number has since been taken — possible for a
+/// snapshot written before the import renumbered a duplicate — gets a fresh
+/// number instead of failing on `cards_number_unique`.
+#[tokio::test]
+async fn restoring_a_card_whose_number_was_taken_draws_a_fresh_one() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (_board, column) = setup_board_and_column(&server).await;
+    let path = format!("/api/columns/{}/cards", column.id);
+    let deleted: shared::Card = server
+        .post(&path)
+        .json(&shared::CreateCardRequest {
+            body: "deleted".to_string(),
+            ..Default::default()
+        })
+        .await
+        .json();
+    let live: shared::Card = server
+        .post(&path)
+        .json(&shared::CreateCardRequest {
+            body: "live".to_string(),
+            ..Default::default()
+        })
+        .await
+        .json();
+    server
+        .delete(&format!("/api/cards/{}", deleted.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    // Give the live card the deleted card's number, as a renumbering import
+    // could have left things.
+    sqlx::query("UPDATE cards SET number = $1 WHERE id = $2")
+        .bind(i32::try_from(deleted.number).unwrap())
+        .bind(&live.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let delete_row: String = sqlx::query_scalar(
+        "SELECT id FROM audit_log WHERE entity_type = 'card' AND action = 'delete'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    server
+        .post(&format!("/api/audit/{delete_row}/restore"))
+        .await
+        .assert_status_ok();
+
+    let restored: shared::Card = server
+        .get(&format!("/api/cards/{}", deleted.id))
+        .await
+        .json();
+    assert_ne!(
+        restored.number, deleted.number,
+        "the taken number is not reused"
+    );
+    assert!(
+        restored.number > live.number,
+        "a fresh number from the sequence: {} vs {}",
+        restored.number,
+        live.number
+    );
+}
+
+/// Make every card delete in the test database insert a new card into the
+/// same column — a stand-in for a create landing mid-cascade — at most
+/// `times` times (a counter table bounds it).
+async fn add_a_card_after_each_delete(db: &crate::db::Db, times: i32) {
+    for statement in [
+        "CREATE TABLE late_inserts (remaining integer NOT NULL)".to_string(),
+        format!("INSERT INTO late_inserts VALUES ({times})"),
+        "CREATE FUNCTION add_late_card() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF (SELECT remaining FROM late_inserts) > 0 THEN \
+             UPDATE late_inserts SET remaining = remaining - 1; \
+             INSERT INTO cards (id, column_id, body, position) \
+               VALUES ('late-' || gen_random_uuid(), OLD.column_id, 'late', 1); \
+           END IF; \
+           RETURN OLD; \
+         END $$"
+            .to_string(),
+        "CREATE TRIGGER add_late_card AFTER DELETE ON cards \
+         FOR EACH ROW EXECUTE FUNCTION add_late_card()"
+            .to_string(),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(db)
+            .await
+            .expect("test trigger");
+    }
+}
+
+/// A card created in a column while it is being deleted is swept too, and
+/// the column's delete row is written once — after the column is gone.
+#[tokio::test]
+async fn a_card_added_mid_delete_is_swept_and_the_column_still_goes() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (_board, column) = setup_board_and_column(&server).await;
+    server
+        .post(&format!("/api/columns/{}/cards", column.id))
+        .json(&shared::CreateCardRequest {
+            body: "first".to_string(),
+            ..Default::default()
+        })
+        .await
+        .assert_status(StatusCode::CREATED);
+    add_a_card_after_each_delete(&db, 1).await;
+
+    server
+        .delete(&format!("/api/columns/{}", column.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM columns")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(columns, 0);
+    let card_deletes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE entity_type = 'card' AND action = 'delete'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(card_deletes, 2, "the late card is audited like the first");
+    let column_deletes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE entity_type = 'column' AND action = 'delete'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(column_deletes, 1);
+}
+
+/// A column that keeps filling faster than the delete empties it is a 409,
+/// and history does not claim the column was deleted.
+#[tokio::test]
+async fn a_column_that_keeps_filling_is_a_conflict_with_no_false_history() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (board, column) = setup_board_and_column(&server).await;
+    server
+        .post(&format!("/api/columns/{}/cards", column.id))
+        .json(&shared::CreateCardRequest {
+            body: "first".to_string(),
+            ..Default::default()
+        })
+        .await
+        .assert_status(StatusCode::CREATED);
+    add_a_card_after_each_delete(&db, 1_000).await;
+
+    server
+        .delete(&format!("/api/columns/{}", column.id))
+        .await
+        .assert_status(StatusCode::CONFLICT);
+    server
+        .delete(&format!("/api/boards/{}", board.name))
+        .await
+        .assert_status(StatusCode::CONFLICT);
+
+    let parent_deletes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE entity_type IN ('column', 'board') \
+         AND action = 'delete'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(parent_deletes, 0);
+    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM columns")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(columns, 1, "the column is still there");
+}

@@ -41,6 +41,9 @@ async fn board_columns(
         .map_err(ApiError::from)
 }
 use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
+use crate::routes::cascade::{
+    ATTEMPTS, Removed, STILL_BUSY, delete_cards, delete_parent, record_parent_delete,
+};
 
 #[tracing::instrument(skip_all, fields(bored.board.slug = %board_slug))]
 pub async fn list_columns(
@@ -221,87 +224,53 @@ pub async fn delete_column(
     let board_id = existing.board_id.clone();
     let batch = audit::new_batch_group();
 
-    let cards: Vec<DbCard> =
-        sqlx::query_as("SELECT * FROM cards WHERE column_id = $1 ORDER BY position, id")
-            .bind(&col_id)
-            .fetch_all(&state.db)
-            .traced(DbQuery::new(
-                "columns.delete_column",
-                DbOperation::Select,
-                "cards",
-            ))
-            .await?;
-
-    for card in cards {
-        let entity_id = card.id.clone();
-        // Links go first so their delete rows sit under the same batch as the
-        // card they belonged to.
-        crate::routes::links::cascade_delete_card_links(
+    // Sweep the column's cards, then delete the column — again if a card
+    // arrived in between (see `routes::cascade`). The column's own audit row
+    // is written only once it is really gone.
+    let mut removed = Removed::HasChildren;
+    for _ in 0..ATTEMPTS {
+        let cards: Vec<DbCard> =
+            sqlx::query_as("SELECT * FROM cards WHERE column_id = $1 ORDER BY position, id")
+                .bind(&col_id)
+                .fetch_all(&state.db)
+                .traced(DbQuery::new(
+                    "columns.delete_column",
+                    DbOperation::Select,
+                    "cards",
+                ))
+                .await?;
+        delete_cards(
             &state,
             &claims,
             &board_id,
-            &entity_id,
-            Some(&batch),
-        )
-        .await?;
-        let snapshot_before = serde_json::to_value(card.clone().into_api())?;
-        audit::record_and_broadcast(
-            &state.db,
-            &state.events,
-            audit::AuditRecord {
-                claims: &claims,
-                board_id: board_id.clone(),
-                entity_type: "card",
-                entity_id: &entity_id,
-                action: "delete",
-                snapshot_before: Some(snapshot_before),
-                snapshot_after: None,
-                restored_from: None,
-                batch_group: Some(batch.clone()),
-                audit_edit_session: None,
-            },
-        )
-        .await?;
-
-        sqlx::query("DELETE FROM cards WHERE id = $1")
-            .bind(&entity_id)
-            .execute(&state.db)
-            .traced(DbQuery::new(
-                "columns.delete_column",
-                DbOperation::Delete,
-                "cards",
-            ))
-            .await?;
-    }
-
-    let col_snap = serde_json::to_value(existing.clone().into_api())?;
-    audit::record_and_broadcast(
-        &state.db,
-        &state.events,
-        audit::AuditRecord {
-            claims: &claims,
-            board_id: board_id.clone(),
-            entity_type: "column",
-            entity_id: &col_id,
-            action: "delete",
-            snapshot_before: Some(col_snap),
-            snapshot_after: None,
-            restored_from: None,
-            batch_group: Some(batch),
-            audit_edit_session: None,
-        },
-    )
-    .await?;
-
-    sqlx::query("DELETE FROM columns WHERE id = $1")
-        .bind(&col_id)
-        .execute(&state.db)
-        .traced(DbQuery::new(
+            &batch,
+            cards,
             "columns.delete_column",
-            DbOperation::Delete,
-            "columns",
-        ))
+        )
         .await?;
+        removed = delete_parent(
+            &state.db,
+            "DELETE FROM columns WHERE id = $1",
+            &col_id,
+            DbQuery::new("columns.delete_column", DbOperation::Delete, "columns"),
+        )
+        .await?;
+        if removed != Removed::HasChildren {
+            break;
+        }
+    }
+    match removed {
+        Removed::HasChildren => return Err(STILL_BUSY),
+        // Someone else deleted it meanwhile; their delete has its own row.
+        Removed::Gone => {}
+        Removed::Deleted => {
+            let col_snap = serde_json::to_value(existing.into_api())?;
+            record_parent_delete(
+                &state, &claims, &board_id, "column", &col_id, col_snap, &batch,
+            )
+            .await?;
+        }
+    }
 
     let _ = state.events.send(BroadcastEvent {
         board_id,
