@@ -19,6 +19,8 @@ mkdir -p "$WORK_DIR/bin"
 cat > "$WORK_DIR/bin/docker" <<FAKE
 #!/bin/sh
 echo "\$*" >> "$WORK_DIR/calls"
+# Like docker compose run, read whatever stdin holds.
+cat > /dev/null
 env | grep '^OTEL_' >> "$WORK_DIR/otel" || true
 case "\$*" in
   *State.Running*) printf '%s|%s\n' "\$(cat "$WORK_DIR/running")" "\$(cat "$WORK_DIR/mounts")" ;;
@@ -57,7 +59,7 @@ run_case() {
   status=0
   PATH="$WORK_DIR/bin:$PATH" BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
     OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
-    sh "$UNDER_TEST" -p bored-dev -f deploy/docker-compose.yml > "$WORK_DIR/out" 2>&1 || status=$?
+    sh "$UNDER_TEST" -p bored-dev -f deploy/docker-compose.yml < /dev/null > "$WORK_DIR/out" 2>&1 || status=$?
   echo "$status"
 }
 
@@ -93,7 +95,7 @@ fi
 # --- empty: stop the old backend, then import ---------------------------------
 status=$(run_case 0 0)
 stop_line=$(grep -n 'stop -t 15 bored-dev' "$WORK_DIR/calls" | cut -d: -f1)
-import_line=$(grep -n 'run --rm --no-deps surreal-migrate --surreal /surreal/bored.db' "$WORK_DIR/calls" | cut -d: -f1)
+import_line=$(grep -n 'run --rm --no-deps -T surreal-migrate --surreal /surreal/bored.db' "$WORK_DIR/calls" | cut -d: -f1)
 if [ "$status" = 0 ] && [ -n "$stop_line" ] && [ -n "$import_line" ] && [ "$stop_line" -lt "$import_line" ]; then
   pass "an empty database stops the old backend and then imports"
 else
@@ -169,6 +171,22 @@ if [ "$status" = 0 ] && grep -q -- '--surreal /surreal/bored.db' "$WORK_DIR/call
   pass "a new environment with no backend container runs the import"
 else
   fail "new environment: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- the script never reads its caller's stdin --------------------------------
+# In CI the caller's stdin is the rest of the step's own script; a docker call
+# that drained it broke the step (deploys 385, 390, 391).
+echo 0 > "$WORK_DIR/check-status"; echo 0 > "$WORK_DIR/import-status"
+echo "bored-dev-db " > "$WORK_DIR/mounts"; echo yes > "$WORK_DIR/store"; echo true > "$WORK_DIR/running"
+left=$(printf 'echo the-rest-of-the-step\n' | {
+  PATH="$WORK_DIR/bin:$PATH" BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
+    sh "$UNDER_TEST" -p bored-dev -f deploy/docker-compose.yml > /dev/null 2>&1
+  cat
+})
+if [ "$left" = "echo the-rest-of-the-step" ]; then
+  pass "the caller's stdin is left untouched"
+else
+  fail "stdin was consumed: left '$left'"
 fi
 
 if [ "$failures" -ne 0 ]; then
