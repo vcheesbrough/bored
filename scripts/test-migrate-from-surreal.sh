@@ -173,6 +173,15 @@ else
   fail "new environment: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
+# --- both compose runs are non-interactive (-T) --------------------------------
+run_case 0 0 > /dev/null
+if grep -q 'run --rm --no-deps -T surreal-migrate --check-empty' "$WORK_DIR/calls" \
+    && grep -q 'run --rm --no-deps -T surreal-migrate --surreal' "$WORK_DIR/calls"; then
+  pass "both compose runs pass -T"
+else
+  fail "compose run without -T: $(cat "$WORK_DIR/calls")"
+fi
+
 # --- the script never reads its caller's stdin --------------------------------
 # In CI the caller's stdin is the rest of the step's own script; a docker call
 # that drained it broke the step (deploys 385, 390, 391).
