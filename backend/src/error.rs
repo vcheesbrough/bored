@@ -253,10 +253,16 @@ fn unique_index_conflict(error: &sqlx::Error) -> Option<ApiError> {
     }
 }
 
-/// The [`ErrorType`] a database error would become as a response — without
-/// consuming it. The database span (`db.rs`) labels itself and the
-/// `bored.db.errors` metric with this, so a failed call and the request it
-/// fails carry the same class, from one classification rather than two.
+/// The [`ErrorType`] a database error would become as a response through the
+/// general classifier — without consuming it. The database span (`db.rs`)
+/// labels itself and the `bored.db.errors` metric with this.
+///
+/// It is what the *database* answered. A few call sites then turn such an
+/// answer into a different client error ([`card_column_write_error`], the
+/// restore's parent-gone 422, the link create's 404) or treat it as an
+/// expected retry (`routes::cascade`); there the request's server span carries
+/// the API's class and the db span keeps the database's. Recorded in
+/// AGENTS.md § Observability.
 pub(crate) fn database_error_type(error: &sqlx::Error) -> ErrorType {
     match unique_index_conflict(error) {
         Some(conflict) => conflict.error_type(),

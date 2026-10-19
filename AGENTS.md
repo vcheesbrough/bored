@@ -230,6 +230,14 @@ weaken them.**
   or re-root inbound context — not in each product. Revisit with a
   non-default sampler in the `otel` layer if the trace record ever has to
   withstand a hostile client.
+- **A db span's `error.type` is the database's answer, not the API's.**
+  `bored.db.errors` and the `db` span classify the raw database error
+  (`error::database_error_type`). Where a call site turns that into a
+  different client answer — a foreign-key miss that is really a vanished
+  column or card (404), a restore whose parent went (422) — or an expected
+  retry (`routes::cascade`, a delete that found new children), the server
+  span carries the API's class and the db span keeps `db_constraint`. Expect
+  a little such noise on the metric; it is not an outage signal on its own.
 - **Only `http/protobuf`.** `grpc` and `http/json` are valid OTLP protocols but
   this build carries only the http/protobuf client, so startup rejects them.
 - **The one duplicated fact:** `observability.environment` (for `/api/info`,

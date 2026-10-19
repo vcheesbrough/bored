@@ -523,10 +523,15 @@ async fn restore_one_delete(
             // A kept number can be above the sequence — a card deleted before
             // the import, whose number only history remembered. Move the
             // sequence past it, so a later new card cannot be handed the same
-            // number. `GREATEST` never moves it backwards.
+            // number. The `WHERE` makes the common case (a number below the
+            // sequence) a no-op that never calls `setval` at all. Read-then-set
+            // is not atomic, so a create landing in between could still be
+            // overtaken — but only while restoring a number above every card
+            // ever created, and the worst outcome is that create's retryable
+            // 500 on `cards_number_unique`, never a duplicate.
             sqlx::query(
-                "SELECT setval('card_number_seq', GREATEST($1::bigint, \
-                 (SELECT last_value FROM card_number_seq)))",
+                "SELECT setval('card_number_seq', $1::bigint) \
+                 FROM card_number_seq WHERE last_value < $1::bigint",
             )
             .bind(i64::from(created.number))
             .execute(db)
