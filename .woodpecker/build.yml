@@ -310,7 +310,7 @@ steps:
           BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db PG_VOLUME=bored-dev-pg
         docker pull "registry.desync.link/bored:$$BORED_IMAGE_TAG"
         sovereign-config render /bored/devops/dev/otel /bored/devops/dev/compose -- \
-          ./scripts/deploy-app.sh -p bored-dev -f deploy/docker-compose.yml
+          ./scripts/deploy-app.sh -p bored-dev -f deploy/docker-compose.yml < /dev/null
       # The client-telemetry ingest (otlp-collector-oidc, card #416): its
       # own compose project, started after the app and *never* part of the
       # deploy gate — no `--wait`, and a failure (the store unreadable, the
@@ -321,7 +321,7 @@ steps:
       - |
         APP_ENV=dev BORED_HOST=bored-dev.desync.link BORED_CONTAINER_NAME=bored-dev \
         sovereign-config render /bored/devops/dev/ingest -- \
-        ./scripts/compose-up-ingest.sh -p bored-dev-ingest -f deploy/otlp-ingest.yml up -d --pull always \
+        ./scripts/compose-up-ingest.sh -p bored-dev-ingest -f deploy/otlp-ingest.yml up -d --pull always < /dev/null \
         || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
     when:
       - event: deployment
@@ -370,12 +370,12 @@ steps:
           BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db PG_VOLUME=bored-prod-pg
         docker pull "registry.desync.link/bored:$$BORED_IMAGE_TAG"
         sovereign-config render /bored/devops/prod/otel /bored/devops/prod/compose -- \
-          ./scripts/deploy-app.sh -p bored -f deploy/docker-compose.yml
+          ./scripts/deploy-app.sh -p bored -f deploy/docker-compose.yml < /dev/null
       # The client-telemetry ingest, exactly as on dev (see deploy-dev).
       - |
         APP_ENV=prod BORED_HOST=bored.desync.link BORED_CONTAINER_NAME=bored \
         sovereign-config render /bored/devops/prod/ingest -- \
-        ./scripts/compose-up-ingest.sh -p bored-ingest -f deploy/otlp-ingest.yml up -d --pull always \
+        ./scripts/compose-up-ingest.sh -p bored-ingest -f deploy/otlp-ingest.yml up -d --pull always < /dev/null \
         || echo "WARNING: client-telemetry ingest not started; the SPA drops its telemetry and carries on"
 
   tag-release-dev:

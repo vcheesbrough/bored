@@ -70,7 +70,10 @@ RUN sh /app/scripts/test-prune-stale-e2e-projects.sh
 # same way with a fake `docker`.
 COPY scripts/migrate-from-surreal.sh scripts/migrate-from-surreal.sh
 COPY scripts/test-migrate-from-surreal.sh scripts/test-migrate-from-surreal.sh
-RUN sh /app/scripts/test-migrate-from-surreal.sh
+RUN sh /app/scripts/test-migrate-from-surreal.sh < /dev/null
+COPY scripts/deploy-app.sh scripts/deploy-app.sh
+COPY scripts/test-deploy-app.sh scripts/test-deploy-app.sh
+RUN sh /app/scripts/test-deploy-app.sh < /dev/null
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.

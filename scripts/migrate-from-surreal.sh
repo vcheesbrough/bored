@@ -22,6 +22,12 @@
 
 set -eu
 
+# Nothing in here reads input. `docker compose run` would otherwise attach
+# stdin, which in CI is the rest of the step's own script (see deploy-app.sh).
+# This line is the fix; the `-T` on the runs below only drops the pseudo-TTY
+# (there is no terminal in CI) and does not, by itself, detach stdin.
+exec < /dev/null
+
 : "${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}"
 : "${DB_VOLUME:?DB_VOLUME is required}"
 
@@ -37,7 +43,7 @@ docker compose "$@" up -d --wait --wait-timeout 120 bored-db
 # `|| status=$?` keeps `set -e` from ending the script on the expected
 # non-zero answer while still capturing it.
 status=0
-docker compose "$@" --profile surreal-migration run --rm --no-deps surreal-migrate --check-empty \
+docker compose "$@" --profile surreal-migration run --rm --no-deps -T surreal-migrate --check-empty \
   || status=$?
 case "$status" in
   3)
@@ -129,7 +135,7 @@ echo "postgres is empty; importing the SurrealDB store"
 docker stop -t 15 "$BORED_CONTAINER_NAME" || echo "no running $BORED_CONTAINER_NAME to stop"
 
 status=0
-docker compose "$@" --profile surreal-migration run --rm --no-deps surreal-migrate \
+docker compose "$@" --profile surreal-migration run --rm --no-deps -T surreal-migrate \
   --surreal /surreal/bored.db || status=$?
 if [ "$status" -ne 0 ]; then
   # The import rolled back, so Postgres is still empty and the old store is
