@@ -503,3 +503,107 @@ async fn restoring_a_card_numbered_above_the_sequence_moves_the_sequence() {
         .json();
     assert_eq!(next.number, 501);
 }
+
+/// The cascade holds each card's row lock from its re-read until its delete,
+/// so a move cannot land between the card's audit row and the delete. Proved
+/// from *inside* that window: a trigger on the audit insert (which runs while
+/// the lock is held) tries to move the card with a short `lock_timeout` and
+/// records whether it was blocked. Without the lock the move would go
+/// through, and the cascade would then audit a card that is no longer there.
+#[tokio::test]
+async fn a_move_during_a_cascade_card_step_waits_for_the_row_lock() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (board, column) = setup_board_and_column(&server).await;
+    let other: shared::Column = server
+        .post(&format!("/api/boards/{}/columns", board.name))
+        .json(&shared::CreateColumnRequest {
+            name: "Other".to_string(),
+            position: 1,
+        })
+        .await
+        .json();
+    for statement in [
+        format!(
+            "INSERT INTO cards (id, column_id, body, position) VALUES ('k1', '{}', 'x', 1)",
+            column.id
+        ),
+        "CREATE TABLE move_attempts (outcome text NOT NULL)".to_string(),
+        format!(
+            "CREATE FUNCTION try_move() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.entity_type = 'card' AND NEW.action = 'delete' THEN \
+                 BEGIN \
+                   SET LOCAL lock_timeout = '200ms'; \
+                   UPDATE cards SET column_id = '{}' WHERE id = 'k1'; \
+                   INSERT INTO move_attempts VALUES ('moved'); \
+                 EXCEPTION WHEN lock_not_available THEN \
+                   INSERT INTO move_attempts VALUES ('blocked'); \
+                 END; \
+               END IF; \
+               RETURN NEW; \
+             END $$",
+            other.id
+        ),
+        "CREATE TRIGGER try_move AFTER INSERT ON audit_log \
+         FOR EACH ROW EXECUTE FUNCTION try_move()"
+            .to_string(),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&db)
+            .await
+            .expect("setup");
+    }
+
+    server
+        .delete(&format!("/api/columns/{}", column.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let outcomes: Vec<String> = sqlx::query_scalar("SELECT outcome FROM move_attempts")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(outcomes, vec!["blocked".to_string()]);
+}
+
+/// A restore whose parent is deleted in the instant between its existence
+/// check and its insert is the same 422 as a parent already gone. A trigger
+/// deletes the board as the column row is inserted — exactly that window.
+#[tokio::test]
+async fn a_parent_deleted_during_a_restore_is_the_same_422() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (_board, column) = setup_board_and_column(&server).await;
+    server
+        .delete(&format!("/api/columns/{}", column.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    for statement in [
+        "CREATE FUNCTION drop_parent() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN DELETE FROM boards WHERE id = NEW.board_id; RETURN NEW; END $$",
+        "CREATE TRIGGER drop_parent BEFORE INSERT ON columns \
+         FOR EACH ROW EXECUTE FUNCTION drop_parent()",
+    ] {
+        sqlx::query(statement).execute(&db).await.expect("setup");
+    }
+    let delete_row: String = sqlx::query_scalar(
+        "SELECT id FROM audit_log WHERE entity_type = 'column' AND action = 'delete'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+
+    let response = server
+        .post(&format!("/api/audit/{delete_row}/restore"))
+        .await;
+    response.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response.text(),
+        "restore the board or column this belonged to first"
+    );
+}

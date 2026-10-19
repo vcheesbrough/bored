@@ -22,7 +22,8 @@ echo "\$*" >> "$WORK_DIR/calls"
 env | grep '^OTEL_' >> "$WORK_DIR/otel" || true
 case "\$*" in
   "inspect -f"*) cat "$WORK_DIR/mounts" ;;
-  "run --rm -v"*) [ "\$(cat "$WORK_DIR/store")" = yes ] && exit 0; exit 1 ;;
+  "run --rm -v"*)
+    case "\$(cat "$WORK_DIR/store")" in yes) exit 0 ;; no) exit 1 ;; *) exit 125 ;; esac ;;
   inspect*) [ -s "$WORK_DIR/mounts" ] || exit 1 ;;
   *--check-empty*) exit "\$(cat "$WORK_DIR/check-status")" ;;
   *--surreal*) exit "\$(cat "$WORK_DIR/import-status")" ;;
@@ -133,6 +134,14 @@ if [ "$status" = 0 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
   pass "a postgres-era environment with an empty old volume deploys on"
 else
   fail "empty old volume: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- ... and a failed check of the old volume stops the deploy (fail closed) ---
+status=$(run_case 0 0 some-other-volume broken)
+if [ "$status" = 125 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
+  pass "a docker failure checking the old volume fails the deploy"
+else
+  fail "volume check failure: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
 # --- no backend container at all (a new host) imports -------------------------

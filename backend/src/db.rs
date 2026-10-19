@@ -19,11 +19,12 @@ use crate::config::DatabaseConfig;
 pub type Db = sqlx::PgPool;
 
 /// How many connections the pool may open. bored's traffic is a handful of
-/// people and agents; each request makes a few short queries one after
-/// another, so five connections leave ample headroom (v-note runs with the
-/// same number). The pool gauge (`db.client.connection.count`) shows when this
+/// people and agents; most requests make a few short queries one after
+/// another. A column or board delete holds one connection in a transaction
+/// while it borrows a second for audit rows (`routes::cascade`), so ten leave
+/// room for several of those at once. The pool gauge (`db.client.connection.count`) shows when this
 /// stops being true.
-const MAX_CONNECTIONS: u32 = 5;
+const MAX_CONNECTIONS: u32 = 10;
 
 /// How long a request waits for a free connection before failing with
 /// `PoolTimedOut` (a `db_unavailable` 500). Long enough to ride out a brief

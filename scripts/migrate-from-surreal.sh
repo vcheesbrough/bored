@@ -68,12 +68,25 @@ if docker inspect "$BORED_CONTAINER_NAME" > /dev/null 2>&1; then
       # Nothing to re-import when the old volume holds no store (a new
       # environment that has run on Postgres from the start, before anyone
       # has written to it): carry on with an empty database.
-      if ! docker run --rm -v "$DB_VOLUME:/surreal:ro" \
+      #
+      # `test -e` answers 0 (a store is there) or 1 (none); anything else is
+      # docker itself failing (a pull error, a missing volume), which must stop
+      # the deploy rather than read as "no store" and fail open.
+      store=0
+      docker run --rm -v "$DB_VOLUME:/surreal:ro" \
           alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339 \
-          test -e /surreal/bored.db; then
-        echo "no SurrealDB store in $DB_VOLUME; nothing to import"
-        exit 0
-      fi
+          test -e /surreal/bored.db || store=$?
+      case "$store" in
+        1)
+          echo "no SurrealDB store in $DB_VOLUME; nothing to import"
+          exit 0
+          ;;
+        0) ;;
+        *)
+          echo "ERROR: could not check $DB_VOLUME for a SurrealDB store (exit $store)" >&2
+          exit "$store"
+          ;;
+      esac
       echo "ERROR: postgres is empty, but $BORED_CONTAINER_NAME already runs on postgres" >&2
       echo "       (it does not mount $DB_VOLUME). Refusing to re-import the retired" >&2
       echo "       SurrealDB store; restore the latest pg_dump instead (mini-config" >&2

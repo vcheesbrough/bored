@@ -115,7 +115,7 @@ pub(crate) async fn delete_cards(
             Some(batch),
         )
         .await?;
-        let snapshot_before = serde_json::to_value(card.into_api())?;
+        let snapshot_before = serde_json::to_value(card.clone().into_api())?;
         audit::record_and_broadcast(
             &state.db,
             &state.events,
@@ -134,8 +134,11 @@ pub(crate) async fn delete_cards(
         )
         .await?;
 
-        let deleted = sqlx::query("DELETE FROM cards WHERE id = $1")
+        // By id *and* column, as well as under the lock: the lock is what
+        // makes a move wait, the column condition a second guard on it.
+        let deleted = sqlx::query("DELETE FROM cards WHERE id = $1 AND column_id = $2")
             .bind(&entity_id)
+            .bind(&card.column_id)
             .execute(&mut *tx)
             .traced(DbQuery::new(name, DbOperation::Delete, "cards"))
             .await?;
