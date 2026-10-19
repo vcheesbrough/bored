@@ -50,7 +50,7 @@ async fn info_route_returns_version_and_env() {
 #[tokio::test]
 #[serial]
 async fn info_route_reports_prod_environment_without_a_branch() {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     let router = app(state, "./dist", DeploymentInfo::new("prod", None)).await;
     let server = TestServer::new(router).unwrap();
@@ -67,7 +67,7 @@ async fn info_route_reports_prod_environment_without_a_branch() {
 #[tokio::test]
 #[serial]
 async fn info_route_reports_branch_alongside_dev_environment() {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     let router = app(
         state,
@@ -106,12 +106,12 @@ fn app_info_without_a_branch_field_still_deserializes() {
 #[tokio::test]
 #[serial]
 async fn info_route_uses_app_version_env_and_configured_environment() {
-    // SAFETY: env mutation happens strictly before `db::connect_mem()` spawns
-    // SurrealDB's background tasks that could race a `getenv`. `#[serial]`
+    // SAFETY: env mutation happens strictly before `db::connect_test()` spawns
+    // the connection pool's background tasks that could race a `getenv`. `#[serial]`
     // additionally serialises this against the other `#[serial]` tests here
     // (it does not by itself exclude other threads).
     unsafe { std::env::set_var("APP_VERSION", "1.2.3") };
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     // The deployment identity is threaded through `app()` directly (from
     // `ObservabilityConfig` in production) rather than a raw env var.
@@ -121,7 +121,7 @@ async fn info_route_uses_app_version_env_and_configured_environment() {
     resp.assert_status_ok();
     let body = resp.text();
     drop(server);
-    // SAFETY: `server` (and the db/state it owns, including SurrealDB's
+    // SAFETY: `server` (and the db/state it owns, including the pool's
     // background tasks) was dropped just above, so no task from this test
     // can race this mutation. `#[serial]` additionally serialises this
     // against the other `#[serial]` tests here.
@@ -137,7 +137,7 @@ async fn info_route_uses_app_version_env_and_configured_environment() {
 async fn spa_deep_link_returns_index_html() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), b"<html></html>").unwrap();
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     // `static_dir` is threaded through `app()` directly (from
     // `ServerConfig` in production) rather than a raw env var.
@@ -167,7 +167,7 @@ async fn spa_document_is_served_with_cache_control_no_cache() {
     // A fingerprinted asset alongside it, to prove the header is scoped to the
     // document and does not defeat caching of everything else.
     std::fs::write(dir.path().join("app-abc123.js"), b"console.log(1)").unwrap();
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     let router = app(
         state,
@@ -210,7 +210,7 @@ async fn api_unknown_route_returns_404_not_spa_fallback() {
 /// An app with browser auth switched on, built without any network: the
 /// provider endpoints are fixed strings and nothing here fetches the JWKS.
 async fn auth_enabled_app(deployment: DeploymentInfo) -> TestServer {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let auth = crate::auth::AuthConfig {
         issuer_url: "https://idp.invalid/application/o/bored-test/".to_string(),
         client_id: "bored-test".to_string(),
@@ -281,7 +281,7 @@ async fn info_reports_client_telemetry_on_with_an_endpoint_and_auth() {
 async fn client_telemetry_needs_auth_even_with_an_endpoint() {
     // Auth disabled: there is no session to hand a bearer out from, so the
     // SPA is told "off" and the token route has nothing to give.
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let deployment = DeploymentInfo::new("dev", None)
         .with_client_telemetry(Some("https://bored-dev.example".to_string()));
     let server = TestServer::new(app(AppState::new(db), "./dist", deployment).await).unwrap();
@@ -313,7 +313,7 @@ async fn telemetry_token_route_is_behind_the_auth_middleware() {
 #[tokio::test]
 async fn a_panic_in_run_becomes_a_logged_startup_error() {
     let (outcome, logs) = capture_logs_async(async {
-        crate::guarded(async {
+        crate::guarded::<()>(async {
             panic!("secret-startup-detail");
         })
         .await

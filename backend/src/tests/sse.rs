@@ -24,7 +24,7 @@ async fn recv_next_non_audit_board_event(
 // correct event arrives with the right payload.
 #[tokio::test]
 async fn mutations_emit_sse_events() {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     // Subscribe *before* making requests so we don't miss any events.
     let mut rx = state.events.subscribe();
@@ -267,7 +267,7 @@ async fn server_with_events() -> (
     TestServer,
     tokio::sync::broadcast::Sender<crate::events::BroadcastEvent>,
 ) {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db);
     // `Sender` is a cheap handle onto the same channel; the router takes
     // ownership of `state`, so keep our own copy of the sender first.

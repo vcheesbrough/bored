@@ -1,72 +1,6 @@
-//! Audit log behaviour: baseline backfill, edit-session merging, history and restore.
+//! Audit log behaviour: edit-session merging, history and restore.
 
 use super::*;
-
-#[tokio::test]
-async fn audit_baseline_backfill_inserts_once_per_entity() {
-    let db = db::connect_mem().await.expect("mem db");
-    let bid = ulid::Ulid::new().to_string().to_lowercase();
-    let cid = ulid::Ulid::new().to_string().to_lowercase();
-    let kid = ulid::Ulid::new().to_string().to_lowercase();
-
-    db.query("CREATE type::thing('boards', $bid) SET name = $name, last_edited_by = $sub")
-        .bind(("bid", bid.clone()))
-        .bind(("name", format!("seed-{bid}")))
-        .bind(("sub", "preaudit-board-editor"))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-    db.query(
-        "CREATE type::thing('columns', $cid) SET board = type::thing('boards', $bid), \
-         name = $cname, position = 0, last_edited_by = $sub",
-    )
-    .bind(("cid", cid.clone()))
-    .bind(("bid", bid.clone()))
-    .bind(("cname", "Col"))
-    .bind(("sub", "preaudit-column-editor"))
-    .await
-    .unwrap()
-    .check()
-    .unwrap();
-
-    db.query(
-        "CREATE type::thing('cards', $kid) SET column = type::thing('columns', $cid), \
-         body = $body, position = 0, number = 1, last_edited_by = $sub",
-    )
-    .bind(("kid", kid.clone()))
-    .bind(("cid", cid.clone()))
-    .bind(("body", "hello"))
-    .bind(("sub", "preaudit-card-editor"))
-    .await
-    .unwrap()
-    .check()
-    .unwrap();
-
-    audit::migrate_audit_baselines(&db).await.unwrap();
-
-    let baselines: Vec<crate::models::DbAuditLog> = db
-        .query("SELECT * FROM audit_log WHERE action = 'baseline' ORDER BY entity_type ASC")
-        .await
-        .unwrap()
-        .take(0)
-        .unwrap();
-    assert_eq!(baselines.len(), 3);
-
-    let board_row = baselines.iter().find(|r| r.entity_type == "board").unwrap();
-    assert_eq!(board_row.entity_id, bid);
-    assert_eq!(board_row.actor_sub, "preaudit-board-editor");
-
-    audit::migrate_audit_baselines(&db).await.unwrap();
-    let baselines_again: Vec<crate::models::DbAuditLog> = db
-        .query("SELECT * FROM audit_log WHERE action = 'baseline'")
-        .await
-        .unwrap()
-        .take(0)
-        .unwrap();
-    assert_eq!(baselines_again.len(), 3);
-}
 
 #[tokio::test]
 async fn card_updates_same_audit_session_merge_into_one_row() {
@@ -379,7 +313,7 @@ async fn audit_restore_prior_card_body_preserves_card_identity_and_layout() {
 
 #[tokio::test]
 async fn audit_body_restore_rejects_invalid_or_current_versions() {
-    let db = db::connect_mem().await.expect("failed to connect mem db");
+    let db = db::connect_test().await.expect("failed to connect test db");
     let state = AppState::new(db.clone());
     let server =
         TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
@@ -407,20 +341,17 @@ async fn audit_body_restore_rejects_invalid_or_current_versions() {
         .assert_status(StatusCode::CONFLICT);
 
     let malformed_id = ulid::Ulid::new().to_string().to_lowercase();
-    db.query(
-        "CREATE type::thing('audit_log', $id) SET \
-         actor_sub = 'test', actor_display_name = 'Test', \
-         entity_type = 'card', entity_id = $entity_id, board_id = $board_id, \
-         action = 'update', snapshot_before = NONE, snapshot_after = $snapshot_after, \
-         restored_from = NONE, batch_group = NONE, audit_edit_session = NONE",
+    sqlx::query(
+        "INSERT INTO audit_log (id, actor_sub, actor_display_name, entity_type, entity_id, \
+         board_id, action, snapshot_after) \
+         VALUES ($1, 'test', 'Test', 'card', $2, $3, 'update', $4)",
     )
-    .bind(("id", malformed_id.clone()))
-    .bind(("entity_id", card.id.clone()))
-    .bind(("board_id", board.id.clone()))
-    .bind(("snapshot_after", serde_json::json!({ "id": card.id })))
+    .bind(&malformed_id)
+    .bind(&card.id)
+    .bind(&board.id)
+    .bind(sqlx::types::Json(serde_json::json!({ "id": card.id })))
+    .execute(&db)
     .await
-    .expect("insert malformed audit row")
-    .check()
     .expect("malformed audit row accepted by storage");
     server
         .post(&format!("/api/audit/{malformed_id}/restore"))

@@ -1,51 +1,65 @@
 //! What a failed request turns into: the status the caller sees, and — for an
 //! internal failure — the log line that says why.
 //!
-//! These tests feed `ApiError` *real* SurrealDB errors, provoked against a live
-//! in-memory database, rather than hand-built fixtures. The classifier matches
-//! on the driver's error text, so a fixture would only prove that the test
-//! agrees with itself; a real violation proves the substring is still there
-//! after a driver upgrade.
+//! These tests feed `ApiError` *real* Postgres errors, provoked against a live
+//! test database, rather than hand-built fixtures. The classifier matches on
+//! the server's SQLSTATE code and constraint name, so a fixture would only
+//! prove that the test agrees with itself; a real violation proves the fields
+//! are still where the classifier reads them after a driver upgrade.
 
 use axum::body::to_bytes;
 use axum::response::IntoResponse;
-use surrealdb::{Surreal, engine::local::Db};
 
 use super::*;
+use crate::db::Db;
 use crate::error::ApiError;
 
 /// Insert a board row directly, bypassing the routes. Returns whatever the
 /// driver said, so the caller can use it for either the happy or the failing
 /// write.
-async fn create_board_row(db: &Surreal<Db>, id: &str, name: &str) -> surrealdb::Result<()> {
-    db.query("CREATE type::thing('boards', $id) SET name = $name")
-        .bind(("id", id.to_string()))
-        .bind(("name", name.to_string()))
-        .await?
-        // Constraint violations arrive as a per-statement error inside an
-        // otherwise successful response; `check()` is what promotes them.
-        .check()?;
+async fn create_board_row(db: &Db, id: &str, name: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO boards (id, name) VALUES ($1, $2)")
+        .bind(id)
+        .bind(name)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
-/// As above for a link between two card ids. The ids need not exist — the
-/// `record<cards>` field type constrains the table, not the row.
+/// A board with one column (`col-1`) holding cards `card-a` and `card-b`,
+/// written directly — the parents the foreign keys require.
+async fn seed_cards(db: &Db) {
+    create_board_row(db, "b1", "board").await.expect("board");
+    sqlx::query(
+        "INSERT INTO columns (id, board_id, name, position) VALUES ('col-1', 'b1', 'c', 0)",
+    )
+    .execute(db)
+    .await
+    .expect("column");
+    for id in ["card-a", "card-b"] {
+        sqlx::query(
+            "INSERT INTO cards (id, column_id, body, position) VALUES ($1, 'col-1', 'b', 1)",
+        )
+        .bind(id)
+        .execute(db)
+        .await
+        .expect("card");
+    }
+}
+
+/// As [`create_board_row`] for a link between two card ids.
 async fn create_link_row(
-    db: &Surreal<Db>,
+    db: &Db,
     id: &str,
     predecessor: &str,
     successor: &str,
-) -> surrealdb::Result<()> {
-    db.query(
-        "CREATE type::thing('card_links', $id) SET \
-         predecessor = type::thing('cards', $pred), \
-         successor = type::thing('cards', $succ)",
-    )
-    .bind(("id", id.to_string()))
-    .bind(("pred", predecessor.to_string()))
-    .bind(("succ", successor.to_string()))
-    .await?
-    .check()?;
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO card_links (id, predecessor_id, successor_id) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(predecessor)
+        .bind(successor)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -60,7 +74,7 @@ async fn body_text(response: axum::response::Response) -> String {
 
 #[tokio::test]
 async fn a_duplicate_board_name_is_a_bodiless_conflict() {
-    let db = db::connect_mem().await.expect("mem db");
+    let db = db::connect_test().await.expect("test db");
     create_board_row(&db, "b1", "same-name")
         .await
         .expect("first board is accepted");
@@ -82,7 +96,8 @@ async fn a_duplicate_board_name_is_a_bodiless_conflict() {
 
 #[tokio::test]
 async fn a_duplicate_link_pair_is_a_conflict_that_says_why() {
-    let db = db::connect_mem().await.expect("mem db");
+    let db = db::connect_test().await.expect("test db");
+    seed_cards(&db).await;
     create_link_row(&db, "l1", "card-a", "card-b")
         .await
         .expect("first link is accepted");
@@ -94,23 +109,23 @@ async fn a_duplicate_link_pair_is_a_conflict_that_says_why() {
     let response = ApiError::from(error).into_response();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     // The same body `routes::links` returns when its own duplicate check wins
-    // the race against the index.
+    // the race against the constraint.
     assert_eq!(body_text(response).await, "these cards are already linked");
 }
 
 #[tokio::test]
 async fn any_other_database_error_is_a_logged_500() {
-    let db = db::connect_mem().await.expect("mem db");
+    let db = db::connect_test().await.expect("test db");
 
-    // "nonsense" stands in for anything a query text could hold. A parse
-    // error quotes the query back, so it must not reach the log.
-    let error = db
-        .query("SELEKT nonsense FROM")
+    // "SELEKT" stands in for anything a query text could hold. A syntax
+    // error quotes the query near the fault, so it must not reach the log.
+    let error = sqlx::query("SELEKT nonsense FROM")
+        .execute(&db)
         .await
         .expect_err("a malformed query fails to parse");
     assert!(
-        format!("{error:?}").contains("nonsense"),
-        "premise: the driver carries the query text, got: {error:?}"
+        format!("{error:?}").contains("SELEKT"),
+        "premise: the server quotes the query text back, got: {error:?}"
     );
 
     let api_error = ApiError::from(error);
@@ -138,9 +153,10 @@ async fn any_other_database_error_is_a_logged_500() {
         logs.contains("error.type") && logs.contains("db_engine"),
         "the log line must carry a typed error.type, got: {logs}"
     );
+    // 42601 is `syntax_error`: the class an operator needs, from a fixed table.
     assert!(
-        logs.contains("Db::InvalidQuery"),
-        "the log line must name the driver's error variant, got: {logs}"
+        logs.contains("sqlstate=42601"),
+        "the log line must carry the SQLSTATE code, got: {logs}"
     );
     // … but the query text does not.
     assert!(
@@ -168,7 +184,7 @@ async fn a_client_error_is_not_logged() {
 /// handler already returns for the neighbouring "that board still exists" case.
 #[tokio::test]
 async fn restoring_a_board_whose_name_was_taken_is_a_conflict() {
-    let db = db::connect_mem().await.expect("mem db");
+    let db = db::connect_test().await.expect("test db");
     let state = AppState::new(db.clone());
     let server =
         TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
@@ -196,19 +212,18 @@ async fn restoring_a_board_whose_name_was_taken_is_a_conflict() {
 
     // The delete row is no longer reachable through `/history` — that slug now
     // resolves to the replacement board — so read it out of the log directly.
-    let rows: Vec<models::DbAuditLog> = db
-        .query("SELECT * FROM audit_log WHERE entity_type = 'board' AND action = 'delete'")
-        .await
-        .expect("audit log is readable")
-        .take(0)
-        .expect("audit rows deserialize");
+    let rows: Vec<models::DbAuditLog> =
+        sqlx::query_as("SELECT * FROM audit_log WHERE entity_type = 'board' AND action = 'delete'")
+            .fetch_all(&db)
+            .await
+            .expect("audit log is readable");
     let delete_row = rows
         .iter()
         .find(|row| row.entity_id == board.id)
         .expect("the first board's delete row");
 
     server
-        .post(&format!("/api/audit/{}/restore", delete_row.id.id.to_raw()))
+        .post(&format!("/api/audit/{}/restore", delete_row.id))
         .await
         .assert_status(StatusCode::CONFLICT);
 }
@@ -222,7 +237,7 @@ async fn restoring_a_board_whose_name_was_taken_is_a_conflict() {
 /// no method or path at all.
 #[tokio::test]
 async fn a_failing_request_logs_its_method_and_path() {
-    let db = db::connect_mem().await.expect("mem db");
+    let db = db::connect_test().await.expect("test db");
     let state = AppState::new(db.clone());
     let server =
         TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
@@ -236,20 +251,11 @@ async fn a_failing_request_logs_its_method_and_path() {
         .await
         .assert_status(StatusCode::CREATED);
 
-    // Make the stored row impossible to read back: drop the field definition
-    // that guarantees `body`, then clear the value. Listing the column's cards
-    // now fails inside the driver, which is as close to a production database
-    // fault as a test can get.
-    db.query("REMOVE FIELD body ON TABLE cards")
-        .await
-        .expect("field removed")
-        .check()
-        .expect("no statement error");
-    db.query("UPDATE cards SET body = NONE")
-        .await
-        .expect("body cleared")
-        .check()
-        .expect("no statement error");
+    // Make the stored row impossible to read back: drop the constraint that
+    // guarantees `body`, then clear the value. Listing the column's cards now
+    // fails decoding a NULL into a `String`, which is as close to a production
+    // database fault as a test can get.
+    break_card_bodies(&db).await;
 
     let path = format!("/api/columns/{}/cards", column.id);
     // A query string the route ignores, standing in for the OAuth `code` that
@@ -279,53 +285,60 @@ async fn a_failing_request_logs_its_method_and_path() {
     );
 }
 
-/// User text must not be able to impersonate an index violation.
+/// User text must not be able to impersonate a constraint violation.
 ///
-/// SurrealDB quotes the offending value back in several of its messages, and
-/// those values are things a card body, tag or link reason can hold. A bare
-/// `contains("card_links_pair")` would read the value below as a duplicate
-/// link and answer 409 — a status this crate deliberately does not log, so the
-/// server fault would vanish. Matching the index name in its own position
-/// keeps that unreachable.
+/// The classifier reads the constraint *name* from a structured field, never
+/// from the message — but the message and detail do quote values, and those
+/// are things a card body, tag or link reason can hold. Here the duplicate
+/// *value* spells `card_links_pair` under a constraint the API does not
+/// translate; it must stay a 500, not become the 409 (a status this crate
+/// deliberately does not log) that would make the server fault vanish.
 #[tokio::test]
-async fn user_text_cannot_impersonate_an_index_violation() {
-    let db = db::connect_mem().await.expect("mem db");
-
-    let error = db
-        .query(
-            "CREATE type::thing('cards', 'c1') SET \
-             column = type::thing('columns', 'col-1'), \
-             body = 'b', \
-             position = 'card_links_pair'",
+async fn user_text_cannot_impersonate_a_constraint_violation() {
+    let db = db::connect_test().await.expect("test db");
+    seed_cards(&db).await;
+    sqlx::query(
+        "CREATE UNIQUE INDEX test_body_unique ON cards (body) WHERE body = 'card_links_pair'",
+    )
+    .execute(&db)
+    .await
+    .expect("index created");
+    let insert = |id: &'static str| {
+        sqlx::query(
+            "INSERT INTO cards (id, column_id, body, position) \
+             VALUES ($1, 'col-1', 'card_links_pair', 1)",
         )
+        .bind(id)
+        .execute(&db)
+    };
+    insert("c1").await.expect("first card accepted");
+    let error = insert("c2")
         .await
-        .expect("query dispatched")
-        .check()
-        .expect_err("position is an int, not a string");
+        .expect_err("the unique index rejects the second");
 
-    // The premise of the test: the index name really is in the message, as a
-    // value. Without this the assertion below would pass for the wrong reason.
+    // The premise of the test: the name really is in the error, as a value.
+    // Without this the assertion below would pass for the wrong reason.
     assert!(
-        error.to_string().contains("card_links_pair"),
-        "expected the driver to quote the value back, got: {error}"
+        format!("{error:?}").contains("card_links_pair"),
+        "expected the driver to quote the value back, got: {error:?}"
     );
 
     assert!(
         matches!(ApiError::from(error), ApiError::Internal(_)),
-        "a value that merely spells an index name is still a server fault"
+        "a value that merely spells a constraint name is still a server fault"
     );
 }
 
 // ── What a 500's log line may say (card #366) ───────────────────────────────
 //
-// Each test below provokes a *real* driver error whose message quotes a
-// sensitive value, and checks the emitted line from two sides:
+// Each test below provokes a *real* driver error that quotes a sensitive
+// value, and checks the emitted line from two sides:
 //
 // * the value is absent — the redaction works;
-// * the variant, the identifiers and the `error.type` are present — the
+// * the SQLSTATE code, the identifiers and the `error.type` are present — the
 //   redaction did not throw away what #348 added.
 //
-// The premise is asserted too (the raw driver message really does contain the
+// The premise is asserted too (the raw driver error really does contain the
 // value), so a driver upgrade that stopped quoting values would make these
 // tests fail loudly rather than pass for the wrong reason.
 
@@ -333,134 +346,125 @@ async fn user_text_cannot_impersonate_an_index_violation() {
 /// in a log line can only mean user content leaked into it.
 const SENSITIVE: &str = "SECRET-card-body-7f3a";
 
-#[tokio::test]
-async fn a_failed_field_assert_keeps_field_and_record_but_not_the_value() {
-    let db = db::connect_mem().await.expect("mem db");
-
-    // An ASSERT clause makes the driver raise `FieldValue` (rather than
-    // `FieldCheck`, which is the type check): "Found '<value>' for field
-    // `probe`, with record `cards:c1`, but field must conform to: …".
-    db.query(
-        "DEFINE FIELD probe ON cards TYPE option<string> ASSERT $value = NONE OR $value = 'ok'",
-    )
-    .await
-    .expect("field defined")
-    .check()
-    .expect("no statement error");
-    let error = db
-        .query(
-            "CREATE type::thing('cards', 'c1') SET \
-             column = type::thing('columns', 'col-1'), \
-             body = 'b', position = 1, probe = $text",
-        )
-        .bind(("text", SENSITIVE))
+/// Drop `cards.body`'s NOT NULL and clear every body, so any read of a card
+/// fails to decode — a genuine 500 from inside the driver.
+async fn break_card_bodies(db: &Db) {
+    sqlx::query("ALTER TABLE cards ALTER COLUMN body DROP NOT NULL")
+        .execute(db)
         .await
-        .expect("dispatched")
-        .check()
-        .expect_err("the assert rejects the value");
-    assert!(
-        format!("{error:?}").starts_with("Db(FieldValue"),
-        "premise: this is the FieldValue arm, got: {error:?}"
-    );
-    assert!(
-        error.to_string().contains(SENSITIVE),
-        "premise: the driver quotes the value back, got: {error}"
-    );
-
-    let logs = logged_line_for(error);
-
-    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
-    assert!(logs.contains("Db::FieldValue"), "variant missing: {logs}");
-    assert!(logs.contains("field=probe"), "field missing: {logs}");
-    assert!(
-        logs.contains("record=cards:c1"),
-        "record id missing: {logs}"
-    );
+        .expect("constraint dropped");
+    sqlx::query("UPDATE cards SET body = NULL")
+        .execute(db)
+        .await
+        .expect("bodies cleared");
 }
 
-/// The driver's client-layer arm (`surrealdb::Error::Api`). `LossyTake` —
-/// asking for one row from a result holding several — carries the whole
-/// response in the error, card bodies included, so it is reduced to its
-/// variant path only.
 #[tokio::test]
-async fn a_client_layer_error_keeps_only_its_variant() {
-    let db = db::connect_mem().await.expect("mem db");
-    for id in ["c1", "c2"] {
-        db.query(
-            "CREATE type::thing('cards', $id) SET \
-             column = type::thing('columns', 'col-1'), \
-             body = $text, position = 1",
-        )
-        .bind(("id", id))
-        .bind(("text", SENSITIVE))
-        .await
-        .expect("dispatched")
-        .check()
-        .expect("card accepted");
-    }
+async fn a_failed_check_keeps_constraint_and_table_but_not_the_row() {
+    let db = db::connect_test().await.expect("test db");
+    seed_cards(&db).await;
 
-    // `Option<_>` asks for at most one row; there are two.
-    let error = db
-        .query("SELECT * FROM cards")
+    // A CHECK violation's detail is "Failing row contains (…)" — every value
+    // of the rejected row, the card body included.
+    sqlx::query("ALTER TABLE cards ADD CONSTRAINT probe CHECK (body NOT LIKE 'SECRET%')")
+        .execute(&db)
         .await
-        .expect("dispatched")
-        .take::<Option<crate::models::DbCard>>(0)
-        .expect_err("two rows cannot become one");
+        .expect("constraint added");
+    let error = sqlx::query(
+        "INSERT INTO cards (id, column_id, body, position) VALUES ('c1', 'col-1', $1, 1)",
+    )
+    .bind(SENSITIVE)
+    .execute(&db)
+    .await
+    .expect_err("the check rejects the value");
     assert!(
         format!("{error:?}").contains(SENSITIVE),
-        "premise: the error carries the rows, got: {error:?}"
-    );
-    assert!(
-        format!("{error:?}").starts_with("Api("),
-        "premise: this is the client-layer arm, got: {error:?}"
-    );
-
-    let logs = logged_line_for(error);
-
-    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
-    assert!(logs.contains("db_client"), "error.type missing: {logs}");
-    assert!(logs.contains("Api::LossyTake"), "variant missing: {logs}");
-}
-
-#[tokio::test]
-async fn a_duplicate_record_id_names_the_record() {
-    let db = db::connect_mem().await.expect("mem db");
-    let create = || {
-        db.query(
-            "CREATE type::thing('cards', 'c1') SET \
-             column = type::thing('columns', 'col-1'), \
-             body = $text, position = 1",
-        )
-        .bind(("text", SENSITIVE))
-    };
-    create()
-        .await
-        .expect("dispatched")
-        .check()
-        .expect("first card accepted");
-    let error = create()
-        .await
-        .expect("dispatched")
-        .check()
-        .expect_err("the id is taken");
-    assert!(
-        format!("{error:?}").starts_with("Db(RecordExists"),
-        "premise: this is the RecordExists arm, got: {error:?}"
+        "premise: the driver carries the row's values, got: {error:?}"
     );
 
     let logs = logged_line_for(error);
 
     assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
     assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
-    assert!(logs.contains("Db::RecordExists"), "variant missing: {logs}");
+    // 23514 is `check_violation`.
+    assert!(logs.contains("sqlstate=23514"), "code missing: {logs}");
     assert!(
-        logs.contains("record=cards:c1"),
-        "record id missing: {logs}"
+        logs.contains("constraint=probe"),
+        "constraint missing: {logs}"
+    );
+    assert!(logs.contains("table=cards"), "table missing: {logs}");
+}
+
+/// The driver's own side (`sqlx`): decoding a value into our types. A JSON
+/// decode error quotes the value it choked on, so it is reduced to the
+/// variant and the column name.
+#[tokio::test]
+async fn a_client_side_decode_error_keeps_only_variant_and_column() {
+    let db = db::connect_test().await.expect("test db");
+
+    // Decoded by column *name*, as every row type in `models.rs` is.
+    #[derive(Debug, sqlx::FromRow)]
+    struct Probe {
+        #[allow(dead_code)] // only ever fails to decode
+        probe: sqlx::types::Json<u32>,
+    }
+
+    // A string cannot become a `u32`; serde_json says so, quoting the string.
+    let error = sqlx::query_as::<_, Probe>("SELECT to_jsonb($1::text) AS probe")
+        .bind(SENSITIVE)
+        .fetch_one(&db)
+        .await
+        .expect_err("a string is not a u32");
+    assert!(
+        format!("{error:?}").contains(SENSITIVE),
+        "premise: the error carries the value, got: {error:?}"
+    );
+    assert!(
+        format!("{error:?}").starts_with("ColumnDecode"),
+        "premise: this is the decode arm, got: {error:?}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("db_client"), "error.type missing: {logs}");
+    assert!(logs.contains("ColumnDecode"), "variant missing: {logs}");
+    assert!(logs.contains("column=probe"), "column missing: {logs}");
+}
+
+#[tokio::test]
+async fn a_duplicate_primary_key_names_the_constraint_not_the_key() {
+    let db = db::connect_test().await.expect("test db");
+    seed_cards(&db).await;
+    // The duplicate *key* is quoted in the error's detail ("Key (id)=(…)
+    // already exists"), so the id itself stands in for user content here.
+    let create = || {
+        sqlx::query(
+            "INSERT INTO cards (id, column_id, body, position) VALUES ($1, 'col-1', 'b', 1)",
+        )
+        .bind(SENSITIVE)
+        .execute(&db)
+    };
+    create().await.expect("first card accepted");
+    let error = create().await.expect_err("the id is taken");
+    assert!(
+        format!("{error:?}").contains(SENSITIVE),
+        "premise: the detail quotes the key, got: {error:?}"
+    );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
+    assert!(logs.contains("sqlstate=23505"), "code missing: {logs}");
+    assert!(
+        logs.contains("constraint=cards_pkey"),
+        "constraint missing: {logs}"
     );
 }
 
 /// Turn a database error into the log line an operator would see.
-fn logged_line_for(error: surrealdb::Error) -> String {
+fn logged_line_for(error: sqlx::Error) -> String {
     let api_error = ApiError::from(error);
     assert!(
         matches!(api_error, ApiError::Internal(_)),
@@ -472,91 +476,122 @@ fn logged_line_for(error: surrealdb::Error) -> String {
 }
 
 #[tokio::test]
-async fn a_card_body_quoted_in_a_field_error_never_reaches_the_log() {
-    let db = db::connect_mem().await.expect("mem db");
+async fn a_card_body_quoted_in_a_conversion_error_never_reaches_the_log() {
+    let db = db::connect_test().await.expect("test db");
 
-    // `position` is an int; putting user text there makes SurrealDB answer
-    // "Found '<text>' for field `position`, with record `cards:c1`, …".
-    let error = db
-        .query(
-            "CREATE type::thing('cards', 'c1') SET \
-             column = type::thing('columns', 'col-1'), \
-             body = 'b', \
-             position = $text",
-        )
-        .bind(("text", SENSITIVE))
+    // Text where an integer belongs: Postgres answers `invalid input syntax
+    // for type integer: "<text>"`.
+    let error = sqlx::query("SELECT $1::integer")
+        .bind(SENSITIVE)
+        .execute(&db)
         .await
-        .expect("query dispatched")
-        .check()
-        .expect_err("position is an int, not a string");
+        .expect_err("the text is not an integer");
     assert!(
-        error.to_string().contains(SENSITIVE),
-        "premise: the driver quotes the value back, got: {error}"
+        format!("{error:?}").contains(SENSITIVE),
+        "premise: the server quotes the value back, got: {error:?}"
     );
 
     let logs = logged_line_for(error);
 
     assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
-    // What an operator still gets: the kind, the variant, which field and
-    // which record.
-    assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
-    assert!(logs.contains("Db::FieldCheck"), "variant missing: {logs}");
-    assert!(logs.contains("field=position"), "field missing: {logs}");
-    assert!(
-        logs.contains("record=cards:c1"),
-        "record id missing: {logs}"
-    );
+    // What an operator still gets: the kind and the code (22P02 is
+    // `invalid_text_representation`, a data error rather than a constraint).
+    assert!(logs.contains("db_engine"), "error.type missing: {logs}");
+    assert!(logs.contains("sqlstate=22P02"), "code missing: {logs}");
 }
 
 #[tokio::test]
-async fn an_unmapped_unique_index_keeps_index_and_record_but_not_the_value() {
-    let db = db::connect_mem().await.expect("mem db");
+async fn an_unmapped_unique_index_keeps_index_and_table_but_not_the_value() {
+    let db = db::connect_test().await.expect("test db");
+    seed_cards(&db).await;
 
     // A unique index `classify` does not translate into a 409, so a
     // violation of it is a 500 — the path whose log line must be redacted.
-    db.query("DEFINE INDEX test_body_unique ON cards FIELDS body UNIQUE")
+    sqlx::query("CREATE UNIQUE INDEX test_body_unique ON cards (body) WHERE body <> 'b'")
+        .execute(&db)
         .await
-        .expect("index defined")
-        .check()
-        .expect("no statement error");
+        .expect("index created");
     let create = |id: &'static str| {
-        db.query(
-            "CREATE type::thing('cards', $id) SET \
-             column = type::thing('columns', 'col-1'), \
-             body = $text, \
-             position = 1",
-        )
-        .bind(("id", id))
-        .bind(("text", SENSITIVE))
+        sqlx::query("INSERT INTO cards (id, column_id, body, position) VALUES ($1, 'col-1', $2, 1)")
+            .bind(id)
+            .bind(SENSITIVE)
+            .execute(&db)
     };
-    create("c1")
-        .await
-        .expect("dispatched")
-        .check()
-        .expect("first card accepted");
+    create("c1").await.expect("first card accepted");
     let error = create("c2")
         .await
-        .expect("dispatched")
-        .check()
         .expect_err("the unique index rejects the duplicate body");
     assert!(
-        error.to_string().contains(SENSITIVE),
-        "premise: the driver quotes the value back, got: {error}"
+        format!("{error:?}").contains(SENSITIVE),
+        "premise: the detail quotes the value back, got: {error:?}"
     );
 
     let logs = logged_line_for(error);
 
     assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
-    assert!(logs.contains("Db::IndexExists"), "variant missing: {logs}");
+    assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
     assert!(
-        logs.contains("index=test_body_unique"),
+        logs.contains("constraint=test_body_unique"),
         "index missing: {logs}"
     );
-    // SurrealDB names the record that already holds the value.
+    assert!(logs.contains("table=cards"), "table missing: {logs}");
+}
+
+/// A foreign key the API does not translate (here: a link to a card that does
+/// not exist) is a 500 the log line can place: constraint and table, no
+/// values.
+#[tokio::test]
+async fn a_foreign_key_violation_names_its_constraint() {
+    let db = db::connect_test().await.expect("test db");
+    seed_cards(&db).await;
+    let error = sqlx::query(
+        "INSERT INTO card_links (id, predecessor_id, successor_id) VALUES ('l1', 'card-a', $1)",
+    )
+    .bind(SENSITIVE)
+    .execute(&db)
+    .await
+    .expect_err("there is no such card");
     assert!(
-        logs.contains("record=cards:c1"),
-        "record id missing: {logs}"
+        format!("{error:?}").contains(SENSITIVE),
+        "premise: the detail quotes the missing key, got: {error:?}"
     );
+
+    let logs = logged_line_for(error);
+
+    assert!(!logs.contains(SENSITIVE), "user content leaked: {logs}");
+    assert!(logs.contains("db_constraint"), "error.type missing: {logs}");
+    assert!(logs.contains("sqlstate=23503"), "code missing: {logs}");
+    assert!(
+        logs.contains("constraint=card_links_successor_id_fkey"),
+        "constraint missing: {logs}"
+    );
+}
+
+/// A card written into a column that is gone — a create racing the column's
+/// delete — is the 404 the route gives a missing column, not a 500.
+#[tokio::test]
+async fn a_card_for_a_vanished_column_is_not_found() {
+    let db = db::connect_test().await.expect("test db");
+    let error = sqlx::query(
+        "INSERT INTO cards (id, column_id, body, position) VALUES ('c1', 'gone', 'b', 1)",
+    )
+    .execute(&db)
+    .await
+    .expect_err("there is no such column");
+    // At a card-write call site, the missing column is the caller's 404 …
+    assert!(matches!(
+        crate::error::card_column_write_error(error),
+        ApiError::NotFound
+    ));
+    // … but the general classifier does not guess: the same constraint also
+    // blocks a column delete that still has cards, which is no 404.
+    let error = sqlx::query(
+        "INSERT INTO cards (id, column_id, body, position) VALUES ('c2', 'gone', 'b', 1)",
+    )
+    .execute(&db)
+    .await
+    .expect_err("there is no such column");
+    assert!(matches!(ApiError::from(error), ApiError::Internal(_)));
 }
 
 #[tokio::test]

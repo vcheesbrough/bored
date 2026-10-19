@@ -30,15 +30,20 @@
 //! then — and for the whole life of a process with telemetry off — every
 //! recording function below is a cheap no-op.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use axum::http::Method;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge, UpDownCounter};
-use opentelemetry_semantic_conventions::attribute::{
-    ERROR_TYPE, HTTP_REQUEST_METHOD, HTTP_RESPONSE_STATUS_CODE, HTTP_ROUTE, URL_SCHEME,
+use opentelemetry::metrics::{
+    Counter, Histogram, Meter, ObservableGauge, ObservableUpDownCounter, UpDownCounter,
 };
-use opentelemetry_semantic_conventions::metric::HTTP_SERVER_REQUEST_DURATION;
+use opentelemetry_semantic_conventions::attribute::{
+    DB_CLIENT_CONNECTION_POOL_NAME, DB_CLIENT_CONNECTION_STATE, ERROR_TYPE, HTTP_REQUEST_METHOD,
+    HTTP_RESPONSE_STATUS_CODE, HTTP_ROUTE, URL_SCHEME,
+};
+use opentelemetry_semantic_conventions::metric::{
+    DB_CLIENT_CONNECTION_COUNT, HTTP_SERVER_REQUEST_DURATION, PROCESS_MEMORY_USAGE,
+};
 
 use crate::error::ErrorType;
 
@@ -85,6 +90,14 @@ pub(crate) struct Instruments {
     /// Never read: an observable gauge reports through its callback, and is
     /// kept here only so it lives as long as the other instruments.
     _build_info: ObservableGauge<u64>,
+    /// `db.client.connection.count` — the Postgres pool's saturation signal
+    /// (card #471). Observable, like build info: read from the pool at each
+    /// collection rather than counted at each acquire.
+    _db_connections: ObservableUpDownCounter<i64>,
+    /// `process.memory.usage` — resident memory, read from `/proc` at each
+    /// collection (card #471: the SurrealDB leak was invisible because the
+    /// host only reported its root cgroup).
+    _process_memory: ObservableUpDownCounter<i64>,
 }
 
 impl Instruments {
@@ -141,6 +154,41 @@ impl Instruments {
             .with_callback(move |observer| observer.observe(1, &build_attributes))
             .build();
 
+        // semconv: an up-down counter in `{connection}`, one series per
+        // `db.client.connection.state`, named by `db.client.connection.pool.name`.
+        // Nothing is observed until `watch_pool` has been handed a pool.
+        let db_connections = meter
+            .i64_observable_up_down_counter(DB_CLIENT_CONNECTION_COUNT)
+            .with_unit("{connection}")
+            .with_description("Database connections in the pool, by state.")
+            .with_callback(|observer| {
+                let Some((used, idle)) = pool_usage() else {
+                    return;
+                };
+                for (state, count) in [(PoolState::Used, used), (PoolState::Idle, idle)] {
+                    observer.observe(
+                        count,
+                        &[
+                            KeyValue::new(DB_CLIENT_CONNECTION_POOL_NAME, POOL_NAME),
+                            KeyValue::new(DB_CLIENT_CONNECTION_STATE, state.label()),
+                        ],
+                    );
+                }
+            })
+            .build();
+        // semconv: an up-down counter in bytes. Skipped (no observation) on a
+        // platform without `/proc`, rather than reporting a made-up zero.
+        let process_memory = meter
+            .i64_observable_up_down_counter(PROCESS_MEMORY_USAGE)
+            .with_unit("By")
+            .with_description("The amount of physical memory in use (resident set size).")
+            .with_callback(|observer| {
+                if let Some(bytes) = resident_bytes() {
+                    observer.observe(bytes, &[]);
+                }
+            })
+            .build();
+
         Self {
             http_server_request_duration,
             sse_subscribers,
@@ -149,6 +197,8 @@ impl Instruments {
             db_errors,
             auth_outcomes,
             _build_info: build_info,
+            _db_connections: db_connections,
+            _process_memory: process_memory,
         }
     }
 
@@ -270,6 +320,89 @@ pub(crate) fn db_error(error_type: ErrorType) {
             .db_errors
             .add(1, &[KeyValue::new(ERROR_TYPE, error_type.as_str())]);
     }
+}
+
+/// The `db.client.connection.pool.name` of bored's one pool. A constant: there
+/// is exactly one pool, so the label has exactly one value.
+const POOL_NAME: &str = "bored";
+
+/// `db.client.connection.state`: the two states semconv defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PoolState {
+    Used,
+    Idle,
+}
+
+impl PoolState {
+    /// Every variant, for the every-variant label test.
+    #[cfg(test)]
+    pub(crate) const ALL: [PoolState; 2] = [PoolState::Used, PoolState::Idle];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            PoolState::Used => "used",
+            PoolState::Idle => "idle",
+        }
+    }
+}
+
+/// The pool `db.client.connection.count` reports on. A `Mutex<Option<..>>`
+/// rather than a `OnceLock` so the most recent pool wins: production opens
+/// exactly one, while each test opens its own and only needs *a* pool to be
+/// reported.
+static WATCHED_POOL: Mutex<Option<sqlx::PgPool>> = Mutex::new(None);
+
+/// Report `pool`'s connections as `db.client.connection.count`. Called by
+/// `db::connect` once the pool exists. Holding a clone keeps nothing alive
+/// that the process was not keeping anyway: it is the process's one pool.
+pub(crate) fn watch_pool(pool: sqlx::PgPool) {
+    // A poisoned lock only means another thread panicked mid-swap; the value
+    // inside is still a whole `Option`, so carry on with it.
+    *WATCHED_POOL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(pool);
+}
+
+/// `(used, idle)` connections in the watched pool, or `None` before
+/// [`watch_pool`] has run.
+fn pool_usage() -> Option<(i64, i64)> {
+    let guard = WATCHED_POOL
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    guard.as_ref().map(pool_usage_of)
+}
+
+/// `(used, idle)` connections in `pool`. `size()` counts every open
+/// connection, idle ones included, so the used count is the difference.
+pub(crate) fn pool_usage_of(pool: &sqlx::PgPool) -> (i64, i64) {
+    let size = i64::from(pool.size());
+    // `num_idle` is a `usize`; a pool is capped at a handful of connections,
+    // so the conversion cannot fail in practice — saturate if it ever did.
+    let idle = i64::try_from(pool.num_idle()).unwrap_or(i64::MAX);
+    ((size - idle).max(0), idle)
+}
+
+/// The process's resident set size in bytes, from the `VmRSS` line of
+/// `/proc/self/status` (which the kernel reports in kB), or `None` where that
+/// file does not exist or does not parse.
+pub(crate) fn resident_bytes() -> Option<i64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_vm_rss(&status)
+}
+
+/// The `VmRSS:   12345 kB` line of a `/proc/<pid>/status` text, in bytes.
+/// Split out so the parsing is tested against fixed text, not against the
+/// test process's own (unknowable) memory.
+pub(crate) fn parse_vm_rss(status: &str) -> Option<i64> {
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let mut fields = line["VmRSS:".len()..].split_whitespace();
+    let kilobytes: i64 = fields.next()?.parse().ok()?;
+    // The kernel always writes `kB` (meaning KiB); anything else is a format
+    // this parser does not understand, so report nothing rather than guess.
+    if fields.next()? != "kB" {
+        return None;
+    }
+    kilobytes.checked_mul(1024)
 }
 
 /// One authentication decision on a protected request.

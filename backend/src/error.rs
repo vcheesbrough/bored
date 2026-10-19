@@ -19,27 +19,54 @@
 //!    The cause is reduced to an [`ErrorType`] and a redacted description at
 //!    the moment it becomes an `ApiError::Internal` — never later, and never
 //!    per call site. The raw driver message is not kept at all, because
-//!    SurrealDB quotes the offending *value* back (a card body, a tag, a link
-//!    reason) and a parse error quotes the *query*. See `crate::redact` for
-//!    the policy itself.
+//!    Postgres can quote the offending *value* back (`invalid input syntax for
+//!    type integer: "…"`, and a unique violation's detail names the duplicate
+//!    key). Only the SQLSTATE code and the constraint and table *names* are
+//!    kept. See `crate::redact` for the policy itself.
 
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use surrealdb::error::Db;
 
 use crate::redact;
 
-/// The name of the boards' unique index, as SurrealDB writes it into the
-/// rejection message. The driver offers nothing structured to match on — no
-/// error code, no index field — so this is a substring test on the message.
-/// Keeping it here means there is exactly one such test in the crate instead
-/// of one per site.
+/// The name of the boards' unique constraint (`backend/migrations/`). Postgres
+/// reports it as a structured field of the error, so matching it is an exact
+/// comparison, never a search through message text.
 const BOARD_NAME_UNIQUE: &str = "board_name_unique";
 
-/// As above, for the unique `(predecessor, successor)` index on `card_links`.
+/// As above, for the unique `(predecessor_id, successor_id)` constraint on
+/// `card_links`.
 const CARD_LINKS_PAIR: &str = "card_links_pair";
+
+/// SQLSTATE `23505`, `unique_violation`.
+const UNIQUE_VIOLATION: &str = "23505";
+
+/// SQLSTATE `23503`, `foreign_key_violation`.
+const FOREIGN_KEY_VIOLATION: &str = "23503";
+
+/// The foreign key from a card to its column.
+const CARDS_COLUMN_FKEY: &str = "cards_column_id_fkey";
+
+/// For a write that *puts a card into a column* (create, move, update): a
+/// violation of the card → column foreign key means the column vanished
+/// between the route's check and the write — a create racing the column's
+/// delete — and is the caller's 404, exactly what the route answers when it
+/// sees the column missing up front. Anything else classifies as usual.
+///
+/// Applied at those call sites only, not in [`classify`]: the same constraint
+/// also fires when a *column delete* finds cards still in it, which is an
+/// expected retry (`routes::cascade`), not a missing column.
+pub(crate) fn card_column_write_error(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(database) = &error
+        && database.code().as_deref() == Some(FOREIGN_KEY_VIOLATION)
+        && database.constraint() == Some(CARDS_COLUMN_FKEY)
+    {
+        return ApiError::NotFound;
+    }
+    classify(error)
+}
 
 /// The body the link routes return for a duplicate link. Lives here because
 /// both the classifier below and `routes::links` (which checks for duplicates
@@ -72,16 +99,19 @@ pub enum ErrorType {
     Conflict,
     /// 422 — well-formed request, but the values are not acceptable.
     Unprocessable,
-    /// 500 — the database rejected a write on a schema constraint (a unique
-    /// index, a field's type or `ASSERT`, a record that already exists) that
+    /// 500 — Postgres rejected a write on an integrity constraint (SQLSTATE
+    /// class `23`: a unique or foreign key, a `NOT NULL`, a `CHECK`) that
     /// bored does not translate into a client error.
     DbConstraint,
-    /// 500 — any other failure inside the embedded database engine: a query
-    /// that does not parse, a transaction conflict, a storage fault.
+    /// 500 — any other error Postgres itself reported: a statement that does
+    /// not parse, a serialization failure, a full disk.
     DbEngine,
-    /// 500 — the database driver's client layer (`surrealdb::Error::Api`):
-    /// turning a result into our types, or talking to the engine at all.
+    /// 500 — the driver's own side (`sqlx`): turning a row into our types, a
+    /// column that is missing, a protocol mismatch.
     DbClient,
+    /// 500 — the database could not be reached at all: no free connection
+    /// within the pool's timeout, a closed pool, or a broken socket.
+    DbUnavailable,
     /// 500 — `serde_json` failed on JSON we produced or read back ourselves.
     Serialization,
     /// 500 — a condition the code treats as impossible, described in words at
@@ -104,6 +134,7 @@ impl ErrorType {
             Self::DbConstraint => "db_constraint",
             Self::DbEngine => "db_engine",
             Self::DbClient => "db_client",
+            Self::DbUnavailable => "db_unavailable",
             Self::Serialization => "serialization",
             Self::Invariant => "invariant",
         }
@@ -184,22 +215,21 @@ impl ApiError {
 
 /// Decide what a database error means to the caller.
 ///
-/// This is the single place that inspects SurrealDB error text. A violated
-/// unique index is the client's problem (409); anything else — a broken query,
-/// an unreachable store, a deserialisation mismatch — is ours (500).
+/// This is the single place that inspects database errors. A violated unique
+/// constraint the API knows about is the client's problem (409); anything
+/// else — a broken query, an unreachable server, a decoding mismatch — is ours
+/// (500).
 ///
 /// Classifying centrally, rather than at the two call sites that used to do it,
-/// means a unique-index violation reported from anywhere gets the same answer
-/// the dedicated call site gave. Only the boards and card_links tables have
-/// unique indexes, so in practice the reachable behaviour is unchanged.
+/// means a unique violation reported from anywhere gets the same answer the
+/// dedicated call site gave. Only the boards and card_links tables have
+/// constraints the API translates, so in practice the reachable behaviour is
+/// unchanged.
 ///
-/// The match is on the index name *in its own position* in the driver's
-/// message — ``Database index `x` already contains 'y'`` — never on the bare
-/// name. The same message quotes the offending value, and that value is user
-/// text: a card body or link reason containing `card_links_pair` would
-/// otherwise be able to turn a genuine server fault into a 409, which is a
-/// status this module deliberately does not log.
-fn classify(error: surrealdb::Error) -> ApiError {
+/// The match is on the SQLSTATE code and the constraint *name*, both
+/// structured fields of the server's error — never on its message, which can
+/// quote user text.
+fn classify(error: sqlx::Error) -> ApiError {
     match unique_index_conflict(&error) {
         Some(conflict) => conflict,
         // The verbatim message is never kept. Only the redacted description
@@ -208,94 +238,112 @@ fn classify(error: surrealdb::Error) -> ApiError {
     }
 }
 
-/// The client-facing conflict a unique-index violation stands for, if `error`
-/// is one of the two this API translates; `None` for anything else.
-fn unique_index_conflict(error: &surrealdb::Error) -> Option<ApiError> {
-    // `to_string()` borrows the error; the text is dropped, unlogged, when
-    // this function returns.
-    let text = error.to_string();
-    if text.contains(&index_violation(BOARD_NAME_UNIQUE)) {
-        Some(ApiError::CONFLICT)
-    } else if text.contains(&index_violation(CARD_LINKS_PAIR)) {
-        Some(ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE)))
-    } else {
-        None
+/// The client-facing conflict a unique violation stands for, if `error` is one
+/// of the two this API translates; `None` for anything else.
+fn unique_index_conflict(error: &sqlx::Error) -> Option<ApiError> {
+    let sqlx::Error::Database(database) = error else {
+        return None;
+    };
+    match (database.code().as_deref(), database.constraint()) {
+        (Some(UNIQUE_VIOLATION), Some(BOARD_NAME_UNIQUE)) => Some(ApiError::CONFLICT),
+        (Some(UNIQUE_VIOLATION), Some(CARD_LINKS_PAIR)) => {
+            Some(ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE)))
+        }
+        _ => None,
     }
 }
 
-/// The [`ErrorType`] a database error would become as a response — without
-/// consuming it. The database span (`db.rs`) labels itself and the
-/// `bored.db.errors` metric with this, so a failed call and the request it
-/// fails carry the same class, from one classification rather than two.
-pub(crate) fn database_error_type(error: &surrealdb::Error) -> ErrorType {
+/// The [`ErrorType`] a database error would become as a response through the
+/// general classifier — without consuming it. The database span (`db.rs`)
+/// labels itself and the `bored.db.errors` metric with this.
+///
+/// It is what the *database* answered. A few call sites then turn such an
+/// answer into a different client error ([`card_column_write_error`], the
+/// restore's parent-gone 422, the link create's 404) or treat it as an
+/// expected retry (`routes::cascade`); there the request's server span carries
+/// the API's class and the db span keeps the database's. Recorded in
+/// AGENTS.md § Observability.
+pub(crate) fn database_error_type(error: &sqlx::Error) -> ErrorType {
     match unique_index_conflict(error) {
         Some(conflict) => conflict.error_type(),
         None => describe_database_error(error).error_type,
     }
 }
 
-/// The opening of SurrealDB's unique-index rejection for one index. Everything
-/// after this prefix in the driver's message is the value that was rejected.
-fn index_violation(index: &str) -> String {
-    format!("Database index `{index}`")
+/// The redacted one-line description of a database error — the same text a
+/// 500's log line carries (`postgres sqlstate=23505 constraint=… table=…`).
+/// For callers outside request handling, such as the SurrealDB import.
+pub(crate) fn database_error_description(error: &sqlx::Error) -> String {
+    describe_database_error(error).detail
 }
 
-/// Reduce a SurrealDB error to what the redaction policy lets through: its
-/// variant path (`Db::FieldCheck`), plus — for the constraint variants, which
-/// are the ones an operator most needs to place — the index or field name and
-/// the `table:id` of the record, read from the error's *fields*, not its text.
+/// Reduce a database error to what the redaction policy lets through.
 ///
-/// The outer `match` is exhaustive over the driver's two error kinds (`Db`,
-/// the embedded engine; `Api`, the client layer), so a third kind added by a
-/// driver upgrade fails to compile here. The inner engine enum has ~250
-/// variants and is `#[non_exhaustive]`, so it is matched only for the four
-/// that carry a record; every other engine error is reported by variant name
-/// alone.
-fn describe_database_error(error: &surrealdb::Error) -> InternalError {
-    // The variant path is read from `Debug`, which *does* contain values —
-    // but `variant_path` stops before the first of them. The full rendering
-    // lives only in this local and is dropped at the end of the function.
-    let variant = redact::variant_path(&format!("{error:?}"));
-
+/// For an error Postgres reported: its SQLSTATE code (five characters from a
+/// fixed table, e.g. `23503`), plus the constraint and table *names* when the
+/// server supplies them — the fields an operator needs to place the failure.
+/// The message and the `detail` field are never read: they quote values
+/// (`Key (name)=(…) already exists`).
+///
+/// For a driver-side error: the variant's name only. `sqlx::Error` is
+/// `#[non_exhaustive]`, so the wildcard arm classes anything a later sqlx
+/// adds as a client fault, named by `redact::variant_path`.
+fn describe_database_error(error: &sqlx::Error) -> InternalError {
     let (error_type, detail) = match error {
-        surrealdb::Error::Db(db) => match db {
-            // `{ thing, index, .. }` binds two fields by name and ignores the
-            // rest — including `value`, the user's text, which is never read.
-            Db::IndexExists { thing, index, .. } => (
-                ErrorType::DbConstraint,
-                format!(
-                    "{variant} index={} record={}",
-                    redact::identifier(index),
-                    redact::thing(thing)
-                ),
+        sqlx::Error::Database(database) => {
+            let code = database.code();
+            let code = code.as_deref().unwrap_or("unknown");
+            // Class `23` is "integrity constraint violation".
+            let error_type = if code.starts_with("23") {
+                ErrorType::DbConstraint
+            } else {
+                ErrorType::DbEngine
+            };
+            let mut detail = format!("postgres sqlstate={}", redact::identifier(code));
+            if let Some(constraint) = database.constraint() {
+                detail.push_str(&format!(" constraint={}", redact::identifier(constraint)));
+            }
+            if let Some(table) = database.table() {
+                detail.push_str(&format!(" table={}", redact::identifier(table)));
+            }
+            (error_type, detail)
+        }
+        sqlx::Error::PoolTimedOut => (ErrorType::DbUnavailable, "sqlx PoolTimedOut".to_string()),
+        sqlx::Error::PoolClosed => (ErrorType::DbUnavailable, "sqlx PoolClosed".to_string()),
+        sqlx::Error::Io(io) => (
+            ErrorType::DbUnavailable,
+            // The kind is an enum (`ConnectionRefused`, `TimedOut`, …); the
+            // OS message is left out with everything else free-form.
+            format!("sqlx Io kind={:?}", io.kind()),
+        ),
+        sqlx::Error::Tls(_) => (ErrorType::DbUnavailable, "sqlx Tls".to_string()),
+        // The column *name* is ours (it comes from the query), so it may be
+        // kept; the decode error itself can quote the value.
+        sqlx::Error::ColumnDecode { index, .. } => (
+            ErrorType::DbClient,
+            // sqlx renders a column named by string with its `Debug` quotes
+            // (`"body"`); a positional one is a bare number.
+            format!(
+                "sqlx ColumnDecode column={}",
+                redact::identifier(index.trim_matches('"'))
             ),
-            Db::RecordExists { thing } => (
-                ErrorType::DbConstraint,
-                format!("{variant} record={}", redact::thing(thing)),
-            ),
-            // `|` in a pattern matches either variant; both bind the same
-            // names with the same types, so one arm handles both. `value` and
-            // `check` are skipped: `check` for `FieldValue` is our ASSERT
-            // clause, which may quote literals from the schema.
-            Db::FieldCheck { thing, field, .. } | Db::FieldValue { thing, field, .. } => (
-                ErrorType::DbConstraint,
-                format!(
-                    "{variant} field={} record={}",
-                    redact::identifier(&field.to_string()),
-                    redact::record_string(thing)
-                ),
-            ),
-            _ => (ErrorType::DbEngine, variant),
-        },
-        surrealdb::Error::Api(_) => (ErrorType::DbClient, variant),
+        ),
+        sqlx::Error::ColumnNotFound(column) => (
+            ErrorType::DbClient,
+            format!("sqlx ColumnNotFound column={}", redact::identifier(column)),
+        ),
+        other => (
+            ErrorType::DbClient,
+            format!("sqlx {}", redact::variant_path(&format!("{other:?}"))),
+        ),
     };
     InternalError { error_type, detail }
 }
 
 /// Lets `?` turn a database error into an `ApiError` with no closure at the
 /// call site: this impl is what the `?` operator calls on the way out.
-impl From<surrealdb::Error> for ApiError {
-    fn from(error: surrealdb::Error) -> Self {
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> Self {
         classify(error)
     }
 }

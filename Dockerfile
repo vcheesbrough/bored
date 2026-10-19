@@ -66,6 +66,11 @@ RUN sh /app/scripts/test-publish-release-image.sh
 COPY scripts/prune-stale-e2e-projects.sh scripts/prune-stale-e2e-projects.sh
 COPY scripts/test-prune-stale-e2e-projects.sh scripts/test-prune-stale-e2e-projects.sh
 RUN sh /app/scripts/test-prune-stale-e2e-projects.sh
+# And the deploy's one-off SurrealDB import wrapper (card #471), tested the
+# same way with a fake `docker`.
+COPY scripts/migrate-from-surreal.sh scripts/migrate-from-surreal.sh
+COPY scripts/test-migrate-from-surreal.sh scripts/test-migrate-from-surreal.sh
+RUN sh /app/scripts/test-migrate-from-surreal.sh
 # Release tag burned into the WASM bundle (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # toolchain layer so a tag change doesn't bust the cargo-install-trunk cache.
@@ -154,13 +159,22 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
 # (see the `touch` above), so testing it here compiles an empty crate and
 # reports a cheerful `0 passed`. The frontend's tests run in frontend-builder,
 # which is the stage that actually copies `frontend/src`.
+#
+# The backend's tests need Postgres (card #471): one throwaway database per
+# test, created on the server the `database_url` secret names. The build runs
+# under scripts/with-test-postgres.sh, which starts that server beside it and
+# exports DATABASE_URL; `--secret id=database_url,env=DATABASE_URL` hands it
+# in. A secret rather than a build-arg so a new URL per run does not bust the
+# layer cache, and `required=true` so a build without one fails here, loudly,
+# instead of running a suite that cannot reach its database.
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
     --mount=type=secret,id=github_token \
+    --mount=type=secret,id=database_url,required=true \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo test -p backend -p shared
+    DATABASE_URL="$(cat /run/secrets/database_url)" cargo test -p backend -p shared
 # Release tag burned into the backend binary (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # fmt/clippy/test layers so a tag change only recompiles the crates that read it.
@@ -210,7 +224,9 @@ RUN openssl req -x509 -newkey rsa:4096 \
 ENV BORED__SERVER__TLS_CERT=/app/cert.pem
 ENV BORED__SERVER__TLS_KEY=/app/key.pem
 ENV BORED__SERVER__STATIC_DIR=/app/dist
-# SurrealKV's value cache. Left unset, SurrealDB sizes it at
+# SurrealKV's value cache — read now only by the one-off
+# `migrate-from-surreal` import (card #471), which opens the old store; remove
+# with it. Left unset, SurrealDB sizes it at
 # max(16 MiB, memory/2 − 1 GiB) — 14.5 GB on mini, with no container limit
 # (card #470). Board data is a few MB, so 64 MiB is ample. SurrealDB parses
 # the KiB/MiB/GiB suffix itself and silently falls back to that default on a

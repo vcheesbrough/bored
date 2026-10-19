@@ -10,7 +10,40 @@ use crate::db::{DbOperation, DbQuery, Traced as _};
 use crate::error::ApiError;
 use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbColumn};
+
+/// One column by id, or `None`. Shared by every handler here that starts from
+/// a column in the path.
+async fn load_column(
+    state: &AppState,
+    col_id: &str,
+    name: &'static str,
+) -> Result<Option<DbColumn>, ApiError> {
+    sqlx::query_as("SELECT * FROM columns WHERE id = $1")
+        .bind(col_id)
+        .fetch_optional(&state.db)
+        .traced(DbQuery::new(name, DbOperation::Select, "columns"))
+        .await
+        .map_err(ApiError::from)
+}
+
+/// A board's columns in display order. `id` breaks ties so two columns that
+/// share a position still come back in a stable order.
+async fn board_columns(
+    state: &AppState,
+    board_ulid: &str,
+    name: &'static str,
+) -> Result<Vec<DbColumn>, ApiError> {
+    sqlx::query_as("SELECT * FROM columns WHERE board_id = $1 ORDER BY position, id")
+        .bind(board_ulid)
+        .fetch_all(&state.db)
+        .traced(DbQuery::new(name, DbOperation::Select, "columns"))
+        .await
+        .map_err(ApiError::from)
+}
 use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
+use crate::routes::cascade::{
+    ATTEMPTS, Removed, STILL_BUSY, delete_cards, delete_parent, record_parent_delete,
+};
 
 #[tracing::instrument(skip_all, fields(bored.board.slug = %board_slug))]
 pub async fn list_columns(
@@ -21,21 +54,7 @@ pub async fn list_columns(
         Some(b) => b,
         None => return Err(ApiError::NotFound),
     };
-    let board_ulid = board.id.id.to_raw();
-
-    let columns: Vec<DbColumn> = state
-        .db
-        .query(
-            "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
-        )
-        .bind(("id", board_ulid))
-        .traced(DbQuery::new(
-            "columns.list_columns",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?
-        .take(0)?;
+    let columns = board_columns(&state, &board.id, "columns.list_columns").await?;
 
     Ok(Json(columns.into_iter().map(DbColumn::into_api).collect()))
 }
@@ -51,22 +70,36 @@ pub async fn create_column(
         Some(b) => b,
         None => return Err(ApiError::NotFound),
     };
-    let board_ulid = board.id.id.to_raw();
+    let board_ulid = board.id;
 
     let id = ulid::Ulid::new().to_string().to_lowercase();
     let editor = editor_sub(&claims);
 
-    let column: Option<DbColumn> = state
-        .db
-        .query("CREATE type::thing('columns', $id) SET board = type::thing('boards', $board_id), name = $name, position = $position, last_edited_by = $editor")
-        .bind(("id", id))
-        .bind(("board_id", board_ulid.clone()))
-        .bind(("name", payload.name))
-        .bind(("position", payload.position))
-        .bind(("editor", editor))
-        .traced(DbQuery::new("columns.create_column", DbOperation::Create, "columns"))
-        .await?
-        .take(0)?;
+    let column: Option<DbColumn> = sqlx::query_as(
+        "INSERT INTO columns (id, board_id, name, position, last_edited_by) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING *",
+    )
+    .bind(&id)
+    .bind(&board_ulid)
+    .bind(&payload.name)
+    .bind(payload.position)
+    .bind(&editor)
+    .fetch_optional(&state.db)
+    .traced(DbQuery::new(
+        "columns.create_column",
+        DbOperation::Insert,
+        "columns",
+    ))
+    .await
+    // The board can go between the lookup above and this insert (a create
+    // racing the board's delete): that is the 404 a missing board already
+    // gets, not a foreign-key 500.
+    .map_err(|error| match &error {
+        sqlx::Error::Database(database) if database.code().as_deref() == Some("23503") => {
+            ApiError::NotFound
+        }
+        _ => ApiError::from(error),
+    })?;
 
     match column {
         Some(c) => {
@@ -110,54 +143,39 @@ pub async fn update_column(
     claims: Extension<Claims>,
     Json(payload): Json<shared::UpdateColumnRequest>,
 ) -> Result<Json<shared::Column>, ApiError> {
-    let existing: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .traced(DbQuery::new(
-            "columns.update_column",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?;
+    let existing = load_column(&state, &col_id, "columns.update_column").await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
         Some(c) => c,
         None => return Err(ApiError::NotFound),
     };
-    let board_id = existing.board.id.to_raw();
+    let board_id = existing.board_id.clone();
 
-    // Build a partial update map from whichever fields were supplied.
-    let mut patch = serde_json::Map::new();
-    if let Some(name) = payload.name {
-        patch.insert("name".to_string(), serde_json::Value::String(name));
-    }
-    if let Some(position) = payload.position {
-        patch.insert(
-            "position".to_string(),
-            serde_json::Value::Number(position.into()),
-        );
-    }
-    if patch.is_empty() {
+    // A partial update: only the fields the request supplied change.
+    if payload.name.is_none() && payload.position.is_none() {
         return Ok(Json(existing.into_api()));
     }
     let snapshot_before = serde_json::to_value(existing.clone().into_api())?;
 
-    patch.insert(
-        "last_edited_by".to_string(),
-        serde_json::Value::String(editor_sub(&claims)),
-    );
-
-    let column: Option<DbColumn> = state
-        .db
-        .update(("columns", &col_id))
-        .merge(serde_json::Value::Object(patch))
-        .traced(DbQuery::new(
-            "columns.update_column",
-            DbOperation::Update,
-            "columns",
-        ))
-        .await?;
+    // `COALESCE($n, column)` keeps the stored value for a field the request
+    // left out (bound as NULL), so one fixed statement covers every
+    // combination.
+    let column: Option<DbColumn> = sqlx::query_as(
+        "UPDATE columns SET name = COALESCE($2, name), position = COALESCE($3, position), \
+         last_edited_by = $4 WHERE id = $1 RETURNING *",
+    )
+    .bind(&col_id)
+    .bind(payload.name.as_deref())
+    .bind(payload.position)
+    .bind(editor_sub(&claims))
+    .fetch_optional(&state.db)
+    .traced(DbQuery::new(
+        "columns.update_column",
+        DbOperation::Update,
+        "columns",
+    ))
+    .await?;
 
     match column {
         Some(c) => {
@@ -205,103 +223,63 @@ pub async fn delete_column(
     Path(col_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
-    let existing: Option<DbColumn> = state
-        .db
-        .select(("columns", &col_id))
-        .traced(DbQuery::new(
-            "columns.delete_column",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?;
+    let existing = load_column(&state, &col_id, "columns.delete_column").await?;
 
     // Destructure early to capture the board ID for the SSE event.
     let existing = match existing {
         Some(c) => c,
         None => return Err(ApiError::NotFound),
     };
-    let board_id = existing.board.id.to_raw();
+    let board_id = existing.board_id.clone();
     let batch = audit::new_batch_group();
 
-    let cards: Vec<DbCard> = state
-        .db
-        .query(
-            "SELECT * FROM cards WHERE column = type::thing('columns', $cid) ORDER BY position ASC",
-        )
-        .bind(("cid", col_id.clone()))
-        .traced(DbQuery::new(
-            "columns.delete_column",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
-
-    for card in cards {
-        let entity_id = card.id.id.to_raw();
-        // Links go first so their delete rows sit under the same batch as the
-        // card they belonged to.
-        crate::routes::links::cascade_delete_card_links(
+    // Sweep the column's cards, then delete the column — again if a card
+    // arrived in between (see `routes::cascade`). The column's own audit row
+    // is written only once it is really gone.
+    let mut removed = Removed::HasChildren;
+    for _ in 0..ATTEMPTS {
+        let cards: Vec<DbCard> =
+            sqlx::query_as("SELECT * FROM cards WHERE column_id = $1 ORDER BY position, id")
+                .bind(&col_id)
+                .fetch_all(&state.db)
+                .traced(DbQuery::new(
+                    "columns.delete_column",
+                    DbOperation::Select,
+                    "cards",
+                ))
+                .await?;
+        delete_cards(
             &state,
             &claims,
             &board_id,
-            &entity_id,
-            Some(&batch),
+            &batch,
+            cards,
+            "columns.delete_column",
         )
         .await?;
-        let snapshot_before = serde_json::to_value(card.clone().into_api())?;
-        audit::record_and_broadcast(
+        removed = delete_parent::<DbColumn>(
             &state.db,
-            &state.events,
-            audit::AuditRecord {
-                claims: &claims,
-                board_id: board_id.clone(),
-                entity_type: "card",
-                entity_id: &entity_id,
-                action: "delete",
-                snapshot_before: Some(snapshot_before),
-                snapshot_after: None,
-                restored_from: None,
-                batch_group: Some(batch.clone()),
-                audit_edit_session: None,
-            },
+            "DELETE FROM columns WHERE id = $1 RETURNING *",
+            &col_id,
+            DbQuery::new("columns.delete_column", DbOperation::Delete, "columns"),
         )
         .await?;
-
-        let _: Option<DbCard> = state
-            .db
-            .delete(("cards", &entity_id))
-            .traced(DbQuery::new(
-                "columns.delete_column",
-                DbOperation::Delete,
-                "cards",
-            ))
-            .await?;
+        if !matches!(removed, Removed::HasChildren) {
+            break;
+        }
     }
-
-    let col_snap = serde_json::to_value(existing.clone().into_api())?;
-    audit::record_and_broadcast(
-        &state.db,
-        &state.events,
-        audit::AuditRecord {
-            claims: &claims,
-            board_id: board_id.clone(),
-            entity_type: "column",
-            entity_id: &col_id,
-            action: "delete",
-            snapshot_before: Some(col_snap),
-            snapshot_after: None,
-            restored_from: None,
-            batch_group: Some(batch),
-            audit_edit_session: None,
-        },
-    )
-    .await?;
-
-    state
-        .db
-        .delete::<Option<DbColumn>>(("columns", &col_id))
-        .await?;
+    match removed {
+        Removed::HasChildren => return Err(STILL_BUSY),
+        // Someone else deleted it meanwhile; their delete has its own row.
+        Removed::Gone => {}
+        Removed::Deleted(deleted) => {
+            let col_snap = serde_json::to_value(deleted.into_api())?;
+            record_parent_delete(
+                &state, &claims, &board_id, "column", &col_id, col_snap, &batch,
+            )
+            .await?;
+        }
+    }
 
     let _ = state.events.send(BroadcastEvent {
         board_id,
@@ -331,7 +309,7 @@ pub async fn reorder_columns(
         Some(b) => b,
         None => return Err(ApiError::NotFound),
     };
-    let board_ulid = board.id.id.to_raw();
+    let board_ulid = board.id;
 
     let editor = editor_sub(&claims);
     let batch = audit::new_batch_group();
@@ -341,19 +319,11 @@ pub async fn reorder_columns(
     // silently no-ops (matches zero rows) rather than mutating another board's
     // state — preventing cross-board IDOR writes.
     for (index, col_id) in payload.order.iter().enumerate() {
-        let before: Option<DbColumn> = state
-            .db
-            .select(("columns", col_id.as_str()))
-            .traced(DbQuery::new(
-                "columns.reorder_columns",
-                DbOperation::Select,
-                "columns",
-            ))
-            .await?;
+        let before = load_column(&state, col_id, "columns.reorder_columns").await?;
         let Some(col_before) = before else {
             continue;
         };
-        if col_before.board.id.to_raw() != board_ulid {
+        if col_before.board_id != board_ulid {
             continue;
         }
         if col_before.position == index as i32 {
@@ -362,25 +332,23 @@ pub async fn reorder_columns(
 
         let snapshot_before = serde_json::to_value(col_before.into_api())?;
 
-        // Single RETURN AFTER so we never apply an UPDATE without a confirmed row for audit,
+        // Single RETURNING so we never apply an UPDATE without a confirmed row for audit,
         // and never skip auditing after a successful position write (second SELECT could yield None).
-        let updated: Vec<DbColumn> = state
-            .db
-            .query(
-                "UPDATE type::thing('columns', $id) SET position = $pos, last_edited_by = $editor \
-                 WHERE board = type::thing('boards', $board_id) RETURN AFTER",
-            )
-            .bind(("id", col_id.clone()))
-            .bind(("pos", index as i32))
-            .bind(("board_id", board_ulid.clone()))
-            .bind(("editor", editor.clone()))
-            .traced(DbQuery::new(
-                "columns.reorder_columns",
-                DbOperation::Update,
-                "columns",
-            ))
-            .await?
-            .take(0)?;
+        let updated: Vec<DbColumn> = sqlx::query_as(
+            "UPDATE columns SET position = $2, last_edited_by = $3 \
+             WHERE id = $1 AND board_id = $4 RETURNING *",
+        )
+        .bind(col_id)
+        .bind(index as i32)
+        .bind(&editor)
+        .bind(&board_ulid)
+        .fetch_all(&state.db)
+        .traced(DbQuery::new(
+            "columns.reorder_columns",
+            DbOperation::Update,
+            "columns",
+        ))
+        .await?;
         let mut it = updated.into_iter();
         let Some(col_after) = it.next() else {
             return Err(ApiError::internal("reorder update matched no column"));
@@ -412,19 +380,7 @@ pub async fn reorder_columns(
     }
 
     // Re-fetch the full ordered list so we can return it and broadcast it.
-    let columns: Vec<DbColumn> = state
-        .db
-        .query(
-            "SELECT * FROM columns WHERE board = type::thing('boards', $id) ORDER BY position ASC",
-        )
-        .bind(("id", board_ulid.clone()))
-        .traced(DbQuery::new(
-            "columns.reorder_columns",
-            DbOperation::Select,
-            "columns",
-        ))
-        .await?
-        .take(0)?;
+    let columns = board_columns(&state, &board_ulid, "columns.reorder_columns").await?;
 
     let api_cols: Vec<shared::Column> = columns.into_iter().map(DbColumn::into_api).collect();
 

@@ -8,9 +8,7 @@
 //! The arithmetic (`midpoint_position`, `needs_rebalance`) is pure and unit
 //! tested below; the `async` functions wrap it with the database reads/writes.
 
-use surrealdb::{Surreal, engine::local::Db};
-
-use crate::db::{DbOperation, DbQuery, Traced as _};
+use crate::db::{Db, DbOperation, DbQuery, Traced as _};
 use crate::models::DbCard;
 
 /// Gap between adjacent card positions in the sparse ordering scheme.
@@ -93,21 +91,27 @@ pub(super) struct Placement {
 /// Not audited: a renumber is storage housekeeping that preserves the order
 /// the user sees, not an action anyone took, and one audit row per card in the
 /// column would bury the move that caused it.
-async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<Vec<DbCard>, surrealdb::Error> {
-    let cards: Vec<DbCard> = db
-        .query(
-            "SELECT * FROM cards \
-             WHERE column = type::thing('columns', $col_id) \
-             ORDER BY position ASC",
-        )
-        .bind(("col_id", col_id.to_string()))
-        .traced(DbQuery::new(
-            "cards.rebalance_column",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+///
+/// One transaction, with the column's cards locked (`FOR UPDATE`) as they are
+/// read. That buys two things and no more: the renumbering lands all at once
+/// or not at all (never a half-renumbered column), and two rebalances of the
+/// same column run one after the other instead of interleaving. It does not
+/// serialise moves: a move computes its position from a read taken outside
+/// this transaction, as it always has, so two simultaneous moves into one gap
+/// can still pick the same position (positions have no unique constraint and
+/// `reorder_cards` repairs duplicates).
+async fn rebalance_column(db: &Db, col_id: &str) -> Result<Vec<DbCard>, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let cards: Vec<DbCard> =
+        sqlx::query_as("SELECT * FROM cards WHERE column_id = $1 ORDER BY position, id FOR UPDATE")
+            .bind(col_id)
+            .fetch_all(&mut *tx)
+            .traced(DbQuery::new(
+                "cards.rebalance_column",
+                DbOperation::Select,
+                "cards",
+            ))
+            .await?;
 
     let mut renumbered = Vec::new();
     for (i, card) in cards.iter().enumerate() {
@@ -118,48 +122,56 @@ async fn rebalance_column(db: &Surreal<Db>, col_id: &str) -> Result<Vec<DbCard>,
         if card.position == pos {
             continue;
         }
-        // `RETURN AFTER` hands back the row as stored, so what gets announced
+        // `RETURNING *` hands back the row as stored, so what gets announced
         // is exactly what was written.
-        let updated: Option<DbCard> = db
-            .query("UPDATE type::thing('cards', $id) SET position = $pos RETURN AFTER")
-            .bind(("id", card.id.id.to_raw()))
-            .bind(("pos", pos))
-            .traced(DbQuery::new(
-                "cards.rebalance_column",
-                DbOperation::Update,
-                "cards",
-            ))
-            .await?
-            .take(0)?;
-        // `None` means the card was deleted between the SELECT and this
-        // UPDATE: nothing was written, so there is nothing to announce.
+        let updated: Option<DbCard> =
+            sqlx::query_as("UPDATE cards SET position = $2 WHERE id = $1 RETURNING *")
+                .bind(&card.id)
+                .bind(pos)
+                .fetch_optional(&mut *tx)
+                .traced(DbQuery::new(
+                    "cards.rebalance_column",
+                    DbOperation::Update,
+                    "cards",
+                ))
+                .await?;
+        // The row is locked, so it cannot have gone; `extend` over the
+        // `Option` simply announces nothing if it somehow had.
         renumbered.extend(updated);
     }
+    // Dropping `tx` without this would roll every write above back.
+    tx.commit().await?;
     Ok(renumbered)
+}
+
+/// A column's cards in position order (`id` breaking ties), optionally
+/// leaving one card out — the one being moved, so the list is the column as
+/// it will look around the moved card.
+async fn siblings(
+    db: &Db,
+    col_id: &str,
+    excluding: Option<&str>,
+    name: &'static str,
+) -> Result<Vec<DbCard>, sqlx::Error> {
+    // `$2 IS NULL` makes the exclusion optional in one fixed statement:
+    // a NULL bound for "no card" matches every row.
+    sqlx::query_as(
+        "SELECT * FROM cards WHERE column_id = $1 AND ($2::text IS NULL OR id <> $2) \
+         ORDER BY position, id",
+    )
+    .bind(col_id)
+    .bind(excluding)
+    .fetch_all(db)
+    .traced(DbQuery::new(name, DbOperation::Select, "cards"))
+    .await
 }
 
 /// Compute a sparse position for inserting a brand-new card at the TOP of
 /// `col_id` (index 0 in the sorted sibling list).  Unlike
 /// `compute_sparse_position` there is no card to exclude, so we query all
 /// existing cards in the column.
-pub(super) async fn compute_top_position(
-    db: &Surreal<Db>,
-    col_id: &str,
-) -> Result<Placement, surrealdb::Error> {
-    let col_cards: Vec<DbCard> = db
-        .query(
-            "SELECT * FROM cards \
-             WHERE column = type::thing('columns', $col_id) \
-             ORDER BY position ASC",
-        )
-        .bind(("col_id", col_id.to_string()))
-        .traced(DbQuery::new(
-            "cards.compute_top_position",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+pub(super) async fn compute_top_position(db: &Db, col_id: &str) -> Result<Placement, sqlx::Error> {
+    let col_cards = siblings(db, col_id, None, "cards.compute_top_position").await?;
 
     let new_pos = midpoint_position(&col_cards, 0);
 
@@ -168,20 +180,7 @@ pub(super) async fn compute_top_position(
     if !col_cards.is_empty() && needs_rebalance(&col_cards, 0, new_pos) {
         let renumbered = rebalance_column(db, col_id).await?;
 
-        let col_cards: Vec<DbCard> = db
-            .query(
-                "SELECT * FROM cards \
-                 WHERE column = type::thing('columns', $col_id) \
-                 ORDER BY position ASC",
-            )
-            .bind(("col_id", col_id.to_string()))
-            .traced(DbQuery::new(
-                "cards.compute_top_position",
-                DbOperation::Select,
-                "cards",
-            ))
-            .await?
-            .take(0)?;
+        let col_cards = siblings(db, col_id, None, "cards.compute_top_position").await?;
 
         return Ok(Placement {
             position: midpoint_position(&col_cards, 0),
@@ -199,29 +198,14 @@ pub(super) async fn compute_top_position(
 /// `target_index` within `col_id`.  Only the moved card is ever written;
 /// no other cards are modified in the happy path.
 pub(super) async fn compute_sparse_position(
-    db: &Surreal<Db>,
+    db: &Db,
     card_id: &str,
     col_id: &str,
     target_index: i32,
-) -> Result<Placement, surrealdb::Error> {
+) -> Result<Placement, sqlx::Error> {
     // Fetch sibling cards (the moving card excluded) so we see the column
     // as it will look after the move.
-    let col_cards: Vec<DbCard> = db
-        .query(
-            "SELECT * FROM cards \
-             WHERE column = type::thing('columns', $col_id) \
-               AND id != type::thing('cards', $card_id) \
-             ORDER BY position ASC",
-        )
-        .bind(("col_id", col_id.to_string()))
-        .bind(("card_id", card_id.to_string()))
-        .traced(DbQuery::new(
-            "cards.compute_sparse_position",
-            DbOperation::Select,
-            "cards",
-        ))
-        .await?
-        .take(0)?;
+    let col_cards = siblings(db, col_id, Some(card_id), "cards.compute_sparse_position").await?;
 
     let idx = (target_index as usize).min(col_cards.len());
     let new_pos = midpoint_position(&col_cards, idx);
@@ -236,22 +220,8 @@ pub(super) async fn compute_sparse_position(
         // caller's own `CardMoved` for the card follows and supersedes it.
         let renumbered = rebalance_column(db, col_id).await?;
 
-        let col_cards: Vec<DbCard> = db
-            .query(
-                "SELECT * FROM cards \
-                 WHERE column = type::thing('columns', $col_id) \
-                   AND id != type::thing('cards', $card_id) \
-                 ORDER BY position ASC",
-            )
-            .bind(("col_id", col_id.to_string()))
-            .bind(("card_id", card_id.to_string()))
-            .traced(DbQuery::new(
-                "cards.compute_sparse_position",
-                DbOperation::Select,
-                "cards",
-            ))
-            .await?
-            .take(0)?;
+        let col_cards =
+            siblings(db, col_id, Some(card_id), "cards.compute_sparse_position").await?;
 
         let idx = (target_index as usize).min(col_cards.len());
         return Ok(Placement {
@@ -269,7 +239,6 @@ pub(super) async fn compute_sparse_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use surrealdb::sql::{Datetime, Thing};
 
     /// Build a column's worth of cards with the given positions. Only
     /// `position` matters to the functions under test; everything else is
@@ -279,16 +248,15 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &position)| DbCard {
-                // `Thing` is SurrealDB's record id: a (table, id) pair.
-                id: Thing::from(("cards", format!("c{i}").as_str())),
-                column: Thing::from(("columns", "col")),
+                id: format!("c{i}"),
+                column_id: "col".to_string(),
                 body: String::new(),
                 position,
-                number: None,
+                number: 0,
                 tags: Vec::new(),
                 last_edited_by: None,
-                created_at: Datetime::default(),
-                updated_at: Datetime::default(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                updated_at: chrono::DateTime::UNIX_EPOCH,
             })
             .collect()
     }

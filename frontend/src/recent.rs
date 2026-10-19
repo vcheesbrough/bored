@@ -155,18 +155,10 @@ pub fn tag_rank_of(recent: &[String], tag: &str) -> usize {
 /// Since card #472 the API sends fixed-width UTC timestamps
 /// (`2026-09-12T12:17:45.679420Z`, always six fractional digits), which
 /// already compare chronologically as text; on those this function only pads
-/// the fraction. It still handles the older, ragged form —
-/// `surrealdb::sql::Datetime`'s `Display`, an RFC 3339 instant wrapped as
-/// `d'…'` with trailing zeros dropped. In that form `…45.6Z` sorts *after*
-/// `…45.679Z` (`'Z'` outranks `'7'` in ASCII); unwrapping the quotes and
-/// padding the fraction to nine digits removes both hazards, and leaves
-/// anything unrecognised to compare as itself rather than vanishing.
-///
-/// Every caller passes a live card's `updated_at`, which the API now always
-/// formats itself, so the `d'…'` unwrap is a **defensive no-op**. It is kept
-/// alongside `shared::history::strip_surreal_wrapper` until card #471
-/// rewrites the legacy literals still stored in old audit snapshots, and can
-/// go with it.
+/// the fraction. Padding to nine digits keeps a ragged fraction honest too —
+/// raw, `…45.6Z` sorts *after* `…45.679Z` (`'Z'` outranks `'7'` in ASCII) —
+/// and anything unrecognised compares as itself rather than vanishing. (The
+/// SurrealQL `d'…'` wrapper it once also stripped went with SurrealDB, #471.)
 ///
 /// Instants carrying a numeric UTC offset are split correctly but still not
 /// *converted*: `12:00:00+01:00` and `12:00:00Z` compare by their wall-clock
@@ -174,11 +166,7 @@ pub fn tag_rank_of(recent: &[String], tag: &str) -> usize {
 /// timestamps sharing one offset — which every timestamp from this API does,
 /// since it always renders UTC.
 pub fn recency_key(timestamp: &str) -> String {
-    let trimmed = timestamp
-        .trim()
-        .strip_prefix("d'")
-        .and_then(|rest| rest.strip_suffix('\''))
-        .unwrap_or(timestamp.trim());
+    let trimmed = timestamp.trim();
 
     // Split off the zone suffix so the fraction can be padded in isolation.
     // The search starts after the `T`, because a negative offset's `-` is the
@@ -282,27 +270,12 @@ mod tests {
         assert_eq!(tag_rank_of(&recent, "chore"), UNRANKED);
     }
 
+    /// The API format pads to the nine-digit key.
     #[test]
-    fn recency_key_unwraps_the_surreal_datetime_literal() {
-        assert_eq!(
-            recency_key("d'2026-09-12T12:17:45.679420467Z'"),
-            "2026-09-12T12:17:45.679420467Z"
-        );
-    }
-
-    /// The post-#472 API format pads to the nine-digit key, and still sorts
-    /// correctly against the defensive legacy path for a later instant.
-    #[test]
-    fn recency_key_orders_the_current_format_against_a_legacy_literal() {
+    fn recency_key_pads_the_current_format() {
         assert_eq!(
             recency_key("2026-09-12T12:17:45.679420Z"),
             "2026-09-12T12:17:45.679420000Z"
-        );
-        let current = recency_key("2026-09-12T12:17:45.679420Z");
-        let later_legacy = recency_key("d'2026-09-12T12:17:45.679420467Z'");
-        assert!(
-            current < later_legacy,
-            "{current} should sort before {later_legacy}"
         );
     }
 

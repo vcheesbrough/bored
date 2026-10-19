@@ -2,6 +2,7 @@ pub mod audit;
 pub mod auth;
 pub mod boards;
 pub mod cards;
+pub mod cascade;
 pub mod columns;
 pub mod links;
 pub mod telemetry;

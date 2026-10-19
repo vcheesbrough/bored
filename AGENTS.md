@@ -42,10 +42,12 @@ Run the **`ci-watch`** skill (baseline §4). Skill parameters:
 
 - `OWNER=vcheesbrough`, `REPO=bored`.
 - **Reproduce failures locally** from [.woodpecker/build.yml](.woodpecker/build.yml):
-  - `docker build --secret id=github_token,env=GITHUB_TOKEN -t bored:ci-local .` (rustfmt / clippy / tests / trunk all
-    run inside the Dockerfile). The `github_token` secret fetches the private `sovereign-config-provider` git
-    dependency (see [README.md § Runtime configuration](README.md#runtime-configuration)) — export
-    `GITHUB_TOKEN` first, per **Getting `GITHUB_TOKEN`** below.
+  - `./scripts/with-test-postgres.sh docker build --secret id=github_token,env=GITHUB_TOKEN --secret id=database_url,env=DATABASE_URL -t bored:ci-local .`
+    (rustfmt / clippy / tests / trunk all run inside the Dockerfile). The `github_token` secret fetches the private
+    `sovereign-config-provider` git dependency (see [README.md § Runtime configuration](README.md#runtime-configuration)) — export
+    `GITHUB_TOKEN` first, per **Getting `GITHUB_TOKEN`** below. The wrapper starts the throwaway Postgres the
+    backend tests need and exports `DATABASE_URL` for the `database_url` secret (card #471); without it the build
+    fails at the test step.
   - `TEST_IMAGE=bored:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
 
 The [`.claude/watch-woodpecker.js`](.claude/watch-woodpecker.js) PostToolUse
@@ -86,9 +88,11 @@ need only your own git access to the private dependency, not the build secret:
 ```bash
 cargo fmt -p backend -p shared --check                # Dockerfile backend-builder
 cargo clippy -p backend -p shared -- -D warnings      # Dockerfile backend-builder
-cargo test -p backend -p shared                       # Dockerfile backend-builder
+./scripts/with-test-postgres.sh \
+  cargo test -p backend -p shared                     # Dockerfile backend-builder (needs Postgres)
 cargo test -p frontend                                # HOST target, not wasm32 — see below
 sh scripts/test-docker-git-credential.sh              # Dockerfile frontend-builder
+sh scripts/test-migrate-from-surreal.sh               # Dockerfile frontend-builder
 ```
 
 `cargo test -p frontend` is deliberately untargeted: `frontend` is a
@@ -168,11 +172,16 @@ lives in **sovereign-config**, not in `.woodpecker/build.yml` env blocks — see
 layering model and subtree layout.
 
 - **Change a value** with the sovereign-config MCP/CLI (`put` / `put_secret` against
-  `/bored/{dev,prod}/server/{oidc,session,observability}`), then redeploy. Do **not**
+  `/bored/{dev,prod}/server/{oidc,session,observability,database}`), then redeploy. Do **not**
   add a value back into `.woodpecker/build.yml` or `deploy/docker-compose.yml` — the
   whole point of card #288 was collapsing those inline blocks into one access-URL
   secret.
-- **`server/*`** (`http-port`, `tls-cert`, `tls-key`, `static-dir`, `database-path`) is
+- **The database password** is `/bored/{dev,prod}/server/database/password`; the
+  deploy's `/bored/devops/{dev,prod}/compose/POSTGRES_PASSWORD` is an **alias** of it,
+  so rotating it is one write (then redeploy — and `ALTER ROLE bored PASSWORD …` inside
+  the running `bored-db`, since Postgres only reads `POSTGRES_PASSWORD` when it first
+  initialises its volume).
+- **`server/*`** (`http-port`, `tls-cert`, `tls-key`, `static-dir`) is
   the one group that stays out of sovereign-config — it's image-internal, set via
   `Dockerfile` `ENV BORED__SERVER__*` or in-code defaults.
 - **Rotating an access URL:** sovereign-config `rotate_connection` + rewrite the
@@ -221,6 +230,14 @@ weaken them.**
   or re-root inbound context — not in each product. Revisit with a
   non-default sampler in the `otel` layer if the trace record ever has to
   withstand a hostile client.
+- **A db span's `error.type` is the database's answer, not the API's.**
+  `bored.db.errors` and the `db` span classify the raw database error
+  (`error::database_error_type`). Where a call site turns that into a
+  different client answer — a foreign-key miss that is really a vanished
+  column or card (404), a restore whose parent went (422) — or an expected
+  retry (`routes::cascade`, a delete that found new children), the server
+  span carries the API's class and the db span keeps `db_constraint`. Expect
+  a little such noise on the metric; it is not an outage signal on its own.
 - **Only `http/protobuf`.** `grpc` and `http/json` are valid OTLP protocols but
   this build carries only the http/protobuf client, so startup rejects them.
 - **The one duplicated fact:** `observability.environment` (for `/api/info`,
@@ -256,7 +273,9 @@ weaken them.**
   (`DbQuery`), and `error.type` is always an enum label.
 - **New outbound calls and database calls get their spans by construction:**
   send HTTP through `http_client::send(Outbound::…, request)` and put
-  `.traced(DbQuery::new(..))` before a SurrealDB call's `.await`.
+  `.traced(DbQuery::new(..))` before a `sqlx` call's `.await` (the
+  `every_database_call_is_traced` scan enforces it). sqlx's own statement
+  logging is off (`db::quiet`): it would log SQL text.
 - **Dashboards and alerts are opt-in** (skill §8) and not yet opted into; card
   #437 is where that decision is made.
 

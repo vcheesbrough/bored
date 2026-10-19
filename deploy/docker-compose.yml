@@ -21,18 +21,19 @@ services:
     # flushing.
     stop_grace_period: 15s
     # A ceiling, so a runaway backend is OOM-killed and restarted rather than
-    # eating the host (card #470). It must stay ABOVE the backend's real peak:
-    # ~530 MB (VmHWM) on 2026-10-02, almost all of it the ~824k `!ts` keys
-    # SurrealKV holds in memory — leaked before card #470 stopped the leak, and
-    # resident until the Postgres migration drops SurrealDB. A tighter limit
-    # OOM-kills the backend while it replays its index at startup, every
-    # restart. Revisit (lower it) once the migration lands.
+    # eating the host (card #470). Lowered from 768m when Postgres replaced the
+    # embedded SurrealDB (card #471): the ~530 MB peak was almost all SurrealKV's
+    # in-memory index, which the backend no longer holds. Watch
+    # `process.memory.usage` before tightening it further.
     #
     # `memswap_limit` equal to `mem_limit` means "no swap": without it Docker
     # allows as much swap again, and a runaway would thrash mini's shared,
     # already busy swap before the OOM killer acts.
-    mem_limit: 768m
-    memswap_limit: 768m
+    mem_limit: 256m
+    memswap_limit: 256m
+    depends_on:
+      bored-db:
+        condition: service_healthy
     environment:
       # Container-internal key stays `BORED__OBSERVABILITY__ENVIRONMENT`; the
       # deploy-script-facing variable name stays `APP_ENV` (`.woodpecker/build.yml`
@@ -64,6 +65,11 @@ services:
       # rather than left in the container's process env. A blank/absent value
       # disables the sovereign layer cleanly (config.rs falls back to defaults+env).
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
+      # Postgres (card #471): the service below, on the project's private
+      # network. Topology, not a secret, so it lives here; the password is the
+      # `database/password` leaf the app reads from sovereign-config, and port,
+      # name and user take the backend's defaults (5432, bored, bored).
+      - BORED__DATABASE__HOST=bored-db
     # Telemetry: the standard OTEL_* variables, from a file the deploy writes
     # and deletes around `docker compose up` (scripts/compose-up-with-otel.sh,
     # fed by `sovereign-config render /bored/devops/<env>/otel` in
@@ -83,9 +89,8 @@ services:
         format: raw
     secrets:
       - SOVEREIGN_CONFIG_ACCESS_URL_FILE
-    volumes:
-      - bored-db:/data
     networks:
+      - bored-internal
       - proxy-backend
     labels:
       # How the homelab's Alloy labels this container's logs in Loki (card #412;
@@ -112,12 +117,71 @@ services:
       - traefik.http.services.${BORED_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${BORED_CONTAINER_NAME}.loadbalancer.server.scheme=https
 
-volumes:
+  # Postgres (card #471). Pinned by digest, as v-note's is: a third-party
+  # image with the data in it, so a rebuild must not change what runs.
   bored-db:
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bored
+      POSTGRES_USER: bored
+      # A file, not the variable itself, so the password is not in the
+      # container's environment (the same convention as the backend's
+      # SOVEREIGN_CONFIG_ACCESS_URL_FILE). The secret below is rendered by the
+      # deploy from /bored/devops/<env>/compose, an alias of the very leaf the
+      # backend reads (/bored/<env>/server/database/password), so the two can
+      # never disagree. Never in git.
+      POSTGRES_PASSWORD_FILE: /run/secrets/POSTGRES_PASSWORD
+    secrets:
+      - POSTGRES_PASSWORD
+    volumes:
+      - bored-pg:/var/lib/postgresql/data
+    # Only on the private network: nothing outside this project can reach it.
+    networks:
+      - bored-internal
+    healthcheck:
+      # `-h 127.0.0.1`: during first-time init the image runs a temporary
+      # server on the unix socket only, which a socket check would call ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U bored -d bored"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
+
+  # The one-off SurrealDB → Postgres import (card #471), run by
+  # scripts/migrate-from-surreal.sh during a deploy and never started by
+  # `up`: the profile keeps it out of every ordinary command. Same image and
+  # credentials as the backend; the old SurrealKV volume mounted read-only (the
+  # subcommand copies it aside before opening it). Delete with the subcommand.
+  surreal-migrate:
+    profiles: [surreal-migration]
+    image: registry.desync.link/bored:${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}
+    entrypoint: ["./bored-backend", "migrate-from-surreal"]
+    environment:
+      - BORED__OBSERVABILITY__ENVIRONMENT=${APP_ENV:?APP_ENV is required}
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
+      - BORED__DATABASE__HOST=bored-db
+    secrets:
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE
+    volumes:
+      - surreal-data:/surreal:ro
+    networks:
+      - bored-internal
+
+volumes:
+  # Postgres's data directory, one per environment, created by the deploy.
+  bored-pg:
+    name: ${PG_VOLUME:?PG_VOLUME is required}
+    external: true
+  # The retired SurrealKV store. Only the import reads it; kept for a
+  # retention period after the move, then removed with the subcommand.
+  surreal-data:
     name: ${DB_VOLUME:?DB_VOLUME is required}
     external: true
 
 networks:
+  # The app ↔ database network, private to this compose project.
+  bored-internal: {}
   proxy-backend:
     external: true
 
@@ -127,3 +191,7 @@ secrets:
   # rather than leaving the connection URL in the container's process env.
   SOVEREIGN_CONFIG_ACCESS_URL_FILE:
     environment: SOVEREIGN_CONFIG_ACCESS_URL_FILE
+  # Rendered into the deploy's environment by `sovereign-config render
+  # /bored/devops/<env>/compose` (card #471); compose materialises it as a file.
+  POSTGRES_PASSWORD:
+    environment: POSTGRES_PASSWORD

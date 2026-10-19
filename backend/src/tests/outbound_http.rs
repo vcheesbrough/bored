@@ -134,7 +134,7 @@ async fn start_idp(jwks_body: &str, token_body: &str) -> Arc<FakeIdp> {
 /// Enable auth on a fresh `AppState` exactly as `main` does, pointed at the
 /// fake provider.
 async fn state_against(idp: &FakeIdp) -> AppState {
-    let db = db::connect_mem().await.expect("mem db");
+    let db = db::connect_test().await.expect("test db");
     let oidc = config::OidcConfig {
         issuer_url: idp.base.clone(),
         client_id: "bored".to_string(),
@@ -422,7 +422,7 @@ async fn the_shared_client_times_out_on_a_silent_provider() {
         }
     });
 
-    let state = AppState::new(db::connect_mem().await.expect("mem db"));
+    let state = AppState::new(db::connect_test().await.expect("test db"));
     let started = std::time::Instant::now();
     let error = state
         .http

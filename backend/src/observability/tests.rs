@@ -93,7 +93,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
 /// The whole router over an in-memory database — the same `app()` `main`
 /// serves.
 async fn router() -> axum::Router {
-    let db = crate::db::connect_mem().await.expect("mem db");
+    let db = crate::db::connect_test().await.expect("test db");
     app(
         AppState::new(db),
         "./dist",
@@ -548,7 +548,7 @@ async fn a_server_error_marks_the_span_and_the_metric_with_error_type() {
     let stdout = CapturedWriter::default();
     let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "info");
     let _guard = tracing::subscriber::set_default(subscriber);
-    let db = crate::db::connect_mem().await.expect("mem db");
+    let db = crate::db::connect_test().await.expect("test db");
     let server = TestServer::new(
         app(
             AppState::new(db.clone()),
@@ -582,15 +582,13 @@ async fn a_server_error_marks_the_span_and_the_metric_with_error_type() {
         .await;
     // Make the stored card unreadable (the same fault `tests/errors.rs` uses),
     // so listing the column fails inside the driver: a genuine 500.
-    db.query("REMOVE FIELD body ON TABLE cards")
+    sqlx::query("ALTER TABLE cards ALTER COLUMN body DROP NOT NULL")
+        .execute(&db)
         .await
-        .unwrap()
-        .check()
         .unwrap();
-    db.query("UPDATE cards SET body = NONE")
+    sqlx::query("UPDATE cards SET body = NULL")
+        .execute(&db)
         .await
-        .unwrap()
-        .check()
         .unwrap();
     server
         .get(&format!("/api/columns/{}/cards", column.id))
@@ -668,9 +666,9 @@ async fn a_failing_database_call_marks_its_own_span_and_counts_a_db_error() {
     let failed_call = spans
         .iter()
         .find(|span| {
-            span.name == "CREATE boards" && span.status != opentelemetry::trace::Status::Unset
+            span.name == "INSERT boards" && span.status != opentelemetry::trace::Status::Unset
         })
-        .expect("the failed CREATE boards span");
+        .expect("the failed INSERT boards span");
     // The class the API gives the failure (the 409's own `conflict`), not a
     // second classification — the oracle is the response status above plus
     // the enum's own label.
@@ -739,10 +737,10 @@ async fn a_request_has_a_child_span_per_database_call_and_no_sql() {
         .collect();
     let create = children
         .iter()
-        .find(|span| span.name == "CREATE boards")
+        .find(|span| span.name == "INSERT boards")
         .unwrap_or_else(|| {
             panic!(
-                "no `CREATE boards` child among {:?}",
+                "no `INSERT boards` child among {:?}",
                 children.iter().map(|span| &span.name).collect::<Vec<_>>()
             )
         });
@@ -760,11 +758,9 @@ async fn a_request_has_a_child_span_per_database_call_and_no_sql() {
                 "`{}` leaks a value: {value}",
                 kv.key
             );
-            assert!(
-                !value.contains("SELECT *"),
-                "`{}` carries SQL: {value}",
-                kv.key
-            );
+            for sql in ["SELECT *", "INSERT INTO", "VALUES ("] {
+                assert!(!value.contains(sql), "`{}` carries SQL: {value}", kv.key);
+            }
         }
     }
 }
@@ -1390,7 +1386,7 @@ async fn shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() 
     let (_telemetry, subscriber, _announce) = prepare_for_test(&[], stdout.clone()).expect("off");
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let db = crate::db::connect_mem().await.expect("mem db");
+    let db = crate::db::connect_test().await.expect("test db");
     let state = AppState::new(db);
     let draining = state.draining.clone();
     let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
@@ -1439,7 +1435,7 @@ async fn shutdown_ends_open_streams_and_returns_without_waiting_out_the_drain() 
 /// sends within `wait`, then shut the server down (which ends and so exports
 /// the stream's span). An `EventSource` gets exactly these bytes.
 async fn first_sse_bytes(wait: Duration) -> String {
-    let db = crate::db::connect_mem().await.expect("mem db");
+    let db = crate::db::connect_test().await.expect("test db");
     let state = AppState::new(db);
     let draining = state.draining.clone();
     let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
@@ -1822,7 +1818,7 @@ async fn tls_shutdown_ends_open_streams_and_returns_without_waiting_out_the_drai
     let (_telemetry, subscriber, _announce) = prepare_for_test(&[], stdout.clone()).expect("off");
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let db = crate::db::connect_mem().await.expect("mem db");
+    let db = crate::db::connect_test().await.expect("test db");
     let state = AppState::new(db);
     let draining = state.draining.clone();
     let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
@@ -2011,14 +2007,14 @@ fn a_warning_inside_an_info_span_keeps_its_ids_at_warn_level() {
 }
 
 /// Stdout names the same span the OTLP record does when the innermost span is
-/// a dependency's (surrealdb opens `debug` spans the span layer filters out).
+/// a dependency's (a library's `debug` span, which the span layer filters out).
 #[test]
 fn a_log_inside_a_dependency_span_carries_the_enclosing_product_span_ids() {
     let stdout = CapturedWriter::default();
     let (pipeline, subscriber) = Pipeline::new(stdout.clone(), "debug");
     tracing::subscriber::with_default(subscriber, || {
         tracing::info_span!("product").in_scope(|| {
-            tracing::debug_span!(target: "surrealdb::core", "dependency").in_scope(|| {
+            tracing::debug_span!(target: "some_dependency::core", "dependency").in_scope(|| {
                 tracing::debug!("inside the dependency span");
             });
         });
@@ -2066,7 +2062,7 @@ async fn sse_streams_count_subscribers_delivered_and_lagged_events() {
     use super::test_support::sum_value;
     use crate::events::{BROADCAST_CAPACITY, BoardEvent, BroadcastEvent};
 
-    let db = crate::db::connect_mem().await.expect("mem db");
+    let db = crate::db::connect_test().await.expect("test db");
     let state = AppState::new(db);
     let events = state.events.clone();
     let router = app(state, "./dist", DeploymentInfo::new("test", None)).await;
@@ -2240,6 +2236,8 @@ async fn no_exported_metric_series_carries_a_forbidden_label() {
         DB_ERRORS,
         AUTH_OUTCOMES,
         BUILD_INFO,
+        semconv::metric::DB_CLIENT_CONNECTION_COUNT,
+        semconv::metric::PROCESS_MEMORY_USAGE,
     ] {
         assert!(
             names.contains(expected),
@@ -2316,6 +2314,7 @@ fn every_label_enum_has_a_distinct_label_for_every_variant() {
     check(&RequestError::all(), RequestError::label);
     check(&DbOperation::ALL, DbOperation::label);
     check(&AuthOutcome::ALL, AuthOutcome::label);
+    check(&metrics::PoolState::ALL, metrics::PoolState::label);
 
     // The method fold: every known method maps to itself, anything else to
     // `_OTHER` — a client cannot mint a new label value.
@@ -2395,4 +2394,78 @@ fn nothing_outside_the_telemetry_module_imports_the_sdk() {
         "SDK types outside the telemetry module:\n{}",
         offenders.join("\n")
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pool and memory gauges (card #471)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The pool gauge reports both semconv states for bored's one pool, and the
+/// counts add up to the pool's open connections.
+#[tokio::test]
+async fn the_pool_gauge_reports_used_and_idle_connections() {
+    let db = crate::db::connect_test().await.expect("test db");
+    // Hold two connections: nothing else uses this pool, so exactly two are
+    // in use — a number the test knows independently of the pool's counters.
+    let held = db.acquire().await.expect("a connection");
+    let held_too = db.acquire().await.expect("a second connection");
+
+    // This test's own pool: tests run in parallel, and the gauge reports
+    // whichever pool was opened last.
+    let (used, idle) = metrics::pool_usage_of(&db);
+    assert_eq!(used, 2, "the two held connections are in use");
+    // Control: release one and the gauge follows. The pool takes a released
+    // connection back on a task of its own, so allow it a moment.
+    drop(held_too);
+    let mut after = metrics::pool_usage_of(&db);
+    for _ in 0..50 {
+        if after.0 == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        after = metrics::pool_usage_of(&db);
+    }
+    assert_eq!(after, (1, idle + 1));
+
+    let series = all_series(&collect_metrics());
+    let states: BTreeSet<String> = series
+        .iter()
+        .filter(|(name, _)| name == semconv::metric::DB_CLIENT_CONNECTION_COUNT)
+        .flat_map(|(_, attributes)| {
+            attributes
+                .iter()
+                .filter(|kv| kv.key.as_str() == semconv::attribute::DB_CLIENT_CONNECTION_STATE)
+                .map(|kv| kv.value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        BTreeSet::from(["idle".to_string(), "used".to_string()])
+    );
+    drop(held);
+}
+
+/// `VmRSS` is read in kB and reported in bytes; anything unexpected reports
+/// nothing rather than a guess. Fixed text, so the expected values are known.
+#[test]
+fn vm_rss_is_parsed_from_proc_status_text() {
+    let status = "Name:\tbored-backend\nVmPeak:\t  999 kB\nVmRSS:\t   12345 kB\nThreads:\t9\n";
+    assert_eq!(metrics::parse_vm_rss(status), Some(12_345 * 1024));
+    assert_eq!(metrics::parse_vm_rss("Name:\tx\n"), None);
+    assert_eq!(metrics::parse_vm_rss("VmRSS:\t12 MB\n"), None);
+    assert_eq!(metrics::parse_vm_rss("VmRSS:\tlots kB\n"), None);
+}
+
+/// On Linux the gauge reads this process's real resident size: more than
+/// nothing, less than the machine.
+#[cfg(target_os = "linux")]
+#[test]
+fn process_memory_is_read_from_proc() {
+    let bytes = metrics::resident_bytes().expect("/proc/self/status is readable");
+    assert!(
+        bytes > 1024 * 1024,
+        "a test binary uses over 1 MiB: {bytes}"
+    );
+    assert!(bytes < 64 * 1024 * 1024 * 1024, "implausible RSS: {bytes}");
 }
