@@ -94,6 +94,9 @@ cargo test -p frontend                                # HOST target, not wasm32 
 sh scripts/test-docker-git-credential.sh              # Dockerfile frontend-builder
 sh scripts/test-migrate-from-surreal.sh </dev/null   # Dockerfile frontend-builder
 sh scripts/test-deploy-app.sh </dev/null              # Dockerfile frontend-builder
+# The sql-console-script-validation step (alpine + python3 bash curl jq):
+./scripts/test-smoke-sql-console.sh
+./scripts/test-attach-sqltool-outpost.sh
 ```
 
 `cargo test -p frontend` is deliberately untargeted: `frontend` is a

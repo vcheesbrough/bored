@@ -449,9 +449,9 @@ steps:
     # SPA must still load. Skips itself when COMPOSE_PROFILES lacks sqltool —
     # hence the shared anchor with deploy-dev.
     #
-    # A failed check takes the console down at once (`docker rm -f`): it may
-    # mean the console is exposed, and it must not stay up while someone
-    # investigates. The docker CLI image, with the host socket, for that.
+    # A failed check takes the console down at once (`docker rm -f`, and its
+    # role NOLOGIN, as turning it off does): it may mean the console is
+    # exposed, and it must not stay up while someone investigates. The docker CLI image, with the host socket, for that.
     <<: &smoke-sqltool-base
       image: *docker-image
       volumes: *docker-socket
@@ -461,6 +461,7 @@ steps:
           ./scripts/smoke-sql-console.sh < /dev/null || {
             echo "==> smoke failed: removing $$SQLTOOL_CONTAINER" >&2
             docker rm -f "$$SQLTOOL_CONTAINER" || true
+            docker exec "$$DB_CONTAINER" psql -q -U bored -d bored -c 'ALTER ROLE bored_pgweb NOLOGIN' < /dev/null || true
             exit 1
           }
     when:
@@ -472,6 +473,7 @@ steps:
       BORED_HOST: bored-dev.desync.link
       COMPOSE_PROFILES: *dev-compose-profiles
       SQLTOOL_CONTAINER: bored-dev-sqltool-1
+      DB_CONTAINER: bored-dev-bored-db-1
 
   smoke-sql-console-prod:
     <<: *smoke-sqltool-base
@@ -484,6 +486,7 @@ steps:
       BORED_HOST: bored.desync.link
       COMPOSE_PROFILES: *prod-compose-profiles
       SQLTOOL_CONTAINER: bored-sqltool-1
+      DB_CONTAINER: bored-bored-db-1
 
   tag-release-dev:
     # After a successful deploy, push the git tag matching .release-tag, so a
