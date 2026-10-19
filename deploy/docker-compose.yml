@@ -192,6 +192,10 @@ services:
       - --listen=8081
       - --readonly
       - --skip-open
+      # The hard cap on a console query. The role's own 30s statement_timeout
+      # is only a default — any session may SET it higher — but pgweb cancels a
+      # query at this deadline whatever the session has set.
+      - --query-timeout=30
       - --log-format=json
       # Records X-Forwarded-User when present. mini-config's authentik
       # middleware forwards X-authentik-username, not that header, so this logs
@@ -235,8 +239,8 @@ services:
       - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.tls=true
       - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.tls.certresolver=myresolver
       # Middlewares are per router and run in order: LAN/VPN only, then the
-      # rate limit (each console query can run for up to the role's 30s
-      # statement_timeout against the live database), then Authentik — a
+      # rate limit (each console query can run for up to pgweb's 30s
+      # --query-timeout against the live database), then Authentik — a
       # denied forward-auth short-circuits the chain, so the credential injector
       # last only ever runs on an approved request. `security-headers@docker`
       # is deliberately absent: its CSP has no `unsafe-eval`, and pgweb's Ace

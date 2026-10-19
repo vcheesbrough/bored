@@ -148,9 +148,8 @@ A read-only [pgweb](https://github.com/sosedoff/pgweb) at **`https://<host>/dbco
 The container's healthcheck goes red if an unauthenticated request is ever *not* refused.
 
 **What it can do.** It connects as **`bored_pgweb`**, never as `bored`. That role is created by a migration (`backend/migrations/20261020000000_pgweb_readonly_role.sql`) with:
-- SELECT only, including on tables later migrations add;
-- read-only transactions, enforced by the server;
-- a 30 s statement timeout;
+- SELECT only, including on tables later migrations add. This is the boundary: even a session that switches itself out of read-only mode cannot write.
+- read-only transactions and a 30 s `statement_timeout` as the session's *defaults*. A session can change both, so the hard cap on a query is pgweb's own `--query-timeout=30`.
 - every statement logged by Postgres, as the audit trail.
 
 pgweb's own `--readonly` mode is a client-side filter: a superuser behind it can still read host files through `pg_read_file`. The role is the real boundary. The session is locked to that connection, so it cannot be repointed from the browser.
@@ -161,7 +160,7 @@ pgweb's own `--readonly` mode is a client-side filter: a superuser behind it can
 - `scripts/attach-sqltool-outpost.sh` attaches the provider to the shared embedded outpost. It only ever appends; the outpost must never be declared in a blueprint.
 - `scripts/smoke-sql-console.sh` checks after every deploy that an anonymous request is redirected to Authentik, not served.
 
-**Turning it off.** Remove `sqltool` from `COMPOSE_PROFILES` in `.woodpecker/build.yml`; the deploy and smoke steps share one anchor per environment. The next deploy then removes the container (`rm -sf sqltool`), and the smoke check skips itself. To also revoke the database login, run `ALTER ROLE bored_pgweb NOLOGIN` in `bored-db`. To remove it completely, also delete the `bored-sql-console-<env>` provider, application and group from the blueprints and from Authentik.
+**Turning it off.** Remove `sqltool` from `COMPOSE_PROFILES` in `.woodpecker/build.yml`; the deploy and smoke steps share one anchor per environment. The next deploy then removes the container (`rm -sf sqltool`), sets `bored_pgweb NOLOGIN`, and the smoke check skips itself. Turning it back on restores the login. To remove the console completely, also delete the `bored-sql-console-<env>` provider, application and group from the blueprints and from Authentik.
 
 **Metrics.** pgweb's metrics (`:9191/metrics`) are discovered by Alloy through the `observability.metrics.*` labels, as `service_name=bored-sql-console`.
 

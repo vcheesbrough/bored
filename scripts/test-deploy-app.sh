@@ -127,6 +127,15 @@ else
   fail "missing credential: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
+# --- a console password that would break pgweb's URL is refused --------------
+reset
+run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD='p@ss/word' PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
+if [ "$status" = 1 ] && [ ! -s "$WORK_DIR/calls" ] && grep -q 'it goes into a URL' "$WORK_DIR/out"; then
+  pass "a console password with URL-reserved characters is refused up front"
+else
+  fail "url-unsafe password: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
 # --- a name that merely contains `sqltool` does not enable it ----------------
 reset
 run COMPOSE_PROFILES=nosqltool

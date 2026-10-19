@@ -80,14 +80,18 @@ DO $$
 DECLARE
   db text := quote_ident(current_database());
 BEGIN
-  -- The guard that survives pgweb being misconfigured, replaced, or pointed at
-  -- this role by something else entirely: the *server* refuses writes for this
-  -- role, and Postgres will not let a session unset it after its first query
-  -- ("transaction read-write mode must be set before any query").
+  -- Defaults for a console session. Not a security boundary on their own: a
+  -- session may `SET default_transaction_read_only = off` (and raise its own
+  -- statement_timeout) for later transactions. The boundary is the grants
+  -- above — SELECT only, so a read-write transaction still cannot write — and
+  -- the hard query cap is pgweb's --query-timeout. Read-only by default still
+  -- earns its place: a stray write fails on the transaction mode before it
+  -- ever reaches a permission check.
   EXECUTE format(
     'ALTER ROLE bored_pgweb IN DATABASE %s SET default_transaction_read_only = on', db);
 
-  -- A console invites the query that accidentally seq-scans the whole audit log.
+  -- A console invites the query that accidentally seq-scans the whole audit
+  -- log; this default stops it, and pgweb's --query-timeout caps it regardless.
   EXECUTE format(
     'ALTER ROLE bored_pgweb IN DATABASE %s SET statement_timeout = ''30s''', db);
   EXECUTE format(

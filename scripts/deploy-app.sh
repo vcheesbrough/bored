@@ -48,6 +48,16 @@ case ",${COMPOSE_PROFILES:-}," in
         exit 1
       fi
     done
+    # PGWEB_DB_PASSWORD is placed raw inside pgweb's connection URL
+    # (deploy/docker-compose.yml), so only URL-unreserved characters are
+    # allowed; anything else (`@`, `:`, `/`, `#`, `%`, …) would break the URL and
+    # the console would never connect. Generate it as hex.
+    case "$PGWEB_DB_PASSWORD" in
+      *[!A-Za-z0-9._~-]*)
+        echo "ERROR: PGWEB_DB_PASSWORD may contain only A-Z a-z 0-9 . _ ~ - (it goes into a URL)" >&2
+        exit 1
+        ;;
+    esac
     # One credential, two consumers — pgweb checks it, Traefik injects it — so
     # it is derived here rather than stored twice.
     PGWEB_AUTH_B64=$(printf '%s:%s' "$PGWEB_AUTH_USER" "$PGWEB_AUTH_PASS" | base64 | tr -d '\n')

@@ -153,13 +153,51 @@ async fn the_console_role_has_its_login_settings_in_this_database() {
 }
 
 /// The role is cluster-global but migrations are per database, so databases
-/// migrating at the same moment race to create it. The migration catches the
-/// duplicate rather than failing; many test databases migrating at once is
-/// exactly that race.
+/// migrating at the same moment race to create it. The migration's
+/// `CREATE ROLE` block catches the duplicate rather than failing.
+///
+/// `bored_pgweb` itself already exists in a shared test cluster (and cannot be
+/// dropped: other test databases' grants depend on it), so migrating more
+/// databases would never reach the create. This runs the migration's *own*
+/// block — read from the file, not retyped — against a fresh role name: eight
+/// sessions at once, then once more after the role exists.
 #[tokio::test]
-async fn many_databases_can_migrate_the_role_at_once() {
-    let results = futures_util::future::join_all((0..8).map(|_| db::connect_test())).await;
+async fn the_role_creation_survives_concurrent_and_repeated_runs() {
+    let db = db::connect_test().await.expect("test db");
+    let migration = include_str!("../../migrations/20261020000000_pgweb_readonly_role.sql");
+    let start = migration.find("DO $$").expect("the CREATE ROLE block");
+    let end = start + migration[start..].find("END $$;").expect("its end") + "END $$;".len();
+    let block = &migration[start..end];
+    assert!(block.contains("CREATE ROLE bored_pgweb NOLOGIN"), "{block}");
+
+    let probe = format!(
+        "race_probe_{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
+    let statement = block.replace("bored_pgweb", &probe);
+    let run = || async {
+        let mut connection = db.acquire().await.expect("connection").detach();
+        sqlx::query(sqlx::AssertSqlSafe(statement.clone()))
+            .execute(&mut connection)
+            .await
+    };
+    let results = futures_util::future::join_all((0..8).map(|_| run())).await;
     for result in results {
-        result.expect("every concurrent migration succeeds");
+        result.expect("every concurrent run succeeds");
     }
+    run()
+        .await
+        .expect("a run after the role exists succeeds too");
+
+    // Control: a plain CREATE ROLE of the same, now existing, name fails —
+    // which is what the block's exception handler absorbs.
+    let plain = sqlx::query(sqlx::AssertSqlSafe(format!("CREATE ROLE {probe} NOLOGIN")))
+        .execute(&db)
+        .await;
+    assert!(plain.is_err(), "the duplicate is real");
+
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {probe}")))
+        .execute(&db)
+        .await
+        .expect("clean up the probe role");
 }

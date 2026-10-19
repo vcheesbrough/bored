@@ -300,6 +300,10 @@ services:
       - --listen=8081
       - --readonly
       - --skip-open
+      # The hard cap on a console query. The role's own 30s statement_timeout
+      # is only a default — any session may SET it higher — but pgweb cancels a
+      # query at this deadline whatever the session has set.
+      - --query-timeout=30
       - --log-format=json
     healthcheck:
       test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/dbconsole/api/info | grep -q 401"]

@@ -117,14 +117,24 @@ test('writes are rejected', async ({ request }) => {
   expect(Number(leaked)).toBe(0);
 });
 
-test('the session is read-only and cannot be talked out of it', async ({ request }) => {
+test('the session starts read-only, and writes stay refused even outside it', async ({ request }) => {
+  // Read-only is the session's *default* (the role's default_transaction_read_only).
   const [[readOnly]] = await rows(request, 'show transaction_read_only');
   expect(readOnly).toBe('on');
 
-  // Postgres refuses to flip this mid-session, which is what makes it a
-  // boundary rather than a default.
-  const res = await query(request, "select set_config('transaction_read_only', 'off', false)");
+  // A session may switch the default off for later transactions, so it is not
+  // the boundary on its own. Through pgweb a write is refused anyway (its
+  // read-only filter and the session mode both stand in the way); that the
+  // *grants* refuse it even with read-only mode out of the picture is proved
+  // below the console, in backend/src/tests/sql_console.rs
+  // (`the_console_role_can_read_but_not_write`, run under SET ROLE).
+  const res = await query(
+    request,
+    "set default_transaction_read_only = off; insert into boards (id, name) values ('e2e-console-rw', 'nope')",
+  );
   expect(res.status()).not.toBe(200);
+  const [[leaked]] = await rows(request, "select count(*) from boards where id = 'e2e-console-rw'");
+  expect(Number(leaked)).toBe(0);
 });
 
 test('the connection cannot be repointed from the browser', async ({ request }) => {
