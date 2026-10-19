@@ -412,11 +412,29 @@ mod tests {
         );
     }
 
-    /// Every connection carries the session limits (`with_session_limits`):
-    /// read back from the server, not from the options object.
+    /// Every production connection carries the session limits: the pool is
+    /// opened through `connect` — the production path, `connect_options`
+    /// included — on a test database, and the values are read back from the
+    /// server, not from the options object.
     #[tokio::test]
     async fn connections_carry_the_session_limits() {
-        let db = connect_test().await.expect("test database");
+        // A fresh database, then the production config pointed at it.
+        let test_db = connect_test().await.expect("test database");
+        let name: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&test_db)
+            .await
+            .expect("current_database");
+        let url =
+            url::Url::parse(&std::env::var("DATABASE_URL").expect("DATABASE_URL")).expect("url");
+        let config = DatabaseConfig {
+            host: url.host_str().expect("host").to_string(),
+            port: url.port().unwrap_or(5432),
+            name,
+            user: url.username().to_string(),
+            password: url.password().unwrap_or_default().to_string(),
+        };
+        let db = connect(&config).await.expect("production connect");
+
         for (setting, expected) in [
             ("statement_timeout", "30s"),
             ("lock_timeout", "15s"),

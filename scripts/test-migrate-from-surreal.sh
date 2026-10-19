@@ -21,6 +21,7 @@ cat > "$WORK_DIR/bin/docker" <<FAKE
 echo "\$*" >> "$WORK_DIR/calls"
 env | grep '^OTEL_' >> "$WORK_DIR/otel" || true
 case "\$*" in
+  *State.Running*) printf '%s|%s\n' "\$(cat "$WORK_DIR/running")" "\$(cat "$WORK_DIR/mounts")" ;;
   "inspect -f"*) cat "$WORK_DIR/mounts" ;;
   "run --rm -v"*)
     case "\$(cat "$WORK_DIR/store")" in yes) exit 0 ;; no) exit 1 ;; *) exit 125 ;; esac ;;
@@ -39,7 +40,8 @@ fail() { echo "FAIL - $1" >&2; failures=$((failures + 1)); }
 # Run the script with the given check and import statuses, the backend
 # container's mounts as $3 (default: the SurrealDB build, mounting the old
 # store; "none" for no container at all), and whether the old volume holds a
-# store as $4 (default yes); echo its status.
+# store as $4 (default yes), and whether the container is running as $5
+# (default true); echo its status.
 run_case() {
   : > "$WORK_DIR/calls"
   : > "$WORK_DIR/otel"
@@ -51,6 +53,7 @@ run_case() {
     *) echo "$3 " > "$WORK_DIR/mounts" ;;
   esac
   echo "${4:-yes}" > "$WORK_DIR/store"
+  echo "${5:-true}" > "$WORK_DIR/running"
   status=0
   PATH="$WORK_DIR/bin:$PATH" BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db \
     OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
@@ -77,6 +80,14 @@ if [ "$status" = 1 ] && ! grep -q 'stop\|--surreal' "$WORK_DIR/calls"; then
   pass "postgres data behind a rolled-back SurrealDB build stops the deploy"
 else
   fail "rollback guard: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- ... but a *stopped* SurrealDB build (a failed cut-over's leftover) does not
+status=$(run_case 3 0 old yes false)
+if [ "$status" = 0 ]; then
+  pass "postgres data behind a stopped SurrealDB container deploys on"
+else
+  fail "stopped old container: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
 # --- empty: stop the old backend, then import ---------------------------------

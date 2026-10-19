@@ -46,10 +46,20 @@ case "$status" in
     # written since lives only in SurrealDB, and deploying on would silently
     # drop it. Stop, and leave the reconciliation to a person (README §
     # Database, "Rolling back").
+    #
+    # Only a *running* SurrealDB build counts. A stopped one is what a
+    # cut-over leaves behind when its import committed but the `compose up`
+    # after it failed (a registry hiccup, say): retrying must carry on, and
+    # stopping the old backend is also how a person chooses Postgres after a
+    # rollback (README § Database).
     if docker inspect "$BORED_CONTAINER_NAME" > /dev/null 2>&1; then
-      mounts=$(docker inspect -f '{{range .Mounts}}{{.Name}} {{end}}' "$BORED_CONTAINER_NAME")
-      case " $mounts " in
-        *" $DB_VOLUME "*)
+      state=$(docker inspect -f '{{.State.Running}}|{{range .Mounts}}{{.Name}} {{end}}' "$BORED_CONTAINER_NAME")
+      case " ${state#*|} " in
+        *" $DB_VOLUME "*) running=${state%%|*} ;;
+        *) running=false ;;
+      esac
+      case "$running" in
+        true)
           echo "ERROR: postgres already holds data, but $BORED_CONTAINER_NAME is a SurrealDB" >&2
           echo "       build (it mounts $DB_VOLUME): the environment was rolled back after" >&2
           echo "       its move to postgres. Deploying would drop what was written to" >&2
