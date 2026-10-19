@@ -137,7 +137,8 @@ async fn persist_update(
             DbOperation::Update,
             "cards",
         ))
-        .await?;
+        .await
+        .map_err(crate::error::card_column_write_error)?;
     card.ok_or(ApiError::NotFound)
 }
 
@@ -169,7 +170,8 @@ async fn persist_move(
         DbOperation::Update,
         "cards",
     ))
-    .await?;
+    .await
+    .map_err(crate::error::card_column_write_error)?;
     card.ok_or(ApiError::NotFound)
 }
 
@@ -371,7 +373,8 @@ pub async fn create_card(
         DbOperation::Insert,
         "cards",
     ))
-    .await?;
+    .await
+    .map_err(crate::error::card_column_write_error)?;
 
     match card {
         Some(c) => {

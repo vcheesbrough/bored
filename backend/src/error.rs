@@ -46,10 +46,27 @@ const UNIQUE_VIOLATION: &str = "23505";
 /// SQLSTATE `23503`, `foreign_key_violation`.
 const FOREIGN_KEY_VIOLATION: &str = "23503";
 
-/// The foreign key from a card to its column. A write that violates it named
-/// (or raced) a column that no longer exists — the caller's 404, exactly what
-/// the route answers when it sees the column missing up front.
+/// The foreign key from a card to its column.
 const CARDS_COLUMN_FKEY: &str = "cards_column_id_fkey";
+
+/// For a write that *puts a card into a column* (create, move, update): a
+/// violation of the card → column foreign key means the column vanished
+/// between the route's check and the write — a create racing the column's
+/// delete — and is the caller's 404, exactly what the route answers when it
+/// sees the column missing up front. Anything else classifies as usual.
+///
+/// Applied at those call sites only, not in [`classify`]: the same constraint
+/// also fires when a *column delete* finds cards still in it, which is an
+/// expected retry (`routes::cascade`), not a missing column.
+pub(crate) fn card_column_write_error(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(database) = &error
+        && database.code().as_deref() == Some(FOREIGN_KEY_VIOLATION)
+        && database.constraint() == Some(CARDS_COLUMN_FKEY)
+    {
+        return ApiError::NotFound;
+    }
+    classify(error)
+}
 
 /// The body the link routes return for a duplicate link. Lives here because
 /// both the classifier below and `routes::links` (which checks for duplicates
@@ -221,9 +238,8 @@ fn classify(error: sqlx::Error) -> ApiError {
     }
 }
 
-/// The client error a constraint violation stands for, if `error` is one of
-/// the three this API translates (two unique constraints → 409, a card's
-/// missing column → 404); `None` for anything else.
+/// The client-facing conflict a unique violation stands for, if `error` is one
+/// of the two this API translates; `None` for anything else.
 fn unique_index_conflict(error: &sqlx::Error) -> Option<ApiError> {
     let sqlx::Error::Database(database) = error else {
         return None;
@@ -233,7 +249,6 @@ fn unique_index_conflict(error: &sqlx::Error) -> Option<ApiError> {
         (Some(UNIQUE_VIOLATION), Some(CARD_LINKS_PAIR)) => {
             Some(ApiError::Conflict(Some(ALREADY_LINKED_MESSAGE)))
         }
-        (Some(FOREIGN_KEY_VIOLATION), Some(CARDS_COLUMN_FKEY)) => Some(ApiError::NotFound),
         _ => None,
     }
 }

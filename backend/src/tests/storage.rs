@@ -387,3 +387,66 @@ async fn a_column_that_keeps_filling_is_a_conflict_with_no_false_history() {
         .unwrap();
     assert_eq!(columns, 1, "the column is still there");
 }
+
+/// A card moved to another column while its old column is being deleted is
+/// left alone in its new home: the cascade re-reads each card and deletes by
+/// id *and* column. A trigger moves `k-moved` out as the first card goes.
+#[tokio::test]
+async fn a_card_moved_out_mid_delete_survives_in_its_new_column() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (board, column) = setup_board_and_column(&server).await;
+    let other: shared::Column = server
+        .post(&format!("/api/boards/{}/columns", board.name))
+        .json(&shared::CreateColumnRequest {
+            name: "Other".to_string(),
+            position: 1,
+        })
+        .await
+        .json();
+    for statement in [
+        format!(
+            "INSERT INTO cards (id, column_id, body, position) VALUES \
+             ('k-first', '{0}', 'first', 1), ('k-moved', '{0}', 'moved', 2)",
+            column.id
+        ),
+        format!(
+            "CREATE FUNCTION move_out() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF OLD.id = 'k-first' THEN \
+                 UPDATE cards SET column_id = '{}' WHERE id = 'k-moved'; \
+               END IF; \
+               RETURN OLD; \
+             END $$",
+            other.id
+        ),
+        "CREATE TRIGGER move_out AFTER DELETE ON cards \
+         FOR EACH ROW EXECUTE FUNCTION move_out()"
+            .to_string(),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&db)
+            .await
+            .expect("setup");
+    }
+
+    server
+        .delete(&format!("/api/columns/{}", column.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let moved: shared::Card = server.get("/api/cards/k-moved").await.json();
+    assert_eq!(
+        moved.column_id, other.id,
+        "the moved card keeps its new home"
+    );
+    let deleted_cards: Vec<String> = sqlx::query_scalar(
+        "SELECT entity_id FROM audit_log WHERE entity_type = 'card' AND action = 'delete'",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(deleted_cards, vec!["k-first".to_string()]);
+}

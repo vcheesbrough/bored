@@ -578,7 +578,20 @@ async fn a_card_for_a_vanished_column_is_not_found() {
     .execute(&db)
     .await
     .expect_err("there is no such column");
-    assert!(matches!(ApiError::from(error), ApiError::NotFound));
+    // At a card-write call site, the missing column is the caller's 404 …
+    assert!(matches!(
+        crate::error::card_column_write_error(error),
+        ApiError::NotFound
+    ));
+    // … but the general classifier does not guess: the same constraint also
+    // blocks a column delete that still has cards, which is no 404.
+    let error = sqlx::query(
+        "INSERT INTO cards (id, column_id, body, position) VALUES ('c2', 'gone', 'b', 1)",
+    )
+    .execute(&db)
+    .await
+    .expect_err("there is no such column");
+    assert!(matches!(ApiError::from(error), ApiError::Internal(_)));
 }
 
 #[tokio::test]

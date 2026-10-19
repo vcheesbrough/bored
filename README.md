@@ -131,6 +131,8 @@ docker exec bored-dev-bored-db-1 pg_dump -U bored -Fc bored > bored-dev-$(date -
 # restore into an empty database: pg_restore -U bored -d bored --no-owner < file.dump
 ```
 
+**Rolling back.** Until card #471's follow-up removes it, the old SurrealKV volume is untouched by the move, so redeploying the previous image brings the environment back on SurrealDB — but anything written to Postgres since the move is not in that store and would be lost. Prefer fixing forward; roll back only before any real writes.
+
 **The SurrealDB import (temporary).** Until card #471's follow-up removes it, each deploy runs [`scripts/migrate-from-surreal.sh`](scripts/migrate-from-surreal.sh): it starts Postgres and asks `bored-backend migrate-from-surreal --check-empty` whether it holds data. If it does, nothing else happens. If not, it stops the old backend and runs the import from the old SurrealKV volume (mounted read-only; the import copies it aside first), which writes every record in one transaction, rewrites pre-#472 `d'…'` timestamps in audit snapshots, reads everything back and commits only if per-table counts and a SHA-256 over every row match. Rows SurrealDB let dangle (a card whose column is gone, a link to a deleted card) cannot satisfy the foreign keys; they are skipped and listed by id in the `surreal migration committed` log line, with the counts, checksum and rewrite count.
 
 ### Environment variables
