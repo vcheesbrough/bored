@@ -135,6 +135,38 @@ docker exec bored-dev-bored-db-1 pg_dump -U bored -Fc bored > bored-dev-$(date -
 
 **The SurrealDB import (temporary).** Until card #471's follow-up removes it, each deploy runs [`scripts/migrate-from-surreal.sh`](scripts/migrate-from-surreal.sh): it starts Postgres and asks `bored-backend migrate-from-surreal --check-empty` whether it holds data. If it does, nothing else happens. If not, it stops the old backend and runs the import from the old SurrealKV volume (mounted read-only; the import copies it aside first), which writes every record in one transaction, rewrites pre-#472 `d'…'` timestamps in audit snapshots, reads everything back and commits only if per-table counts and a SHA-256 over every row match. Rows SurrealDB let dangle (a card whose column is gone, a link to a deleted card) cannot satisfy the foreign keys; they are skipped and listed by id in the `surreal migration committed` log line, with the counts, checksum and rewrite count.
 
+### SQL console
+
+A read-only [pgweb](https://github.com/sosedoff/pgweb) at **`https://<host>/dbconsole`** (card #473, a port of v-note #299), for looking at bored's database while diagnosing something. It is the `sqltool` service in `deploy/docker-compose.yml`, behind the compose profile `sqltool`.
+
+**Who can reach it.** Three gates, in order:
+
+1. **LAN/VPN only** (`lan-vpn-only@docker`), with a rate limit.
+2. **Authentik** forward auth through the proxy provider `bored-sql-console-<env>`. Only members of the group **`bored-<env>-sql-console`** get past it; add or remove people in Authentik.
+3. **pgweb's own basic auth** as a backstop, which keeps the console closed if Authentik is ever not in front of it. Traefik injects that credential after Authentik approves, so nobody is prompted twice.
+   - Its limits: the credential sits in the container's Traefik label. Anyone who can `docker inspect` on mini, or read Traefik's API or dashboard, can read it, but they already control the host.
+   - Other containers on `proxy-backend` can reach pgweb directly, skipping the LAN and Authentik gates. For them the backstop is the only gate, and its random 64-hex-character password is what holds.
+   - Behind every gate, the console can still only read (the grants below).
+
+The container's healthcheck goes red if an unauthenticated request is ever *not* refused.
+
+**What it can do.** It connects as **`bored_pgweb`**, never as `bored`. That role is created by a migration (`backend/migrations/20261020000000_pgweb_readonly_role.sql`) with:
+- SELECT only, including on tables later migrations add. This is the boundary: even a session that switches itself out of read-only mode cannot write.
+- read-only transactions and a 30 s `statement_timeout` as the session's *defaults*. A session can change both, so the hard cap on a query is pgweb's own `--query-timeout=30`.
+- every statement logged by Postgres, as the audit trail.
+
+pgweb's own `--readonly` mode is a client-side filter: a superuser behind it can still read host files through `pg_read_file`. The role is the real boundary. The session is locked to that connection, so it cannot be repointed from the browser.
+
+**How it is deployed.** The deploy steps set `COMPOSE_PROFILES=sqltool`.
+- `scripts/deploy-app.sh` gives the role its password from `/bored/devops/<env>/compose/PGWEB_DB_PASSWORD` once the backend is healthy, and then starts the console.
+- The basic-auth pair is `PGWEB_AUTH_USER` / `PGWEB_AUTH_PASS` in the same layer.
+- `scripts/attach-sqltool-outpost.sh` attaches the provider to the shared embedded outpost. It only ever appends; the outpost must never be declared in a blueprint.
+- `scripts/smoke-sql-console.sh` checks after every deploy that an anonymous request is redirected to Authentik, not served.
+
+**Turning it off.** Remove `sqltool` from `COMPOSE_PROFILES` in `.woodpecker/build.yml`; the deploy and smoke steps share one anchor per environment. The next deploy then removes the container (`rm -sf sqltool`), sets `bored_pgweb NOLOGIN`, and the smoke check skips itself. Turning it back on restores the login. To remove the console completely, also delete the `bored-sql-console-<env>` provider, application and group from the blueprints and from Authentik.
+
+**Metrics.** pgweb's metrics (`:9191/metrics`) are discovered by Alloy through the `observability.metrics.*` labels, as `service_name=bored-sql-console`.
+
 ### Environment variables
 
 The full set lives in [`deploy/docker-compose.yml`](deploy/docker-compose.yml):

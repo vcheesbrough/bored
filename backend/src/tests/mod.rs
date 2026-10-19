@@ -16,6 +16,7 @@ mod links;
 mod outbound_http;
 mod reorder;
 mod router;
+mod sql_console;
 mod sse;
 mod storage;
 mod tags;

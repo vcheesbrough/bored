@@ -148,6 +148,128 @@ services:
       retries: 5
     stop_grace_period: 30s
 
+  # Read-only SQL console at https://<host>/dbconsole (card #473, a port of
+  # v-note #299). Off unless COMPOSE_PROFILES names `sqltool`, which the deploy
+  # steps set (.woodpecker/build.yml) and nothing else does.
+  #
+  # No `build:`, and pinned by digest exactly as Postgres is: a third-party
+  # image reached over the network, and a floating tag would let a rebuild
+  # change what has database access.
+  sqltool:
+    profiles: [sqltool]
+    image: sosedoff/pgweb@sha256:a5256d416e2e8b92d69a4459058e3eca33a9f075d8325491644411d0bc3bd70b
+    restart: unless-stopped
+    environment:
+      # 🚫 No `:-` default anywhere in this block. The obvious convenience —
+      # falling back to the application's login — hands the console a
+      # **superuser**, which turns pgweb's "read-only" mode into arbitrary
+      # host-file read (see the migration's header,
+      # backend/migrations/20261020000000_pgweb_readonly_role.sql). There is no
+      # degraded mode.
+      #
+      # ⚠️ And no `:?` guard either, which is NOT an oversight — do not "fix" it.
+      # Compose interpolates the whole file *before* it filters by profile, so a
+      # `:?` here fails `docker compose config` even when this service is off,
+      # breaking every deploy that does not run the console. The guard lives in
+      # scripts/deploy-app.sh, conditional on the profile actually being active.
+      PGWEB_DATABASE_URL: postgres://bored_pgweb:${PGWEB_DB_PASSWORD}@bored-db:5432/bored?sslmode=disable
+      PGWEB_URL_PREFIX: dbconsole
+      # Locks the session to the connection string above: /api/connect and
+      # /api/disconnect answer "Session is locked", so there is no browser path
+      # from the console to another role or database.
+      PGWEB_LOCK_SESSION: "1"
+      # Deliberately NOT set: PGWEB_SESSIONS re-opens the connection screen,
+      # which is the one thing that would undo the lock above.
+      #
+      # The basic-auth backstop. Authentik is the identity gate (the routers
+      # below); this keeps the console closed at the *application* layer if the
+      # outpost is down or the provider misconfigured. Traefik injects the
+      # matching header after Authentik approves, so nobody is prompted for it.
+      PGWEB_AUTH_USER: ${PGWEB_AUTH_USER}
+      PGWEB_AUTH_PASS: ${PGWEB_AUTH_PASS}
+    command:
+      - --bind=0.0.0.0
+      - --listen=8081
+      - --readonly
+      - --skip-open
+      # The hard cap on a console query. The role's own 30s statement_timeout
+      # is only a default — any session may SET it higher — but pgweb cancels a
+      # query at this deadline whatever the session has set.
+      - --query-timeout=30
+      - --log-format=json
+      # Records X-Forwarded-User when present. mini-config's authentik
+      # middleware forwards X-authentik-username, not that header, so this logs
+      # nothing today; it is set so identity appears the day it does.
+      - --log-forwarded-user
+      - --metrics
+      - --metrics-addr=0.0.0.0:9191
+      - --metrics-path=/metrics
+    depends_on:
+      bored-db:
+        condition: service_healthy
+    networks:
+      - bored-internal
+      - proxy-backend
+    # Liveness *and* "auth is on" in one probe: an unauthenticated request must
+    # be refused. If auth were ever disabled this goes red rather than serving.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/dbconsole/api/info | grep -q 401"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    labels:
+      # How Alloy labels its logs and finds its metrics (mini-config
+      # monitoring-stack OBSERVABILITY.md): service `bored-sql-console`, scraped
+      # by the `docker-apps` job through the labels below.
+      - observability.service.name=bored-sql-console
+      - observability.deployment.environment=${APP_ENV}
+      - observability.metrics.scrape=true
+      - observability.metrics.port=9191
+      - observability.metrics.path=/metrics
+      - observability.metrics.scheme=http
+      - traefik.enable=true
+
+      # --- router 1: the console itself ---------------------------------
+      # Rule length already outranks the app's bare `Host(…)`; set explicitly
+      # anyway, because the app serving the console's URL would fail silently.
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.entrypoints=websecure
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.rule=Host(`${BORED_HOST}`) && PathPrefix(`/dbconsole`)
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.priority=100
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.tls=true
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.tls.certresolver=myresolver
+      # Middlewares are per router and run in order: LAN/VPN only, then the
+      # rate limit (each console query can run for up to pgweb's 30s
+      # --query-timeout against the live database), then Authentik — a
+      # denied forward-auth short-circuits the chain, so the credential injector
+      # last only ever runs on an approved request. `security-headers@docker`
+      # is deliberately absent: its CSP has no `unsafe-eval`, and pgweb's Ace
+      # editor needs it.
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool.middlewares=lan-vpn-only@docker,rate-limit@docker,authentik@docker,${BORED_CONTAINER_NAME}-sqltool-auth@docker
+      - traefik.http.services.${BORED_CONTAINER_NAME}-sqltool.loadbalancer.server.port=8081
+
+      # --- router 2: the forward-auth callback --------------------------
+      # Load-bearing. Authentik builds its callback from the provider's
+      # *hostname*, discarding any path, so the login completes at
+      # /outpost.goauthentik.io/… — which, without this router, would match
+      # the app's `Host(…)` router, get the SPA's index.html, and loop forever.
+      # `authentik@docker` answers these itself; the service is only there
+      # because a router needs one.
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.entrypoints=websecure
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.rule=Host(`${BORED_HOST}`) && PathPrefix(`/outpost.goauthentik.io`)
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.priority=100
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.tls=true
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.tls.certresolver=myresolver
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.middlewares=lan-vpn-only@docker,authentik@docker
+      - traefik.http.routers.${BORED_CONTAINER_NAME}-sqltool-callback.service=${BORED_CONTAINER_NAME}-sqltool
+
+      # --- the credential injector --------------------------------------
+      # Satisfies pgweb's basic auth on behalf of an Authentik-approved user.
+      # `customRequestHeaders` overwrites, so a client's own Authorization header
+      # is replaced, never honoured. PGWEB_AUTH_B64 is derived by
+      # scripts/deploy-app.sh from the two values above, so they cannot drift.
+      - traefik.http.middlewares.${BORED_CONTAINER_NAME}-sqltool-auth.headers.customrequestheaders.Authorization=Basic ${PGWEB_AUTH_B64}
+
   # The one-off SurrealDB → Postgres import (card #471), run by
   # scripts/migrate-from-surreal.sh during a deploy and never started by
   # `up`: the profile keeps it out of every ordinary command. Same image and

@@ -94,6 +94,9 @@ cargo test -p frontend                                # HOST target, not wasm32 
 sh scripts/test-docker-git-credential.sh              # Dockerfile frontend-builder
 sh scripts/test-migrate-from-surreal.sh </dev/null   # Dockerfile frontend-builder
 sh scripts/test-deploy-app.sh </dev/null              # Dockerfile frontend-builder
+# The sql-console-script-validation step (alpine + python3 bash curl jq):
+./scripts/test-smoke-sql-console.sh
+./scripts/test-attach-sqltool-outpost.sh
 ```
 
 `cargo test -p frontend` is deliberately untargeted: `frontend` is a
@@ -182,6 +185,13 @@ layering model and subtree layout.
   so rotating it is one write (then redeploy — and `ALTER ROLE bored PASSWORD …` inside
   the running `bored-db`, since Postgres only reads `POSTGRES_PASSWORD` when it first
   initialises its volume).
+- **The SQL console's credentials** (card #473) are `/bored/devops/{dev,prod}/compose/`
+  `PGWEB_DB_PASSWORD` (the `bored_pgweb` role's password; the deploy sets it on
+  every run, so rotating it is one write and a redeploy) and
+  `PGWEB_AUTH_USER` / `PGWEB_AUTH_PASS` (pgweb's basic-auth backstop). **Never** point
+  the console at the `bored` login or give `bored_pgweb` more than SELECT: a
+  superuser behind pgweb's read-only mode can read host files. Who may open it is
+  Authentik group membership (`bored-{dev,prod}-sql-console`); README § SQL console.
 - **`server/*`** (`http-port`, `tls-cert`, `tls-key`, `static-dir`) is
   the one group that stays out of sovereign-config — it's image-internal, set via
   `Dockerfile` `ENV BORED__SERVER__*` or in-code defaults.
