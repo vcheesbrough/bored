@@ -49,6 +49,19 @@ steps:
       - ./scripts/test-smoke-sql-console.sh
       - ./scripts/test-attach-sqltool-outpost.sh
 
+  metrics-network-order:
+    # Every service Alloy should scrape must see proxy-backend first by network
+    # name, or Alloy's discovery drops its metrics without a sound (card #473;
+    # scripts/test-metrics-network-order.sh). Needs only `docker compose config`
+    # — no daemon — so the docker CLI image without the socket.
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: *docker-image
+    commands:
+      - apk add --no-cache jq
+      - ./scripts/test-metrics-network-order.sh
+
   build:
     # Build the image and validate its OCI labels LOCALLY — do not push yet.
     # The push is deferred to publish-image, which runs only after e2e passes, so
