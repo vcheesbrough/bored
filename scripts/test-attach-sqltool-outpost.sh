@@ -76,6 +76,18 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/v3/providers/proxy/":
             if current == "no-provider":
                 return self._json(200, {"results": []})
+            if current == "late-provider":
+                # The blueprint apply finishing a moment after the step
+                # starts: absent on the first two lookups, then present.
+                try:
+                    with open(f"{WORK}/lookups") as handle:
+                        seen = int(handle.read())
+                except FileNotFoundError:
+                    seen = 0
+                with open(f"{WORK}/lookups", "w") as handle:
+                    handle.write(str(seen + 1))
+                if seen < 2:
+                    return self._json(200, {"results": []})
             return self._json(200, {"results": [{"pk": NEW_PK, "name": "bored-sql-console-dev"}]})
 
         if url.path == "/api/v3/outposts/instances/":
@@ -157,8 +169,10 @@ check() {
 
 run_mode() {
   echo "$1" > "$WORK/mode"
-  rm -f "$WORK/patched" "$WORK/patch-count"
+  rm -f "$WORK/patched" "$WORK/patch-count" "$WORK/lookups"
   set +e
+  LOOKUP_ATTEMPTS="${LOOKUP_ATTEMPTS_OVERRIDE:-1}" \
+  LOOKUP_DELAY=0 \
   AUTHENTIK_URL="http://127.0.0.1:${PORT}" \
   AUTHENTIK_TOKEN=stub-token \
   PROVIDER_NAME=bored-sql-console-dev \
@@ -186,6 +200,17 @@ echo "==> a provider the blueprint has not created yet fails loudly"
 run_mode no-provider
 check "$([ "$RC" -ne 0 ] && echo ok)" "exits non-zero (rc=$RC)"
 check "$([ ! -f "$WORK/patched" ] && echo ok)" "sends no PATCH"
+
+echo "==> a provider the blueprint apply creates a moment late is waited for"
+LOOKUP_ATTEMPTS_OVERRIDE=5 run_mode late-provider
+check "$([ "$RC" -eq 0 ] && echo ok)" "exits 0 once it appears (rc=$RC)"
+check "$(grep -q 'not there yet' "$WORK/out" && echo ok)" "says it is waiting"
+if [ -f "$WORK/patched" ]; then
+  patched=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["providers"])' "$WORK/patched")
+  check "$([ "$patched" = "[1, 5, 7, 9, 42]" ] && echo ok)" "then attaches it (got $patched)"
+else
+  check "" "then attaches it"
+fi
 
 echo "==> an unresolvable outpost fails loudly"
 run_mode no-outpost
