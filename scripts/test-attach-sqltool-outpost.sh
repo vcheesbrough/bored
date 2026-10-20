@@ -11,6 +11,7 @@
 # bytes on the wire rather than about the exit code:
 #
 #   missing      → provider absent from the list → PATCHes existing + new
+#   late-provider → the provider appears on the third lookup → waits, then attaches
 #   present      → provider already attached     → no PATCH at all
 #   no-provider  → blueprint has not applied yet → fails, no PATCH
 #   no-outpost   → outpost name does not resolve → fails, no PATCH
@@ -74,8 +75,28 @@ class Handler(BaseHTTPRequestHandler):
         current = mode()
 
         if url.path == "/api/v3/providers/proxy/":
+            # Every lookup is counted, so a test can check how many were made.
+            try:
+                with open(f"{WORK}/lookup-count") as handle:
+                    total = int(handle.read())
+            except FileNotFoundError:
+                total = 0
+            with open(f"{WORK}/lookup-count", "w") as handle:
+                handle.write(str(total + 1))
             if current == "no-provider":
                 return self._json(200, {"results": []})
+            if current == "late-provider":
+                # The blueprint apply finishing a moment after the step
+                # starts: absent on the first two lookups, then present.
+                try:
+                    with open(f"{WORK}/lookups") as handle:
+                        seen = int(handle.read())
+                except FileNotFoundError:
+                    seen = 0
+                with open(f"{WORK}/lookups", "w") as handle:
+                    handle.write(str(seen + 1))
+                if seen < 2:
+                    return self._json(200, {"results": []})
             return self._json(200, {"results": [{"pk": NEW_PK, "name": "bored-sql-console-dev"}]})
 
         if url.path == "/api/v3/outposts/instances/":
@@ -157,8 +178,10 @@ check() {
 
 run_mode() {
   echo "$1" > "$WORK/mode"
-  rm -f "$WORK/patched" "$WORK/patch-count"
+  rm -f "$WORK/patched" "$WORK/patch-count" "$WORK/lookups" "$WORK/lookup-count"
   set +e
+  LOOKUP_ATTEMPTS="${LOOKUP_ATTEMPTS_OVERRIDE:-1}" \
+  LOOKUP_DELAY=0 \
   AUTHENTIK_URL="http://127.0.0.1:${PORT}" \
   AUTHENTIK_TOKEN=stub-token \
   PROVIDER_NAME=bored-sql-console-dev \
@@ -185,6 +208,25 @@ check "$([ ! -f "$WORK/patched" ] && echo ok)" "sends no PATCH at all"
 echo "==> a provider the blueprint has not created yet fails loudly"
 run_mode no-provider
 check "$([ "$RC" -ne 0 ] && echo ok)" "exits non-zero (rc=$RC)"
+check "$([ ! -f "$WORK/patched" ] && echo ok)" "sends no PATCH"
+
+echo "==> a provider the blueprint apply creates a moment late is waited for"
+LOOKUP_ATTEMPTS_OVERRIDE=5 run_mode late-provider
+check "$([ "$RC" -eq 0 ] && echo ok)" "exits 0 once it appears (rc=$RC)"
+check "$(grep -q 'not there yet' "$WORK/out" && echo ok)" "says it is waiting"
+if [ -f "$WORK/patched" ]; then
+  patched=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["providers"])' "$WORK/patched")
+  check "$([ "$patched" = "[1, 5, 7, 9, 42]" ] && echo ok)" "then attaches it (got $patched)"
+else
+  check "" "then attaches it"
+fi
+
+echo "==> a provider that never appears fails once the attempts are spent"
+LOOKUP_ATTEMPTS_OVERRIDE=3 run_mode no-provider
+check "$([ "$RC" -ne 0 ] && echo ok)" "exits non-zero (rc=$RC)"
+check "$([ "$(cat "$WORK/lookup-count")" = "3" ] && echo ok)" \
+  "looks exactly LOOKUP_ATTEMPTS times (made $(cat "$WORK/lookup-count"))"
+check "$(grep -q 'after 3 lookup' "$WORK/out" && echo ok)" "says how long it waited"
 check "$([ ! -f "$WORK/patched" ] && echo ok)" "sends no PATCH"
 
 echo "==> an unresolvable outpost fails loudly"

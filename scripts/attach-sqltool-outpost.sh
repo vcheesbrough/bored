@@ -54,14 +54,31 @@ urlencode() {
   jq -rn --arg s "$1" '$s | @uri'
 }
 
+# The blueprint apply that creates the provider runs in Authentik's worker,
+# *after* the apply step has returned: on bored's first prod deploy this step
+# looked before the worker had got there (deploy 410). So the lookup waits,
+# for up to LOOKUP_ATTEMPTS × LOOKUP_DELAY seconds, before calling the provider
+# missing.
+LOOKUP_ATTEMPTS="${LOOKUP_ATTEMPTS:-20}"
+LOOKUP_DELAY="${LOOKUP_DELAY:-3}"
+
 echo "==> looking up proxy provider '${PROVIDER_NAME}'"
-provider_pk=$(
-  api GET "/providers/proxy/?name__iexact=$(urlencode "$PROVIDER_NAME")" |
-    jq -r '.results[0].pk // empty'
-)
+provider_pk=""
+for attempt in $(seq 1 "$LOOKUP_ATTEMPTS"); do
+  provider_pk=$(
+    api GET "/providers/proxy/?name__iexact=$(urlencode "$PROVIDER_NAME")" |
+      jq -r '.results[0].pk // empty'
+  )
+  [ -n "$provider_pk" ] && break
+  if [ "$attempt" -lt "$LOOKUP_ATTEMPTS" ]; then
+    echo "    not there yet (attempt ${attempt}/${LOOKUP_ATTEMPTS}); waiting ${LOOKUP_DELAY}s for the blueprint apply"
+    sleep "$LOOKUP_DELAY"
+  fi
+done
 if [ -z "$provider_pk" ]; then
-  echo "ERROR: no proxy provider named '${PROVIDER_NAME}'" >&2
-  echo "       The blueprint apply that creates it must run before this step." >&2
+  echo "ERROR: no proxy provider named '${PROVIDER_NAME}' after ${LOOKUP_ATTEMPTS} lookup(s), ${LOOKUP_DELAY}s apart" >&2
+  echo "       The blueprint apply that creates it must run before this step; check" >&2
+  echo "       that it succeeded and that the blueprint defines this provider." >&2
   exit 1
 fi
 echo "    provider pk=${provider_pk}"
