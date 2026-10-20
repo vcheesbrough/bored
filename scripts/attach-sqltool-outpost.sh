@@ -76,8 +76,9 @@ for attempt in $(seq 1 "$LOOKUP_ATTEMPTS"); do
   fi
 done
 if [ -z "$provider_pk" ]; then
-  echo "ERROR: no proxy provider named '${PROVIDER_NAME}'" >&2
-  echo "       The blueprint apply that creates it must run before this step." >&2
+  echo "ERROR: no proxy provider named '${PROVIDER_NAME}' after ${LOOKUP_ATTEMPTS} lookup(s), ${LOOKUP_DELAY}s apart" >&2
+  echo "       The blueprint apply that creates it must run before this step; check" >&2
+  echo "       that it succeeded and that the blueprint defines this provider." >&2
   exit 1
 fi
 echo "    provider pk=${provider_pk}"

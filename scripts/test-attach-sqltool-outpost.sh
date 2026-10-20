@@ -11,6 +11,7 @@
 # bytes on the wire rather than about the exit code:
 #
 #   missing      → provider absent from the list → PATCHes existing + new
+#   late-provider → the provider appears on the third lookup → waits, then attaches
 #   present      → provider already attached     → no PATCH at all
 #   no-provider  → blueprint has not applied yet → fails, no PATCH
 #   no-outpost   → outpost name does not resolve → fails, no PATCH
@@ -74,6 +75,14 @@ class Handler(BaseHTTPRequestHandler):
         current = mode()
 
         if url.path == "/api/v3/providers/proxy/":
+            # Every lookup is counted, so a test can check how many were made.
+            try:
+                with open(f"{WORK}/lookup-count") as handle:
+                    total = int(handle.read())
+            except FileNotFoundError:
+                total = 0
+            with open(f"{WORK}/lookup-count", "w") as handle:
+                handle.write(str(total + 1))
             if current == "no-provider":
                 return self._json(200, {"results": []})
             if current == "late-provider":
@@ -169,7 +178,7 @@ check() {
 
 run_mode() {
   echo "$1" > "$WORK/mode"
-  rm -f "$WORK/patched" "$WORK/patch-count" "$WORK/lookups"
+  rm -f "$WORK/patched" "$WORK/patch-count" "$WORK/lookups" "$WORK/lookup-count"
   set +e
   LOOKUP_ATTEMPTS="${LOOKUP_ATTEMPTS_OVERRIDE:-1}" \
   LOOKUP_DELAY=0 \
@@ -211,6 +220,14 @@ if [ -f "$WORK/patched" ]; then
 else
   check "" "then attaches it"
 fi
+
+echo "==> a provider that never appears fails once the attempts are spent"
+LOOKUP_ATTEMPTS_OVERRIDE=3 run_mode no-provider
+check "$([ "$RC" -ne 0 ] && echo ok)" "exits non-zero (rc=$RC)"
+check "$([ "$(cat "$WORK/lookup-count")" = "3" ] && echo ok)" \
+  "looks exactly LOOKUP_ATTEMPTS times (made $(cat "$WORK/lookup-count"))"
+check "$(grep -q 'after 3 lookup' "$WORK/out" && echo ok)" "says how long it waited"
+check "$([ ! -f "$WORK/patched" ] && echo ok)" "sends no PATCH"
 
 echo "==> an unresolvable outpost fails loudly"
 run_mode no-outpost
