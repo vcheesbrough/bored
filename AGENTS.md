@@ -97,6 +97,8 @@ sh scripts/test-deploy-app.sh </dev/null              # Dockerfile frontend-buil
 # The sql-console-script-validation step (alpine + python3 bash curl jq):
 ./scripts/test-smoke-sql-console.sh
 ./scripts/test-attach-sqltool-outpost.sh
+# The metrics-network-order step (docker CLI image + jq):
+./scripts/test-metrics-network-order.sh
 ```
 
 `cargo test -p frontend` is deliberately untargeted: `frontend` is a

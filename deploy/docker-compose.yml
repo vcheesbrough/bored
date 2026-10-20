@@ -303,7 +303,16 @@ volumes:
 
 networks:
   # The app ↔ database network, private to this compose project.
-  bored-internal: {}
+  #
+  # Its name must sort AFTER `proxy-backend`. Alloy's Docker discovery (like
+  # Prometheus' docker_sd, `match_first_network`) sees a container on several
+  # networks only through the first one *by name*, and its metrics scrape keeps
+  # targets on proxy-backend alone. Left as compose's default,
+  # `<project>_bored-internal` sorts first, so the SQL console's metrics were
+  # never scraped (card #473). Logs are discovered differently and were not
+  # affected.
+  bored-internal:
+    name: storage-${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}
   proxy-backend:
     external: true
 
