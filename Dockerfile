@@ -54,11 +54,6 @@ RUN sh /app/scripts/test-compose-up-ingest.sh
 COPY scripts/prune-stale-e2e-projects.sh scripts/prune-stale-e2e-projects.sh
 COPY scripts/test-prune-stale-e2e-projects.sh scripts/test-prune-stale-e2e-projects.sh
 RUN sh /app/scripts/test-prune-stale-e2e-projects.sh
-# And the deploy's one-off SurrealDB import wrapper (card #471), tested the
-# same way with a fake `docker`.
-COPY scripts/migrate-from-surreal.sh scripts/migrate-from-surreal.sh
-COPY scripts/test-migrate-from-surreal.sh scripts/test-migrate-from-surreal.sh
-RUN sh /app/scripts/test-migrate-from-surreal.sh < /dev/null
 COPY scripts/deploy-app.sh scripts/deploy-app.sh
 COPY scripts/test-deploy-app.sh scripts/test-deploy-app.sh
 RUN sh /app/scripts/test-deploy-app.sh < /dev/null
@@ -215,15 +210,6 @@ RUN openssl req -x509 -newkey rsa:4096 \
 ENV BORED__SERVER__TLS_CERT=/app/cert.pem
 ENV BORED__SERVER__TLS_KEY=/app/key.pem
 ENV BORED__SERVER__STATIC_DIR=/app/dist
-# SurrealKV's value cache — read now only by the one-off
-# `migrate-from-surreal` import (card #471), which opens the old store; remove
-# with it. Left unset, SurrealDB sizes it at
-# max(16 MiB, memory/2 − 1 GiB) — 14.5 GB on mini, with no container limit
-# (card #470). Board data is a few MB, so 64 MiB is ample. SurrealDB parses
-# the KiB/MiB/GiB suffix itself and silently falls back to that default on a
-# value it cannot parse; check the startup log line
-# "Setting maximum value cache size: 67108864" after changing it.
-ENV SURREAL_SURREALKV_MAX_VALUE_CACHE_SIZE=64MiB
 EXPOSE 443
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD ["busybox", "wget", "--quiet", "--spider", "--no-check-certificate", "https://localhost:443/health"]

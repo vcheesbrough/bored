@@ -20,7 +20,7 @@ file="${1:-deploy/docker-compose.yml}"
 # file resolves; `--format json` gives the final network names.
 config=$(
   BORED_IMAGE_TAG=x BORED_CONTAINER_NAME=bored-dev APP_ENV=dev BORED_HOST=h \
-  DB_VOLUME=a PG_VOLUME=b POSTGRES_PASSWORD=p SOVEREIGN_CONFIG_ACCESS_URL_FILE=u \
+  PG_VOLUME=b POSTGRES_PASSWORD=p SOVEREIGN_CONFIG_ACCESS_URL_FILE=u \
   PGWEB_DB_PASSWORD=p PGWEB_AUTH_USER=u PGWEB_AUTH_PASS=p PGWEB_AUTH_B64=b \
   COMPOSE_PROFILES='*' \
     docker compose -f "$file" config --format json 2>/dev/null

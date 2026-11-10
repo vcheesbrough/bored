@@ -32,7 +32,6 @@ mod redact;
 mod routes;
 mod server_span;
 mod spa;
-mod surreal_migration;
 mod timestamp;
 
 use std::sync::Arc;
@@ -60,8 +59,6 @@ enum StartupError {
     /// Postgres could not be reached, or its migrations failed. Carries the
     /// error's class only (card #366: a driver message can quote values).
     Database(&'static str),
-    /// `migrate-from-surreal` failed; its `Display` is already redacted.
-    Migration(surreal_migration::MigrationError),
     /// `run` panicked; the panic hook has already printed where.
     Panicked,
 }
@@ -72,7 +69,6 @@ impl std::fmt::Debug for StartupError {
             StartupError::Config(error) => write!(f, "{error}"),
             StartupError::Telemetry(error) => write!(f, "{error}"),
             StartupError::Database(class) => write!(f, "database unavailable ({class})"),
-            StartupError::Migration(error) => write!(f, "{error}"),
             StartupError::Panicked => write!(f, "panicked (see the message above on stderr)"),
         }
     }
@@ -115,12 +111,6 @@ impl From<sqlx::migrate::MigrateError> for StartupError {
     }
 }
 
-impl From<surreal_migration::MigrationError> for StartupError {
-    fn from(error: surreal_migration::MigrationError) -> Self {
-        StartupError::Migration(error)
-    }
-}
-
 /// The entry point builds the Tokio runtime by hand rather than with
 /// `#[tokio::main]`, for one reason: `#[tokio::main]` drops the runtime when
 /// `main` returns, and dropping a runtime waits *indefinitely* for its
@@ -140,23 +130,19 @@ fn main() -> Result<(), StartupError> {
         // correlated. An invalid variable set stops the process here.
         // rustls needs a crypto provider installed before any TLS handshake,
         // and both ring and aws-lc-rs are in the dependency tree, so it
-        // cannot pick one itself. Installed here, before *either* path:
-        // serving and `migrate-from-surreal` both build config, which opens
-        // the sovereign-config TLS client (card #471 — the import panicked
-        // when this lived in `run()` only).
+        // cannot pick one itself. Installed here, before anything builds
+        // config: that opens the sovereign-config TLS client, which would
+        // otherwise panic on its first handshake. (It lives in `main` rather
+        // than `run()` since card #471, when a second entry point — the
+        // since-removed SurrealDB import, card #489 — needed it too.)
         rustls::crypto::ring::default_provider()
             .install_default()
             .expect("failed to install rustls crypto provider");
         let telemetry = observability::init()?;
-        // `bored-backend migrate-from-surreal …` is the one-off SurrealDB
-        // import (card #471); anything else, including no arguments, serves.
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let outcome = match args.split_first() {
-            Some((command, rest)) if command == "migrate-from-surreal" => {
-                guarded(migrate_from_surreal(rest)).await
-            }
-            _ => guarded(run(&telemetry)).await.map(|()| 0),
-        };
+        // The binary has one job — serve — so command-line arguments are not
+        // read at all. (Until card #489 a `migrate-from-surreal` argument ran
+        // the one-off SurrealDB import instead; nothing passes it any more.)
+        let outcome = guarded(run(&telemetry)).await;
         // Always flush, whether we are here after a clean shutdown, a failed
         // startup or a panic — the telemetry of a process going down is the
         // most useful there is.
@@ -164,25 +150,9 @@ fn main() -> Result<(), StartupError> {
         outcome
     });
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
-    match result {
-        Ok(0) => Ok(()),
-        // A deliberate non-zero status (`--check-empty`'s "not empty"):
-        // nothing failed, so nothing is logged, but the caller sees the code.
-        Ok(code) => std::process::exit(i32::from(code)),
-        Err(error) => Err(error),
-    }
-}
-
-/// `migrate-from-surreal`: connect to the configured Postgres (running its
-/// migrations, so the schema exists) and run the import subcommand. Returns
-/// the process exit status.
-async fn migrate_from_surreal(args: &[String]) -> Result<u8, StartupError> {
-    let command = surreal_migration::Command::parse(args)?;
-    let cfg = tokio::task::block_in_place(config::build_config)?;
-    let database = config::load_group::<config::DatabaseConfig>(&cfg, "database")?;
-    drop(cfg);
-    let db = db::connect(&database).await?;
-    Ok(surreal_migration::run(command, &db).await?)
+    // `Err` makes `main` return it, and the `Termination` impl prints it via
+    // `Debug` and exits non-zero.
+    result
 }
 
 /// Run `work` (the process's whole life, `run`), turning a panic into

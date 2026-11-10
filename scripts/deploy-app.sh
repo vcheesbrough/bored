@@ -1,7 +1,7 @@
 #!/bin/sh
-# The app half of a deploy: the one-off SurrealDB import check (card #471),
-# the compose up of the backend and its database, then the read-only SQL
-# console (card #473) when it is enabled. Run under `sovereign-config render
+# The app half of a deploy: the compose up of the backend and its database,
+# then the read-only SQL console (card #473) when it is enabled. (Until card
+# #489 it first ran the one-off SurrealDB import check, card #471.) Run under `sovereign-config render
 # … --` so every part sees the rendered telemetry and compose layers.
 #
 # Usage: deploy-app.sh <docker compose project args...>
@@ -76,7 +76,10 @@ esac
 
 # --- the backend ------------------------------------------------------------
 
-"$here/migrate-from-surreal.sh" "$@"
+# One `up` starts both: the backend's `depends_on: condition: service_healthy`
+# holds it until Postgres accepts connections, and the backend applies any
+# pending schema migration at startup, before its health check passes.
+#
 # Named services only: with the console's profile active, a bare `up --wait`
 # would start pgweb too and wait on it, before its role can log in (the role
 # gets its password below, once the backend has run the migration that

@@ -251,20 +251,6 @@ pub async fn connect(config: &DatabaseConfig) -> Result<Db, sqlx::Error> {
     Ok(pool)
 }
 
-/// Whether the database holds any bored data yet — any board, column, card,
-/// link or audit row. The SurrealDB import (`surreal_migration.rs`) refuses to
-/// write into a database for which this is true.
-pub async fn has_data(db: &Db) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM boards) OR EXISTS (SELECT 1 FROM columns) \
-             OR EXISTS (SELECT 1 FROM cards) OR EXISTS (SELECT 1 FROM card_links) \
-             OR EXISTS (SELECT 1 FROM audit_log)",
-    )
-    .fetch_one(db)
-    .traced(DbQuery::new("db.has_data", DbOperation::Select, "boards"))
-    .await
-}
-
 /// A fresh, migrated database per test; lives in the test tree
 /// (`tests/db_support.rs`), re-exported here so tests reach it as
 /// `db::connect_test`.
@@ -305,11 +291,6 @@ mod tests {
         let mut calls = 0;
         let mut untraced = Vec::new();
         for path in &files {
-            // The one-off SurrealDB import is an operator command, not request
-            // handling: it runs in its own process with telemetry off.
-            if path.ends_with("surreal_migration.rs") {
-                continue;
-            }
             let source = std::fs::read_to_string(path).expect("read source");
             // Product code only: stop at the test module.
             let product = source
@@ -466,6 +447,5 @@ mod tests {
                 "missing table {expected}: {tables:?}"
             );
         }
-        assert!(!has_data(&db).await.expect("has_data"));
     }
 }

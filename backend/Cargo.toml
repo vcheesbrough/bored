@@ -49,11 +49,6 @@ sqlx = { version = "0.9", default-features = false, features = [
 # feature). Already in the tree through sqlx; named here so the row types can
 # spell the type.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-# Read-only, and only by the one-off `migrate-from-surreal` subcommand
-# (`surreal_migration.rs`), which copies the old SurrealKV store into
-# Postgres. Nothing on the serving path opens it. Delete it together with the
-# subcommand once both environments are migrated (card #471's follow-up).
-surrealdb = { version = "2", default-features = false, features = ["kv-surrealkv"] }
 ulid = "1"
 # `EnumIter` / `EnumCount` on `error::ErrorType`, so tests (and #415's metric
 # setup) can walk every variant without a hand-kept list that could drift.
@@ -139,7 +134,4 @@ axum-test = "15"
 # dependency tree; this adds no new crate.
 regex = "1"
 serial_test = "3"
-# The migration tests (`surreal_migration.rs`) seed a source store in memory.
-# Dev-only: the shipped binary only ever opens a SurrealKV directory.
-surrealdb = { version = "2", default-features = false, features = ["kv-mem"] }
 tempfile = "3"
