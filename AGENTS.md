@@ -29,10 +29,21 @@ this file is only the working-rules layer that used to be split across
 Iteration `N` matches the workspace **`Cargo.toml`** minor (`1.N.x`) at start of
 work; feature branches are `feat/iteration-N-short-slug` from `main`. Start a
 card with the **`start-iteration`** skill (baseline §1–§2); bored is post-MVP so
-versions are `1.N.x`. **Override of baseline §2's patch rule:** the patch `x`
-is not bumped by hand — CI sets it to the Woodpecker number of the push
-pipeline that built the image (card #461; README § Versioning), so leave
-`Cargo.toml` at `1.N.0`.
+versions are `1.N.x`. Leave `Cargo.toml` at `1.N.0`: the patch `x` is the
+release-versions plugin's gap-free counter on the `1.N` line (baseline §2, the
+`release-flow` skill; card #477, README § Versioning), never set by hand.
+
+**Release flow (the `release-flow` skill's per-repo facts):**
+
+| Item | Value |
+| --- | --- |
+| **Plugin** | `woodpecker-plugin-release-versions` 0.2.0, pinned by digest once in `.woodpecker/build.yml` (`&release-versions-image`) |
+| **Images** | one: `registry.desync.link/bored` |
+| **Deploy targets** | `dev` from any branch, `prod` from `main` only — the plugin's default `environments`, so the setting is not set |
+| **Pipelines** | one file, `.woodpecker/build.yml`: `version` → build → tests → `publish` on push/manual; `resolve` → deploy → `tag` beside smoke on deployment |
+
+Never create, move or delete release tags or `refs/builds/*` by hand, and never
+push a second tag of an image (`:commit-<sha>`, `:latest`).
 
 ---
 
