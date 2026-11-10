@@ -41,10 +41,29 @@ fn UserDetails(user: shared::UserInfo) -> impl IntoView {
     view! {
         <img class="user-avatar" src=avatar_url alt=name.clone() />
         <span class="user-name">{name}</span>
-        // Plain anchor so the browser does a real navigation — the backend
-        // /auth/logout route clears the cookie and bounces to the IdP's
-        // end-session endpoint, which only works as a top-level navigation.
-        <a class="user-logout" href="/auth/logout" title="Sign out">"sign out"</a>
+        // This link must be a real, full-page navigation: the backend's
+        // /auth/logout route clears the session cookies and redirects to the
+        // IdP's end-session endpoint, and both only happen if the browser
+        // actually sends the request.
+        //
+        // A plain anchor is NOT enough here (card #252). leptos_router puts
+        // a click listener on every same-origin `<a>`, cancels the click and
+        // navigates client-side. The SPA has no /auth/logout route, so the
+        // user got the "Not found" view, the server route never ran, and the
+        // session survived. The router's handler steps aside for a link with
+        // `rel="external"` or a `target` (see `handle_anchor_click` in
+        // leptos_router's `location` module). Either alone works; both say
+        // plainly "this is a page load", as the panic banner's Reload link
+        // does. e2e: auth.spec.ts, 'clicking "sign out" reaches the server…'.
+        <a
+            class="user-logout"
+            href="/auth/logout"
+            rel="external"
+            target="_self"
+            title="Sign out"
+        >
+            "sign out"
+        </a>
     }
 }
 
