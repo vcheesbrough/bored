@@ -130,6 +130,52 @@ test.describe('auth — happy path', () => {
     }
   });
 
+  test('clicking "sign out" reaches the server and ends the session', async ({ browser }) => {
+    // Card #252. The test above drives /auth/logout as a bare HTTP request,
+    // which is why it never noticed that the *link* did nothing: leptos_router
+    // intercepts every same-origin <a> click and routes it client-side, so a
+    // plain href="/auth/logout" rendered the SPA's "Not found" view and the
+    // server route never ran. Only a real click in a real page exercises that.
+    //
+    // Own context, own login: logout revokes the refresh chain, so it must not
+    // touch the storage state the rest of the suite shares.
+    const ctx = await browser.newContext({
+      baseURL: process.env.BASE_URL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+    });
+    try {
+      const page = await ctx.newPage();
+      // The mock IdP signs in without a form: /auth/login -> IdP -> callback
+      // -> the SPA, which then renders the user badge from /api/me.
+      await page.goto('/auth/login', { waitUntil: 'load' });
+      const signOut = page.locator('a.user-logout');
+      await expect(signOut).toBeVisible({ timeout: 15_000 });
+      const sessionCookies = async () =>
+        (await ctx.cookies()).filter(cookie => cookie.name.startsWith('auth')).map(c => c.name);
+      expect(await sessionCookies()).toEqual(expect.arrayContaining(['auth', 'auth_refresh', 'auth_id']));
+
+      // The click must leave the SPA as a top-level navigation that the
+      // server answers with its redirect to the IdP's end-session endpoint.
+      const logoutResponse = page.waitForResponse(
+        res => new URL(res.url()).pathname === '/auth/logout',
+        { timeout: 10_000 },
+      );
+      await signOut.click();
+      const res = await logoutResponse;
+      expect([302, 303, 307]).toContain(res.status());
+      expect(new URL(res.headers()['location']).pathname).toContain('end-session');
+
+      // Every session cookie is gone, so the next app load starts signed out.
+      await expect.poll(sessionCookies, { timeout: 10_000 }).toEqual([]);
+      // Liveness: the browser really left the SPA rather than rendering its
+      // client-side "Not found" for an /auth/logout route it doesn't have.
+      await expect(page).not.toHaveURL(/\/auth\/logout$/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('GET /api/boards succeeds with the storage-state cookie', async ({ page }) => {
     // Do not use `networkidle`: the board opens an SSE connection that stays
     // active, so Playwright would wait until timeout.
