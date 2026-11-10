@@ -1,37 +1,47 @@
 # Step DAG: set depends_on on any step to enable parallel execution (Woodpecker stages).
-# Push/manual: compute-version → build(local, no push) → e2e → publish-image
-#   build only builds+validates locally; publish-image pushes to the registry ONLY after e2e passes, so the registry holds tested images only (PR #47).
+# Push/manual: version → build(local, no push) → e2e → publish
+#   build only builds+validates locally; publish pushes to the registry ONLY after every test step is green, so the
+#   registry holds tested images only (PR #47).
 #   A push never deploys: dev is deployed by hand, from any branch, with a deployment event (card #461). That lets
 #   several branches build at once without racing for the one shared dev environment.
-# Deploy: (validate-deployment ∥ find-commit-tag) → (apply-authentik-blueprint-<target> ∥ verify-image) → deploy-* → tag-release-*
-#   Deployments do NOT build — verify-image finds the build of this commit to promote, pulls that exact artifact and
-#   does NOT rebuild (card #254).
+# Deploy: resolve → (apply-authentik-blueprint-<target> → attach-sqltool-outpost-<target>) → deploy-<target>
+#         → (tag-release-<target> ∥ smoke-sql-console-<target>)
+#   Deployments do NOT build — resolve finds the build of this commit to promote; deploy-* pulls that exact artifact
+#   and does NOT rebuild (card #254).
 #
-# Release mechanics (card #461):
-#   - A build's version is MAJOR.MINOR from Cargo.toml + PATCH = its push pipeline's CI_PIPELINE_NUMBER
-#     (scripts/compute-release-tag.sh). Pipeline numbers are unique, so concurrent builds can never collide on a
-#     version and git holds no state the build depends on. Patches are sparse (1.69.339, 1.69.352, …).
-#   - RELEASE_TAG is burned into the image (build-arg) and used as its docker tag; the git tag is byte-identical.
-#     publish-image also pushes each green build as :commit-<sha>, the latest green build of that commit.
-#   - A deployment finds its build through the commit, never through CI_PIPELINE_PARENT (a restarted deploy, or one
-#     promoted from another deploy, has a deployment as its parent): the commit's existing semver git tag if it was
-#     deployed before — so a commit always redeploys the build its tag names — else the version label of
-#     :commit-<sha> (scripts/resolve-deploy-tag.sh).
-#   - The git tag is pushed only after a successful dev OR prod deploy, so a tag means "this version was deployed".
+# Release mechanics: the shared release-flow contract, enforced by woodpecker-plugin-release-versions 0.2 (card #477;
+# README § Versioning). The plugin owns every version, lookup, policy and tag decision; this file keeps only bored's
+# own build, tests and deploy commands.
+#   - version: MAJOR.MINOR from Cargo.toml + PATCH = the next number on that line, claimed by creating
+#     refs/builds/<version> on GitHub (create-only, so racing builds never share a number). A failed build uses its
+#     number up, so gaps mark failed builds. It writes .release-tag, which every later step reads.
+#   - RELEASE_TAG is burned into the image (build-arg) and used as its docker tag, and the image carries the
+#     version + revision OCI labels; the git tag is byte-identical. Only <image>:<version> is ever pushed.
+#   - resolve: checks the target (dev from any branch, prod from the repo's default branch, main) and finds the
+#     commit's build — its release tag if it was deployed before, else its newest published build ref — verifies the
+#     image's labels in the registry, and writes .release-tag. Found through git, never CI_PIPELINE_PARENT, so a
+#     restarted deploy or one promoted from another deploy works.
+#   - tag: pushes the annotated git tag once the deploy step succeeds, so a tag means "this build was deployed";
+#     smoke tests run beside it, and a smoke failure fails the pipeline but never untags the build.
 when:
   - event: [push, deployment, manual]
 
 steps:
-  compute-version:
-    # The build's version: MAJOR.MINOR from Cargo.toml + this pipeline's number
-    # (see "Release mechanics" above). Reads no git state.
+  version:
+    # The build's version (see "Release mechanics" above): claims the next
+    # patch on Cargo.toml's MAJOR.MINOR line and writes .release-tag. Needs a
+    # token that may push refs/builds/* to the repo (the same github_token
+    # tag-release-* pushes tags with).
     when:
       - event: [push, manual]
     depends_on: []
-    image: &alpine-image alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
-    commands:
-      - ./scripts/compute-release-tag.sh > .release-tag
-      - echo "RELEASE_TAG=$(cat .release-tag)"
+    image: &release-versions-image ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.2.0@sha256:9d5b3541aa143727f8c68c8c8f1d36557d999d3c857c4581be43363c8ff78c94
+    pull: true
+    settings:
+      mode: version
+      major_minor_source: cargo
+      github_token: &github-token
+        from_secret: github_token
 
   sql-console-script-validation:
     # The SQL console's two deploy scripts touch things no other test can
@@ -43,7 +53,7 @@ steps:
     when:
       - event: [push, manual]
     depends_on: []
-    image: *alpine-image
+    image: &alpine-image alpine:3.21@sha256:f27cad9117495d32d067133afff942cb2dc745dfe9163e949f6bfe8a6a245339
     commands:
       - apk add --no-cache python3 bash curl jq
       - ./scripts/test-smoke-sql-console.sh
@@ -51,16 +61,18 @@ steps:
 
   build:
     # Build the image and validate its OCI labels LOCALLY — do not push yet.
-    # The push is deferred to publish-image, which runs only after e2e passes, so
-    # the registry never holds an image from a red e2e run and verify-image's
-    # existence check on the deploy path becomes a real e2e gate (PR #47 review).
-    # build/e2e/publish-image share one Woodpecker agent + docker daemon, so the
-    # image built here is available to e2e and publish-image without a registry
-    # round-trip. Base images are public, so no registry login is needed here.
+    # The push is deferred to publish, which runs only after every test step
+    # passes, so the registry never holds an untested image and resolve's
+    # "published build" lookup on the deploy path is a real test gate (PR #47
+    # review). build/e2e/publish share one Woodpecker agent + docker daemon,
+    # so the image built here is available to e2e and publish without a
+    # registry round-trip. Base images are public, so no registry login is
+    # needed here. check-image-metadata.sh asserts the Dockerfile's static OCI
+    # labels as well as version/revision; publish re-checks only the latter.
     when:
       - event: [push, manual]
     depends_on:
-      - compute-version
+      - version
     image: &docker-image docker:27-cli@sha256:f56779b4e86550493153cc8642c9c8e40b5d934e43cb5b4ea463aea5245c5c01
     volumes: &docker-socket
       - /var/run/docker.sock:/var/run/docker.sock
@@ -134,61 +146,70 @@ steps:
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
-  publish-image:
-    # Push the built + validated image to the registry ONLY after e2e is green,
-    # so the registry never contains an image from a red e2e run. This is what
-    # makes verify-image's "can the tag be pulled" check on the deployment path a
-    # genuine e2e-tested gate (card #254 / PR #47 review). Runs on the same agent
+  publish:
+    # Push the built + validated image to the registry ONLY after every test
+    # step is green, so the registry never contains an untested image. This is
+    # what makes resolve's "newest published build" on the deployment path a
+    # genuine tested gate (card #254 / PR #47 review). Runs on the same agent
     # and docker daemon as build, so it pushes the exact image build produced.
+    # The plugin re-checks the version/revision labels, refuses a version the
+    # registry already holds (or cannot rule out), and pushes :<version> only
+    # — no :commit-<sha> or :latest (card #477).
     when:
       - event: [push, manual]
     depends_on:
       - e2e
-    image: *docker-image
+      - sql-console-script-validation
+      - metrics-network-order
+    image: *release-versions-image
+    pull: true
     volumes: *docker-socket
-    environment: &registry-creds
-      REGISTRY_USER:
+    settings:
+      mode: publish
+      images: &release-images
+        - registry.desync.link/bored
+      registry_username: &registry-user
         from_secret: zot_ci_user
-      REGISTRY_PASSWORD:
+      registry_password: &registry-password
         from_secret: zot_ci_password
-    commands:
-      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      # Refuses to overwrite an existing version (pipeline numbers repeat if
-      # the repo is re-created in Woodpecker), then pushes :<version> and the
-      # same image as :commit-<sha> for deployments to find (card #461).
-      - ./scripts/publish-release-image.sh "$$(cat .release-tag)" "$$CI_COMMIT_SHA"
 
-  validate-deployment:
+  resolve:
+    # A deployment promotes a build the push pipeline already built, tested
+    # and published for this commit — it does NOT rebuild (card #254). The
+    # plugin refuses a target other than dev/prod and prod from any branch but
+    # the repo's default (main), then writes .release-tag: the commit's
+    # release tag if it was deployed before (so a commit always redeploys the
+    # build its tag names), else its newest published build ref. It checks the
+    # image's version/revision labels in the registry, so the deploy steps
+    # need no extra verification. Fail-closed: a commit with no green build is
+    # refused ("push a fix or re-run the build").
     when:
       - event: deployment
     depends_on: []
-    image: *alpine-image
-    commands:
-      - |
-        if [ "$$CI_PIPELINE_DEPLOY_TARGET" != "dev" ] && [ "$$CI_PIPELINE_DEPLOY_TARGET" != "prod" ]; then
-          echo "ERROR: deploy target must be 'dev' or 'prod' (got: '$$CI_PIPELINE_DEPLOY_TARGET')"
-          exit 1
-        fi
-      - |
-        if [ "$$CI_PIPELINE_DEPLOY_TARGET" = "prod" ] && [ "$$CI_COMMIT_BRANCH" != "main" ]; then
-          echo "ERROR: prod can only be deployed from main (current branch: '$$CI_COMMIT_BRANCH')"
-          exit 1
-        fi
+    image: *release-versions-image
+    pull: true
+    settings:
+      mode: resolve
+      images: *release-images
+      github_token: *github-token
+      registry_username: *registry-user
+      registry_password: *registry-password
 
   apply-authentik-blueprint-dev:
     # Dev deploys come from any branch (card #461), so they get the dev-only
     # blueprint and only the dev secret: a dev deploy of an unmerged branch
     # does not, by itself, touch prod Authentik state. The full dev+prod
-    # blueprint is applied only by prod deploys, which validate-deployment
-    # limits to main. This guards against accidents; it is NOT a security
-    # boundary — the branch controls this YAML (validate-deployment included)
-    # and receives the admin authentik_api_token, so enforcing it would need
-    # the secret broker to withhold that token and the prod secrets from
-    # non-main pipelines. Both steps share everything but file/vars via
-    # &authentik-blueprint-base.
+    # blueprint is applied only by prod deploys, which resolve limits to main
+    # (hence the dependency: nothing touches Authentik until resolve has
+    # accepted the target and branch). This guards against accidents; it is
+    # NOT a security boundary — the branch controls this YAML (resolve's
+    # settings included) and receives the admin authentik_api_token, so
+    # enforcing it would need the secret broker to withhold that token and the
+    # prod secrets from non-main pipelines. Both steps share everything but
+    # file/vars via &authentik-blueprint-base.
     <<: &authentik-blueprint-base
       depends_on:
-        - validate-deployment
+        - resolve
       pull: true
       image: ghcr.io/vcheesbrough/woodpecker-plugin-authentik-blueprint:v0.2.0
     when:
@@ -260,56 +281,6 @@ steps:
         from_secret: authentik_api_token
       PROVIDER_NAME: bored-sql-console-prod
 
-  find-commit-tag:
-    # Looks up the semver git tag already on this commit (scripts/
-    # find-commit-tag.sh): tagged means deployed before, and verify-image's
-    # resolve-deploy-tag.sh then redeploys exactly that build. Not the
-    # release-versions plugin's compute mode: on an untagged commit that also
-    # logs an invented max(tag)+1 "allocation" no build ever has (card #461).
-    # Read-only, so no ordering against validate-deployment; verify-image
-    # depends on both.
-    when:
-      - event: deployment
-    depends_on: []
-    image: alpine/git:v2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-    commands:
-      - ./scripts/find-commit-tag.sh
-
-  verify-image:
-    # A deployment promotes a build the push pipeline already built,
-    # e2e-tested, and pushed for this commit — it does NOT rebuild (see card
-    # #254). resolve-deploy-tag.sh rewrites .release-tag to that build: the
-    # commit's existing git tag if it was deployed before, else its latest
-    # green build (:commit-<sha>). Because publish-image only pushes AFTER e2e
-    # passes, the image existing in the registry *is* the e2e-passed signal.
-    # Pull it and re-assert its OCI labels; fail loudly (fail-closed) if it is
-    # absent. The revision label check catches an image built from another
-    # commit.
-    when:
-      - event: deployment
-    depends_on:
-      - find-commit-tag
-      - validate-deployment
-    image: *docker-image
-    volumes: *docker-socket
-    environment: *registry-creds
-    commands:
-      - *docker-login
-      - ./scripts/resolve-deploy-tag.sh
-      - |
-        RELEASE_TAG=$$(cat .release-tag)
-        IMAGE=registry.desync.link/bored:$$RELEASE_TAG
-        if ! docker pull "$$IMAGE"; then
-          echo "ERROR: $$IMAGE not found in registry." >&2
-          echo "resolve-deploy-tag.sh chose $$RELEASE_TAG (see its output above). If that is this commit's existing git tag, the build it names has since left the registry:" >&2
-          echo "restore the image, or delete the git tag $$RELEASE_TAG so the deploy takes the commit's latest green build." >&2
-          exit 1
-        fi
-        ./scripts/check-image-metadata.sh "$$IMAGE" "$$RELEASE_TAG" "$$CI_COMMIT_SHA"
-
   deploy-dev:
     # The docker CLI image with the sovereign-config CLI baked in — the same
     # pinned image v-note deploys with. It carries docker 27.5.1 with the
@@ -344,7 +315,7 @@ steps:
       # publicly readable. Clearing this value turns both off together.
       COMPOSE_PROFILES: &dev-compose-profiles sqltool
     commands:
-      - *docker-login
+      - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
       - docker volume create bored-dev-db
       # Postgres's data (card #471). `create` is idempotent: an existing
       # volume is left as it is.
@@ -399,7 +370,7 @@ steps:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
-      - verify-image
+      - resolve
       - apply-authentik-blueprint-dev
       - attach-sqltool-outpost-dev
 
@@ -408,7 +379,7 @@ steps:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
-      - verify-image
+      - resolve
       - apply-authentik-blueprint-prod
       - attach-sqltool-outpost-prod
     image: *deploy-image
@@ -502,27 +473,25 @@ steps:
       DB_CONTAINER: bored-bored-db-1
 
   tag-release-dev:
-    # After a successful deploy, push the git tag matching .release-tag, so a
-    # tag means "this version was deployed" (card #461). Both tag steps share
-    # pull/image/settings via &tag-release-base and differ only in when/
-    # depends_on. push-tag is idempotent (plugin >= 0.1.1, card #336): a
-    # commit already carrying this tag — a redeploy, or dev then prod —
-    # logs "already exists at commit" and exits 0. A commit never gets a
-    # second tag, because a deployed commit always redeploys its tagged build.
+    # Once the deploy step succeeds, the plugin pushes the annotated git tag
+    # named by .release-tag, so a tag means "this build was deployed" (card
+    # #461). It runs beside the smoke test, not after it (release-flow: a
+    # broken deploy is still a deploy): a smoke failure fails the pipeline but
+    # the build stays tagged. Idempotent: a commit already carrying this tag —
+    # a redeploy, or dev then prod — is a no-op, and the plugin refuses a
+    # second tag on a commit or a tag moving commits. Both tag steps share
+    # everything via &tag-release-base and differ only in when/depends_on.
     <<: &tag-release-base
       pull: true
-      image: ghcr.io/vcheesbrough/woodpecker-plugin-release-versions:0.1.1@sha256:cf74d9706cb42b6d27c8d185789cd814ed061c8c88e06452d33ce3aed0bf9a22
+      image: *release-versions-image
       settings:
-        mode: push-tag
-        major_minor_source: cargo
-        github_token:
-          from_secret: github_token
+        mode: tag
+        github_token: *github-token
     when:
       - event: deployment
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "dev"'
     depends_on:
       - deploy-dev
-      - smoke-sql-console-dev
 
   tag-release-prod:
     <<: *tag-release-base
@@ -531,4 +500,3 @@ steps:
         evaluate: 'CI_PIPELINE_DEPLOY_TARGET == "prod"'
     depends_on:
       - deploy-prod
-      - smoke-sql-console-prod

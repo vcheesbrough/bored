@@ -48,21 +48,9 @@ RUN sh /app/scripts/test-compose-up-with-otel.sh
 COPY scripts/compose-up-ingest.sh scripts/compose-up-ingest.sh
 COPY scripts/test-compose-up-ingest.sh scripts/test-compose-up-ingest.sh
 RUN sh /app/scripts/test-compose-up-ingest.sh
-# And the pipeline's release-tag scripts (card #461), tested the same way: the
-# build's version, its publishing, and the deploy's lookup of the build to
-# promote.
-COPY scripts/compute-release-tag.sh scripts/compute-release-tag.sh
-COPY scripts/test-compute-release-tag.sh scripts/test-compute-release-tag.sh
-RUN sh /app/scripts/test-compute-release-tag.sh
-COPY scripts/resolve-deploy-tag.sh scripts/resolve-deploy-tag.sh
-COPY scripts/test-resolve-deploy-tag.sh scripts/test-resolve-deploy-tag.sh
-COPY scripts/find-commit-tag.sh scripts/find-commit-tag.sh
-COPY scripts/test-find-commit-tag.sh scripts/test-find-commit-tag.sh
-RUN sh /app/scripts/test-find-commit-tag.sh
-RUN sh /app/scripts/test-resolve-deploy-tag.sh
-COPY scripts/publish-release-image.sh scripts/publish-release-image.sh
-COPY scripts/test-publish-release-image.sh scripts/test-publish-release-image.sh
-RUN sh /app/scripts/test-publish-release-image.sh
+# And the e2e step's stale-project reaper, tested the same way. (The release
+# scripts that used to sit here went with card #477: versioning, publishing and
+# the deploy's build lookup are the release-versions plugin's now.)
 COPY scripts/prune-stale-e2e-projects.sh scripts/prune-stale-e2e-projects.sh
 COPY scripts/test-prune-stale-e2e-projects.sh scripts/test-prune-stale-e2e-projects.sh
 RUN sh /app/scripts/test-prune-stale-e2e-projects.sh
