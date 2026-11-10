@@ -315,9 +315,9 @@ steps:
     # pinned image v-note deploys with. It carries docker 27.5.1 with the
     # compose plugin plus sh, so it replaces `*docker-image` for the steps
     # that run `sovereign-config render`. The CLI must match the running
-    # sovereign-config server (2.30.2, like the provider in
+    # sovereign-config server (2.46.418, like the provider in
     # backend/Cargo.toml): bump tag and digest together, as a commit.
-    image: &deploy-image registry.desync.link/sovereign-config-cli:2.30.2@sha256:08bf49099830f99b6dbc421527f13fd3f32e1156ed62c9d26987d26c256d1827
+    image: &deploy-image registry.desync.link/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
     volumes: *docker-socket
     environment:
       REGISTRY_USER:

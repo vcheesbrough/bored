@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "1.73.0"
+version = "1.74.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "1.73.0"
+version = "1.74.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "1.73.0"
+version = "1.74.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4103,7 +4103,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -4123,7 +4123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4136,7 +4136,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5570,7 +5570,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.73.0"
+version = "1.74.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5677,8 +5677,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-client"
-version = "2.30.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
+version = "2.46.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
 dependencies = [
  "async-trait",
  "sovereign-config-core",
@@ -5687,8 +5687,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-core"
-version = "2.30.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
+version = "2.46.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -5699,11 +5699,12 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-native"
-version = "2.30.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
+version = "2.46.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
 dependencies = [
  "async-trait",
  "http 1.4.0",
+ "prost-types",
  "reqwest",
  "rustix",
  "serde",
@@ -5719,8 +5720,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-proto"
-version = "2.30.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
+version = "2.46.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
 dependencies = [
  "prost 0.13.5",
  "prost-types",
@@ -5731,8 +5732,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-provider"
-version = "2.30.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.30.2#c86ab523dd56ec06eea077e78a41887b240812ad"
+version = "2.46.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
 dependencies = [
  "async-trait",
  "config",
