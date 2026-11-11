@@ -316,9 +316,9 @@ steps:
       COMPOSE_PROFILES: &dev-compose-profiles sqltool
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      - docker volume create bored-dev-db
       # Postgres's data (card #471). `create` is idempotent: an existing
-      # volume is left as it is.
+      # volume is left as it is. (The retired SurrealKV volume, bored-dev-db,
+      # is no longer created: card #489 removed it.)
       - docker volume create bored-dev-pg
       # APP_ENV is the literal `dev`, not the branch it used to be: it becomes
       # the `deployment_environment` Loki label, and a per-branch value there
@@ -342,15 +342,14 @@ steps:
       #
       # /bored/devops/dev/compose carries POSTGRES_PASSWORD for the database
       # container — an alias of the backend's own /bored/dev/server/database/
-      # password, so the two cannot disagree (card #471). Before the app comes
-      # up, migrate-from-surreal.sh starts Postgres and, only while it is
-      # still empty, stops the old backend and imports the SurrealDB store;
-      # every later deploy finds data there and skips straight on.
+      # password, so the two cannot disagree (card #471). deploy-app.sh
+      # brings Postgres and the backend up together; the backend applies any
+      # pending schema migration at startup, before it reports healthy.
       - |
         export BORED_IMAGE_TAG=$(cat .release-tag) \
           APP_ENV=dev APP_BRANCH=$$CI_COMMIT_BRANCH \
           BORED_HOST=bored-dev.desync.link \
-          BORED_CONTAINER_NAME=bored-dev DB_VOLUME=bored-dev-db PG_VOLUME=bored-dev-pg
+          BORED_CONTAINER_NAME=bored-dev PG_VOLUME=bored-dev-pg
         docker pull "registry.desync.link/bored:$$BORED_IMAGE_TAG"
         sovereign-config render /bored/devops/dev/otel /bored/devops/dev/compose -- \
           ./scripts/deploy-app.sh -p bored-dev -f deploy/docker-compose.yml < /dev/null
@@ -401,7 +400,6 @@ steps:
       COMPOSE_PROFILES: &prod-compose-profiles sqltool
     commands:
       - *docker-login
-      - docker volume create bored-prod-db
       # Postgres's data (card #471), as on dev.
       - docker volume create bored-prod-pg
       # `prod`, not `production`: the value is the `deployment_environment` Loki
@@ -409,12 +407,11 @@ steps:
       # is not built from a branch anyone needs to see, and compose's
       # `${APP_BRANCH:-}` turns its absence into "no branch". Card #412.
       # The telemetry layer is rendered exactly as on dev (see deploy-dev).
-      # The compose layer and the one-off import run exactly as on dev (see
-      # deploy-dev).
+      # The compose layer is rendered exactly as on dev (see deploy-dev).
       - |
         export BORED_IMAGE_TAG=$(cat .release-tag) \
           APP_ENV=prod BORED_HOST=bored.desync.link \
-          BORED_CONTAINER_NAME=bored DB_VOLUME=bored-prod-db PG_VOLUME=bored-prod-pg
+          BORED_CONTAINER_NAME=bored PG_VOLUME=bored-prod-pg
         docker pull "registry.desync.link/bored:$$BORED_IMAGE_TAG"
         sovereign-config render /bored/devops/prod/otel /bored/devops/prod/compose -- \
           ./scripts/deploy-app.sh -p bored -f deploy/docker-compose.yml < /dev/null

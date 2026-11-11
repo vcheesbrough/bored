@@ -270,13 +270,6 @@ pub(crate) fn database_error_type(error: &sqlx::Error) -> ErrorType {
     }
 }
 
-/// The redacted one-line description of a database error — the same text a
-/// 500's log line carries (`postgres sqlstate=23505 constraint=… table=…`).
-/// For callers outside request handling, such as the SurrealDB import.
-pub(crate) fn database_error_description(error: &sqlx::Error) -> String {
-    describe_database_error(error).detail
-}
-
 /// Reduce a database error to what the redaction policy lets through.
 ///
 /// For an error Postgres reported: its SQLSTATE code (five characters from a

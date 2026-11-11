@@ -23,8 +23,10 @@ services:
     # A ceiling, so a runaway backend is OOM-killed and restarted rather than
     # eating the host (card #470). Lowered from 768m when Postgres replaced the
     # embedded SurrealDB (card #471): the ~530 MB peak was almost all SurrealKV's
-    # in-memory index, which the backend no longer holds. Watch
-    # `process.memory.usage` before tightening it further.
+    # in-memory index, which the backend no longer holds. Kept at 256m by card
+    # #489: over the week to 2026-11-10 `process.memory.usage` stayed between
+    # 7 and 26 MB in both environments, so it is a ceiling for a runaway, not
+    # a working limit. Watch that metric before tightening it further.
     #
     # `memswap_limit` equal to `mem_limit` means "no swap": without it Docker
     # allows as much swap again, and a runaway would thrash mini's shared,
@@ -270,35 +272,10 @@ services:
       # scripts/deploy-app.sh from the two values above, so they cannot drift.
       - traefik.http.middlewares.${BORED_CONTAINER_NAME}-sqltool-auth.headers.customrequestheaders.Authorization=Basic ${PGWEB_AUTH_B64}
 
-  # The one-off SurrealDB → Postgres import (card #471), run by
-  # scripts/migrate-from-surreal.sh during a deploy and never started by
-  # `up`: the profile keeps it out of every ordinary command. Same image and
-  # credentials as the backend; the old SurrealKV volume mounted read-only (the
-  # subcommand copies it aside before opening it). Delete with the subcommand.
-  surreal-migrate:
-    profiles: [surreal-migration]
-    image: registry.desync.link/bored:${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}
-    entrypoint: ["./bored-backend", "migrate-from-surreal"]
-    environment:
-      - BORED__OBSERVABILITY__ENVIRONMENT=${APP_ENV:?APP_ENV is required}
-      - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
-      - BORED__DATABASE__HOST=bored-db
-    secrets:
-      - SOVEREIGN_CONFIG_ACCESS_URL_FILE
-    volumes:
-      - surreal-data:/surreal:ro
-    networks:
-      - bored-internal
-
 volumes:
   # Postgres's data directory, one per environment, created by the deploy.
   bored-pg:
     name: ${PG_VOLUME:?PG_VOLUME is required}
-    external: true
-  # The retired SurrealKV store. Only the import reads it; kept for a
-  # retention period after the move, then removed with the subcommand.
-  surreal-data:
-    name: ${DB_VOLUME:?DB_VOLUME is required}
     external: true
 
 networks:

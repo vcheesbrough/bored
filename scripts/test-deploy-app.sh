@@ -1,8 +1,8 @@
 #!/bin/sh
-# Tests for scripts/deploy-app.sh (cards #471, #473).
+# Tests for scripts/deploy-app.sh (cards #471, #473, #489).
 #
-# deploy-app.sh is copied into a scratch tree beside stand-ins for the two
-# scripts it runs, and a fake `docker` goes first on PATH. Every stand-in
+# deploy-app.sh is copied into a scratch tree beside a stand-in for the
+# script it runs, and a fake `docker` goes first on PATH. Every stand-in
 # drains stdin (as `docker compose` does) and records how it was called, so the
 # tests see the order, the arguments, what reached stdin, and whether the
 # caller's own stdin survived.
@@ -16,7 +16,7 @@ trap "rm -rf '$WORK_DIR'" EXIT
 mkdir -p "$WORK_DIR/scripts" "$WORK_DIR/bin"
 cp "$SCRIPT_DIR/deploy-app.sh" "$WORK_DIR/scripts/"
 
-for name in migrate-from-surreal compose-up-with-otel; do
+for name in compose-up-with-otel; do
   cat > "$WORK_DIR/scripts/$name.sh" <<FAKE
 #!/bin/sh
 cat > /dev/null
@@ -61,12 +61,11 @@ run() {
 # --- console off: the backend only, and any console removed -------------------
 reset
 run COMPOSE_PROFILES=
-expected="migrate-from-surreal -p bored-dev -f deploy/docker-compose.yml
-compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120 bored-db bored
+expected="compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120 bored-db bored
 docker compose -p bored-dev -f deploy/docker-compose.yml --profile sqltool rm -sf sqltool
 docker compose -p bored-dev -f deploy/docker-compose.yml exec -T bored-db psql -v ON_ERROR_STOP=1 -q -U bored -d bored -c ALTER ROLE bored_pgweb NOLOGIN"
 if [ "$status" = 0 ] && [ "$(cat "$WORK_DIR/calls")" = "$expected" ]; then
-  pass "without the profile: import check, backend up (named services), console removed, login disabled"
+  pass "without the profile: backend up (named services), console removed, login disabled"
 else
   fail "console off: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
@@ -146,14 +145,14 @@ else
   fail "nosqltool: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
-# --- a failed import check stops before the backend comes up -----------------
+# --- a failed backend up stops before the console is touched ----------------
 reset
-echo 1 > "$WORK_DIR/migrate-from-surreal.status"
-run COMPOSE_PROFILES=
-if [ "$status" = 1 ] && ! grep -q compose-up-with-otel "$WORK_DIR/calls"; then
-  pass "a failed import check stops the deploy before compose up"
+echo 1 > "$WORK_DIR/compose-up-with-otel.status"
+run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
+if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 1 ]; then
+  pass "a failed backend up fails the deploy before the role or console is touched"
 else
-  fail "failed import: status $status, calls: $(cat "$WORK_DIR/calls")"
+  fail "failed backend up: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
 # --- the caller's stdin is left untouched ------------------------------------
