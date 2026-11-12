@@ -514,7 +514,33 @@ pub async fn delete_card(
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
-    let existing = select_card(&state.db, &card_id, "cards.delete_card").await?;
+    // The card is read *and locked* (`FOR UPDATE`) in a transaction that
+    // lasts until its row is deleted below — the same pattern as the column
+    // and board cascades (`cascade::delete_cards`), card #547.
+    //
+    // Why: the card's links are swept (deleted and audited one by one) before
+    // the card goes. Creating a link takes a share lock on both of its cards
+    // (the foreign-key check does), so while this lock is held a link create
+    // aimed at this card waits, and then finds the card gone — a 404. Without
+    // the lock a link could commit after the sweep read the card's links, and
+    // the card's `DELETE` would remove it through `ON DELETE CASCADE` with no
+    // history row and no event.
+    //
+    // A concurrent move or edit of the card also waits, and then finds it
+    // gone. Everything else here goes through the pool, outside this
+    // transaction: none of it touches the locked `cards` row, so there is
+    // nothing for it to wait on. Dropping `tx` on an early return rolls it
+    // back, which releases the lock.
+    let mut tx = state.db.begin().await?;
+    let existing: Option<DbCard> = sqlx::query_as("SELECT * FROM cards WHERE id = $1 FOR UPDATE")
+        .bind(&card_id)
+        .fetch_optional(&mut *tx)
+        .traced(DbQuery::new(
+            "cards.delete_card",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
 
     let existing = match existing {
         Some(e) => e,
@@ -556,9 +582,11 @@ pub async fn delete_card(
     )
     .await?;
 
+    // Inside the transaction that holds the lock, so no other write to this
+    // card can land between the link sweep above and this delete.
     let deleted: Option<DbCard> = sqlx::query_as("DELETE FROM cards WHERE id = $1 RETURNING *")
         .bind(&card_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .traced(DbQuery::new(
             "cards.delete_card",
             DbOperation::Delete,
@@ -567,6 +595,9 @@ pub async fn delete_card(
         .await?;
     match deleted {
         Some(deleted) => {
+            // Commit before announcing, so no tab hears of a delete that
+            // could still roll back.
+            tx.commit().await?;
             // Look up the column to find the board ID for the SSE event.
             // Fall back to an empty string if it's gone — SSE delivery is
             // best-effort and no connected client will be scoped to a

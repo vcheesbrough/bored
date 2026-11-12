@@ -161,6 +161,32 @@ pub async fn record_and_broadcast(
         return Ok(entry);
     }
 
+    let entry = insert(db, rec).await?;
+    broadcast_appended(events, entry.clone());
+    Ok(entry)
+}
+
+/// Insert one audit row and return it, **without** broadcasting it and
+/// without the card-body merge [`record_and_broadcast`] can do.
+///
+/// This is the half of [`record_and_broadcast`] that touches the database,
+/// split out so a caller can write its audit rows inside its own transaction
+/// (card #547): the rows then commit or roll back together with the change
+/// they describe, and the caller announces them with [`broadcast_appended`]
+/// only once the commit has succeeded — never an event for a row that a
+/// rollback took back.
+///
+/// `executor` is anything sqlx can run a statement on. The generic parameter
+/// reads as: "for some lifetime `'e`, `E` is a Postgres executor valid for
+/// `'e`". Both `&Db` (the pool: one statement, autocommitted) and
+/// `&mut *tx` (an open transaction's connection) satisfy it.
+pub async fn insert<'e, E>(
+    executor: E,
+    rec: AuditRecord<'_>,
+) -> Result<shared::AuditLogEntry, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let id = audit_ulid();
     let actor_sub = rec.claims.sub.clone();
     let actor_display_name = rec.claims.display_name();
@@ -190,23 +216,28 @@ pub async fn record_and_broadcast(
     .bind(rec.restored_from)
     .bind(rec.batch_group)
     .bind(aes)
-    .fetch_one(db)
+    .fetch_one(executor)
     .traced(DbQuery::new(
-        "audit.record_and_broadcast",
+        "audit.insert",
         DbOperation::Insert,
         "audit_log",
     ))
     .await?;
+    Ok(db_row.into_api())
+}
 
-    let entry = db_row.into_api();
-    let board_id = rec.board_id;
+/// Tell the entry's board that a history row was appended. The other half of
+/// [`record_and_broadcast`]; a caller using [`insert`] inside a transaction
+/// calls this after its commit.
+pub fn broadcast_appended(events: &Sender<BroadcastEvent>, entry: shared::AuditLogEntry) {
+    // `send` only fails when nobody is subscribed, which is fine: SSE is a
+    // live view, and a tab that opens later reads the history from the table.
     let _ = events.send(BroadcastEvent {
-        board_id,
+        board_id: entry.board_id.clone(),
         event: BoardEvent::AuditAppended {
-            entry: Box::new(entry.clone()),
+            entry: Box::new(entry),
         },
     });
-    Ok(entry)
 }
 
 pub async fn list_board_history(
