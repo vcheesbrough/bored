@@ -22,7 +22,8 @@ import {
 // A's "after" group and in B's "before" group. These tests cover creating and
 // removing links from the editor, the loop guard, the error line, the
 // collapsed-card badge, SSE delivery, and the modal sharing the inline
-// card's links.
+// card's links. Since iteration 78 / card #544 a link may also join cards on
+// two boards — see "cross-board links" at the end.
 
 /** The expanded card whose body contains `text`. */
 function cardWith(page: import('@playwright/test').Page, text: string) {
@@ -757,13 +758,15 @@ test.describe('card links', () => {
       page,
       request,
     }) => {
-      // The board half of the card needed no fix, and this test does **not**
-      // prove that — no e2e can: every card at either end of the deleted
-      // board's links goes with it, and the server refuses cross-board links,
-      // so no card on any other board could ever show one of them, stale
-      // index or not. The "no bug" verdict rests on the code: links are
-      // board-scoped, and deleting the board on screen always navigates, which
-      // re-runs `BoardView`'s load effect and empties `board_links` first.
+      // Scope: the board being *viewed* is deleted, so every card on screen
+      // goes with it and the navigation away re-runs `BoardView`'s load
+      // effect, emptying `board_links` first. (This comment used to rest on
+      // the server refusing cross-board links; since card #544 it allows
+      // them. The *other* side of that — a board whose cards are linked to
+      // the deleted one — learns of it from the `CardLinkDeleted` events the
+      // server now sends to both boards, covered in "cross-board links"
+      // below. A tab that misses those events, as here, keeps the stale chip
+      // until it reloads — the same trade-off as for any link event.)
       //
       // What this does check is the unmount the delete causes, with linked
       // cards on screen and the stream silenced as above: no disposal panic,
@@ -931,5 +934,148 @@ test.describe('card links', () => {
       await expect(page.locator('.card-item')).toHaveCount(3);
       expect(panics).toEqual([]);
     });
+  });
+});
+
+// Iteration 78 / card #544: links between cards on different boards.
+//
+// The display rule under test: **a board name appears only for a card that is
+// not on the board being viewed** — on picker rows and on chips alike.
+test.describe('cross-board links', () => {
+  // Board slugs here stay under 20 characters, the chip's board-name limit,
+  // so the assertions can compare the full name rather than an elided one.
+  async function twoBoards(request: import('@playwright/test').APIRequestContext) {
+    const stamp = Date.now().toString(36);
+    const near = await apiCreateBoard(request, `xb-near-${stamp}`);
+    const nearCol = await apiCreateColumn(request, near.name, 'Todo');
+    const alpha = await apiCreateCard(request, nearCol.id, '# Alpha card');
+    const beta = await apiCreateCard(request, nearCol.id, '# Beta card');
+    const far = await apiCreateBoard(request, `xb-far-${stamp}`);
+    const farCol = await apiCreateColumn(request, far.name, 'Elsewhere');
+    const remote = await apiCreateCard(request, farCol.id, '# Remote card');
+    return { near, far, alpha, beta, remote };
+  }
+
+  test('a card on another board is found by number, and only it names its board', async ({
+    page,
+    request,
+  }) => {
+    const { near, far, alpha, beta, remote } = await twoBoards(request);
+    await gotoBoardView(page, near.name);
+    await cardWith(page, 'Alpha card').click();
+
+    const after = page.locator('.card-item.card-expanded .link-group[data-side="after"]');
+    const input = after.locator('.link-picker-input');
+    const options = page.locator('.link-suggestions .link-suggestion');
+
+    // A same-board card: offered exactly as before, with no board name.
+    await input.fill('beta');
+    await expect(options).toHaveCount(1);
+    await expect(options.locator('.link-chip-board, .link-suggestion-board')).toHaveCount(0);
+    await options.click();
+
+    // The other board's card, by its number: offered with that board's name.
+    await input.fill(`#${remote.number}`);
+    const remoteRow = options.filter({ hasText: 'Remote card' });
+    await expect(remoteRow).toHaveCount(1, { timeout: 5000 });
+    await expect(remoteRow.locator('.link-suggestion-board')).toHaveText(far.name);
+    await remoteRow.click();
+
+    // The link round-trips and is listed on both boards.
+    const expected = [
+      expect.objectContaining({ predecessor_id: alpha.id, successor_id: beta.id }),
+      expect.objectContaining({
+        predecessor_id: alpha.id,
+        successor_id: remote.id,
+        predecessor_board_slug: near.name,
+        successor_board_slug: far.name,
+      }),
+    ];
+    await expect.poll(async () => apiListLinks(request, near.name)).toEqual(expected);
+    expect(await apiListLinks(request, far.name)).toEqual([expected[1]]);
+
+    // Chips: the cross-board one names the other board (and no column); the
+    // same-board one beside it keeps its column and names no board.
+    const remoteChip = after.locator('.link-chip').filter({ hasText: `#${remote.number}` });
+    await expect(remoteChip.locator('.link-chip-board')).toHaveText(far.name);
+    await expect(remoteChip.locator('.link-chip-column')).toHaveCount(0);
+    await expect(remoteChip.locator('.link-chip-card')).toHaveText(`#${remote.number}`);
+    const localChip = after.locator('.link-chip').filter({ hasText: 'Beta card' });
+    await expect(localChip.locator('.link-chip-board')).toHaveCount(0);
+    await expect(localChip.locator('.link-chip-column')).toHaveText('Todo');
+
+    // The collapsed card's pills are by number alone, whatever the board.
+    await page.locator('.card-toolbar-btn[title="Collapse"]').click();
+    await expect(cardWith(page, 'Alpha card').locator('.link-badge-after')).toHaveText([
+      `↓#${beta.number}`,
+      `↓#${remote.number}`,
+    ]);
+
+    // Clicking the cross-board chip opens that card on *its* board…
+    await cardWith(page, 'Alpha card').click();
+    await remoteChip.locator('.link-chip-card').click();
+    await expect(page).toHaveURL(`/boards/${far.name}?card=${remote.number}`);
+    await expect(page.locator('.modal')).toBeVisible();
+    await expect(page.locator('.modal')).toContainText('Remote card');
+
+    // …where the link back names the first board, since that is now the
+    // other one.
+    const back = page.locator('.modal .link-group[data-side="before"] .link-chip');
+    await expect(back.locator('.link-chip-board')).toHaveText(near.name);
+    await expect(back.locator('.link-chip-card')).toHaveText(`#${alpha.number}`);
+
+    // Liveness: the far board itself rendered and still reacts.
+    await page.locator('.modal .card-toolbar-btn[title="Restore to board"]').click();
+    await expect(page.locator('.modal')).toHaveCount(0);
+    await expect(cardWith(page, 'Remote card').locator('.link-badge-before')).toHaveText(
+      `↑#${alpha.number}`
+    );
+  });
+
+  test('cross-board link changes reach both boards over SSE', async ({ browser, request }) => {
+    const { near, far, alpha, remote } = await twoBoards(request);
+
+    // One tab on each board, each waiting for its event stream.
+    async function openOn(board: { id: string; name: string }) {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      const eventsReady = page.waitForResponse(
+        response =>
+          response.request().method() === 'GET' &&
+          response.url().includes(`/api/events?board_id=${board.id}`) &&
+          response.ok()
+      );
+      await gotoBoardView(page, board.name);
+      await eventsReady;
+      return { context, page };
+    }
+    const nearTab = await openOn(near);
+    const farTab = await openOn(far);
+    await expect(nearTab.page.locator('.link-badge')).toHaveCount(0);
+    await expect(farTab.page.locator('.link-badge')).toHaveCount(0);
+
+    // Created elsewhere: both boards hear about it.
+    await apiCreateLink(request, alpha.id, 'successor', remote.id);
+    await expect(cardWith(nearTab.page, 'Alpha card').locator('.link-badge-after')).toHaveText(
+      `↓#${remote.number}`,
+      { timeout: 5000 }
+    );
+    await expect(cardWith(farTab.page, 'Remote card').locator('.link-badge-before')).toHaveText(
+      `↑#${alpha.number}`,
+      { timeout: 5000 }
+    );
+
+    // Deleting the far board's card clears the near board's link too, though
+    // nothing on the near board was touched.
+    await apiDeleteCard(request, remote.id);
+    await expect(nearTab.page.locator('.link-badge')).toHaveCount(0, { timeout: 5000 });
+    expect(await apiListLinks(request, near.name)).toEqual([]);
+
+    // Liveness: the near tab still reacts to its own board.
+    await cardWith(nearTab.page, 'Alpha card').click();
+    await expect(nearTab.page.locator('.card-item.card-expanded')).toHaveCount(1);
+
+    await nearTab.context.close();
+    await farTab.context.close();
   });
 });

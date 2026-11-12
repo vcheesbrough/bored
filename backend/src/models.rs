@@ -99,10 +99,15 @@ impl DbCard {
 
 /// One row of `card_links`, as read back by [`crate::routes::links`].
 ///
-/// The two `*_number` fields are not stored on the row — they are joined in
-/// from the linked cards at read time (`links::link_select!`), so every query
-/// that loads a link has to use that select rather than a bare `SELECT *`.
-/// Card numbers never change, so the join is stable for the life of the link.
+/// The `*_number`, `*_board_id` and `*_board_slug` fields are not stored on
+/// the row — they are joined in from the linked cards (and their columns and
+/// boards) at read time (`links::link_select!`), so every query that loads a
+/// link has to use that select rather than a bare `SELECT *`.
+///
+/// Card numbers never change, and a card can never move to another board
+/// (`update_card` / `move_card` refuse a cross-board column), so the numbers
+/// and board ids are stable for the life of the link. Only a slug can change
+/// — when its board is renamed — and the join always reads the current one.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbCardLink {
     pub id: String,
@@ -110,6 +115,12 @@ pub struct DbCardLink {
     pub successor_id: String,
     pub predecessor_number: i32,
     pub successor_number: i32,
+    /// Board the predecessor card sits on (card #544: links may cross boards).
+    pub predecessor_board_id: String,
+    /// Board the successor card sits on.
+    pub successor_board_id: String,
+    pub predecessor_board_slug: String,
+    pub successor_board_slug: String,
     pub reason: Option<String>,
     pub last_edited_by: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -117,6 +128,22 @@ pub struct DbCardLink {
 }
 
 impl DbCardLink {
+    /// The distinct boards this link touches: one for a same-board link, two
+    /// for a cross-board one. Every audit row and SSE event about the link is
+    /// written once per board in this list, so both boards' history and live
+    /// views see it.
+    pub fn boards(&self) -> Vec<String> {
+        let mut boards = vec![self.predecessor_board_id.clone()];
+        if self.successor_board_id != self.predecessor_board_id {
+            boards.push(self.successor_board_id.clone());
+        }
+        boards
+    }
+
+    /// The API shape of this link. This is the **only** place a
+    /// `shared::CardLink` is built from a row, for both HTTP responses and
+    /// SSE events — so when boards become private (card #12) per-viewer
+    /// redaction of the far board has exactly one place to go.
     pub fn into_api(self) -> shared::CardLink {
         shared::CardLink {
             id: self.id,
@@ -124,6 +151,8 @@ impl DbCardLink {
             successor_id: self.successor_id,
             predecessor_number: u32::try_from(self.predecessor_number).unwrap_or(0),
             successor_number: u32::try_from(self.successor_number).unwrap_or(0),
+            predecessor_board_slug: self.predecessor_board_slug,
+            successor_board_slug: self.successor_board_slug,
             reason: self.reason,
             last_edited_by: self.last_edited_by,
             created_at: api_timestamp(&self.created_at),

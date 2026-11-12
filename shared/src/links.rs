@@ -17,8 +17,11 @@
 //!
 //! The cycle check is deliberately a plain function over `(predecessor,
 //! successor)` id pairs rather than over any concrete link type: the backend
-//! feeds it database rows, the frontend feeds it the board's in-memory link
-//! index, and both must reach the same verdict.
+//! feeds it every link in the database — links may cross boards (card #544),
+//! so a loop can pass through any board — and the frontend feeds it the
+//! board's in-memory link index. The browser's verdict is therefore a
+//! best-effort pre-check (it cannot see edges that run entirely on another
+//! board); the server's is authoritative.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
@@ -66,9 +69,9 @@ pub fn normalize_reason(raw: Option<&str>) -> Result<Option<String>, ReasonError
 /// True when adding the edge `predecessor → successor` to the graph described
 /// by `edges` would close a loop.
 ///
-/// `edges` is every existing `(predecessor_id, successor_id)` pair on the
-/// board. The new edge creates a cycle exactly when the successor can already
-/// reach the predecessor by following existing edges forward — including the
+/// `edges` is every existing `(predecessor_id, successor_id)` pair the caller
+/// knows of — on the server, every link on every board. The new edge creates
+/// a cycle exactly when the successor can already reach the predecessor by following existing edges forward — including the
 /// trivial case where the two ids are the same card. The walk is a breadth-first
 /// search from the successor along successor edges; it stops early the moment
 /// the predecessor is reached, and a `visited` set keeps it from looping on a

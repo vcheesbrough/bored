@@ -685,6 +685,8 @@ mod tests {
             successor_id: format!("card-{successor}"),
             predecessor_number: predecessor,
             successor_number: successor,
+            predecessor_board_slug: String::new(),
+            successor_board_slug: String::new(),
             reason: None,
             last_edited_by: None,
             created_at: String::new(),

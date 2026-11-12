@@ -1,5 +1,6 @@
 //! Card links (iteration 42 — card #76): creation rules, cycle rejection,
-//! reasons, history and cascades.
+//! reasons, history and cascades — and, since iteration 78 (card #544), links
+//! between cards on different boards.
 
 use super::*;
 
@@ -145,38 +146,301 @@ async fn longer_cycle_is_rejected() {
     assert_eq!(board_links(&server, &board).await.len(), 3);
 }
 
-#[tokio::test]
-async fn cross_board_link_is_rejected() {
-    let server = test_app().await;
-    let (_, _, [a, _, _]) = setup_three_cards(&server).await;
-
-    let other_board: shared::Board = server
+/// A second board, `name`, with one column holding a card per title.
+async fn setup_other_board(
+    server: &TestServer,
+    name: &str,
+    titles: &[&str],
+) -> (shared::Board, Vec<shared::Card>) {
+    let board: shared::Board = server
         .post("/api/boards")
         .json(&shared::CreateBoardRequest {
-            name: "other-board".to_string(),
+            name: name.to_string(),
         })
         .await
         .json();
-    let other_col: shared::Column = server
-        .post(&format!("/api/boards/{}/columns", other_board.name))
+    let column: shared::Column = server
+        .post(&format!("/api/boards/{}/columns", board.name))
         .json(&shared::CreateColumnRequest {
             name: "Col".to_string(),
             position: 0,
         })
         .await
         .json();
-    let foreign: shared::Card = server
-        .post(&format!("/api/columns/{}/cards", other_col.id))
-        .json(&shared::CreateCardRequest {
-            body: "# Elsewhere".to_string(),
-            ..Default::default()
-        })
+    let mut cards = Vec::new();
+    for title in titles {
+        let card: shared::Card = server
+            .post(&format!("/api/columns/{}/cards", column.id))
+            .json(&shared::CreateCardRequest {
+                body: (*title).to_string(),
+                ..Default::default()
+            })
+            .await
+            .json();
+        cards.push(card);
+    }
+    (board, cards)
+}
+
+/// History rows for `link_id` on a board, newest first, as their actions.
+async fn board_link_actions(
+    server: &TestServer,
+    board: &shared::Board,
+    link_id: &str,
+) -> Vec<String> {
+    let hist: Vec<shared::AuditLogEntry> = server
+        .get(&format!("/api/boards/{}/history", board.name))
         .await
         .json();
+    hist.into_iter()
+        .filter(|e| e.entity_type == "card_link" && e.entity_id == link_id)
+        .map(|e| e.action)
+        .collect()
+}
 
-    let resp = link_after(&server, &a, &foreign, None).await;
+// ── Cross-board links (iteration 78 — card #544) ────────────────────────────
+
+#[tokio::test]
+async fn cross_board_link_is_created_and_listed_on_both_boards() {
+    let server = test_app().await;
+    let (board, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (other, far) = setup_other_board(&server, "other-board", &["# Elsewhere"]).await;
+
+    let resp = link_after(&server, &a, &far[0], None).await;
+    resp.assert_status(StatusCode::CREATED);
+    let link: shared::CardLink = resp.json();
+    // Each end names its own board.
+    assert_eq!(link.predecessor_board_slug, board.name);
+    assert_eq!(link.successor_board_slug, "other-board");
+    assert_eq!(link.successor_number, far[0].number);
+
+    // The same row is listed from either board.
+    assert_eq!(board_links(&server, &board).await, vec![link.clone()]);
+    assert_eq!(board_links(&server, &other).await, vec![link]);
+}
+
+#[tokio::test]
+async fn a_same_board_link_names_the_same_board_at_both_ends() {
+    let server = test_app().await;
+    let (board, _, [a, b, _]) = setup_three_cards(&server).await;
+    let link: shared::CardLink = link_after(&server, &a, &b, None).await.json();
+    assert_eq!(link.predecessor_board_slug, board.name);
+    assert_eq!(link.successor_board_slug, board.name);
+}
+
+#[tokio::test]
+async fn a_board_lists_only_links_that_touch_it() {
+    let server = test_app().await;
+    let (board, _, [a, b, _]) = setup_three_cards(&server).await;
+    let (other, far) = setup_other_board(&server, "other-board", &["# X", "# Y"]).await;
+    let (third, _) = setup_other_board(&server, "third-board", &[]).await;
+
+    let local: shared::CardLink = link_after(&server, &a, &b, None).await.json();
+    let crossing: shared::CardLink = link_after(&server, &b, &far[0], None).await.json();
+    let remote: shared::CardLink = link_after(&server, &far[0], &far[1], None).await.json();
+
+    // Oldest first, and the link entirely on the other board is not here.
+    assert_eq!(
+        board_links(&server, &board).await,
+        vec![local, crossing.clone()]
+    );
+    assert_eq!(board_links(&server, &other).await, vec![crossing, remote]);
+    assert!(board_links(&server, &third).await.is_empty());
+}
+
+/// The loop A1 → B1 → B2 → A2 → A1 has its middle edge entirely on board B.
+/// Board A's own links (A1 → B1 and B2 → A2) show no path from A1 to A2, so
+/// a check over one board's links would let the closing edge through.
+#[tokio::test]
+async fn a_loop_through_another_board_is_rejected() {
+    let server = test_app().await;
+    let (_, _, [a1, a2, _]) = setup_three_cards(&server).await;
+    let (_, far) = setup_other_board(&server, "other-board", &["# B1", "# B2"]).await;
+    let (b1, b2) = (&far[0], &far[1]);
+
+    for (from, to) in [(&a1, b1), (b1, b2), (b2, &a2)] {
+        link_after(&server, from, to, None)
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+    let resp = link_after(&server, &a2, &a1, None).await;
     resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(resp.text().contains("same board"));
+    assert!(resp.text().contains("loop"));
+}
+
+#[tokio::test]
+async fn a_duplicate_cross_board_link_is_a_conflict() {
+    let server = test_app().await;
+    let (_, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (_, far) = setup_other_board(&server, "other-board", &["# Elsewhere"]).await;
+    link_after(&server, &a, &far[0], None)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    // The same fact asked from the other board's card.
+    let resp = server
+        .post(&format!("/api/cards/{}/links", far[0].id))
+        .json(&shared::CreateCardLinkRequest {
+            direction: shared::LinkDirection::Predecessor,
+            other_card_id: a.id.clone(),
+            reason: None,
+        })
+        .await;
+    resp.assert_status(StatusCode::CONFLICT);
+}
+
+/// Every history row for a cross-board link is written on both boards, so each
+/// board's history and each card's history show it — and the snapshots leave
+/// the board slugs out.
+#[tokio::test]
+async fn cross_board_link_history_is_on_both_boards_and_both_cards() {
+    let server = test_app().await;
+    let (board, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (other, far) = setup_other_board(&server, "other-board", &["# Elsewhere"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far[0], Some("why")).await.json();
+    server
+        .put(&format!("/api/links/{}", link.id))
+        .json(&shared::UpdateCardLinkRequest {
+            reason: Some("because".to_string()),
+        })
+        .await
+        .assert_status_ok();
+    server
+        .delete(&format!("/api/links/{}", link.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let expected = vec!["delete", "update", "create"];
+    assert_eq!(
+        board_link_actions(&server, &board, &link.id).await,
+        expected
+    );
+    assert_eq!(
+        board_link_actions(&server, &other, &link.id).await,
+        expected
+    );
+
+    for card in [&a, &far[0]] {
+        let hist: Vec<shared::AuditLogEntry> = server
+            .get(&format!("/api/cards/{}/history", card.id))
+            .await
+            .json();
+        let actions: Vec<_> = hist
+            .iter()
+            .filter(|e| e.entity_type == "card_link" && e.entity_id == link.id)
+            .map(|e| e.action.as_str())
+            .collect();
+        assert_eq!(actions, expected, "history of card #{}", card.number);
+        for row in hist.iter().filter(|e| e.entity_type == "card_link") {
+            for snapshot in [&row.snapshot_before, &row.snapshot_after]
+                .into_iter()
+                .flatten()
+            {
+                assert!(snapshot.get("predecessor_board_slug").is_none());
+                assert!(snapshot.get("successor_board_slug").is_none());
+                // The numbers the summary renders are still there.
+                assert_eq!(snapshot["successor_number"], far[0].number);
+            }
+        }
+    }
+}
+
+/// Every link event reaches both boards' subscribers: each event goes out once
+/// per board, tagged with that board's id. A same-board link's events go out
+/// exactly once.
+#[tokio::test]
+async fn cross_board_link_events_reach_both_boards() {
+    use crate::events::{BoardEvent, BroadcastEvent};
+    use tokio::sync::broadcast::{Receiver, error::TryRecvError};
+
+    /// The board ids of every link event waiting in `rx`, in order, tagged
+    /// with the event's kind. Audit events are skipped.
+    fn drain(rx: &mut Receiver<BroadcastEvent>) -> Vec<(&'static str, String)> {
+        let mut seen = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    let kind = match msg.event {
+                        BoardEvent::CardLinkCreated { .. } => "created",
+                        BoardEvent::CardLinkUpdated { .. } => "updated",
+                        BoardEvent::CardLinkDeleted { .. } => "deleted",
+                        _ => continue,
+                    };
+                    seen.push((kind, msg.board_id));
+                }
+                Err(TryRecvError::Empty) => return seen,
+                Err(other) => panic!("broadcast channel: {other}"),
+            }
+        }
+    }
+
+    let db = db::connect_test().await.expect("failed to connect test db");
+    let state = AppState::new(db);
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+
+    let (board, _, [a, b, _]) = setup_three_cards(&server).await;
+    let (other, far) = setup_other_board(&server, "other-board", &["# Elsewhere"]).await;
+    drain(&mut rx);
+
+    // Each request's events are sent before its response returns, so
+    // `try_recv` after the `.await` sees all of them.
+    let link: shared::CardLink = link_after(&server, &a, &far[0], None).await.json();
+    server
+        .put(&format!("/api/links/{}", link.id))
+        .json(&shared::UpdateCardLinkRequest {
+            reason: Some("because".to_string()),
+        })
+        .await
+        .assert_status_ok();
+    server
+        .delete(&format!("/api/links/{}", link.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let both = |kind| vec![(kind, board.id.clone()), (kind, other.id.clone())];
+    let expected: Vec<_> = ["created", "updated", "deleted"]
+        .into_iter()
+        .flat_map(both)
+        .collect();
+    assert_eq!(drain(&mut rx), expected);
+
+    // A same-board link is announced once, not twice to the same board.
+    link_after(&server, &a, &b, None)
+        .await
+        .assert_status(StatusCode::CREATED);
+    assert_eq!(drain(&mut rx), vec![("created", board.id.clone())]);
+}
+
+/// Deleting the far board removes its cross-board links and says so on the
+/// near board: the link leaves the near board's list and a delete row lands
+/// in its history.
+#[tokio::test]
+async fn deleting_the_other_board_removes_cross_board_links_from_this_one() {
+    let server = test_app().await;
+    let (board, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (other, far) = setup_other_board(&server, "other-board", &["# Elsewhere"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far[0], None).await.json();
+
+    server
+        .delete(&format!("/api/boards/{}", other.name))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    assert!(board_links(&server, &board).await.is_empty());
+    assert_eq!(
+        board_link_actions(&server, &board, &link.id).await,
+        vec!["delete", "create"]
+    );
+    // The surviving card's own history records the loss too.
+    let hist: Vec<shared::AuditLogEntry> = server
+        .get(&format!("/api/cards/{}/history", a.id))
+        .await
+        .json();
+    assert!(
+        hist.iter()
+            .any(|e| e.entity_id == link.id && e.action == "delete")
+    );
 }
 
 #[tokio::test]

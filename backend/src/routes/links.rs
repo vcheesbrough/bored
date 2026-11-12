@@ -5,10 +5,24 @@
 //! rules a link must satisfy (trimmed, capped reason; no loops) live in
 //! `shared::links` so the browser can apply the same ones before it asks.
 //!
+//! # Cross-board links (iteration 78 — card #544)
+//!
+//! The two ends may sit on different boards. A card can never move to another
+//! board, so the pair of boards a link joins is fixed for its whole life, and
+//! three things follow from that:
+//!
+//! * a board's link list is every link with **either** end on it;
+//! * the loop check runs over **every** link in the database, because a loop
+//!   can pass through any number of boards;
+//! * every history row and SSE event about a link is written **once per board
+//!   it touches** ([`DbCardLink::boards`]), so both boards' history panels,
+//!   card histories and live views see it. Link history rows are never
+//!   restorable, so the second copy can never be replayed twice.
+//!
 //! Responses here carry a short plain-text body on the client-error statuses,
-//! unlike the other routes which return a bare status. Four different things
-//! are 422 for a link (self-link, cross-board, over-long reason, cycle) and
-//! the editor needs to tell the user which one it hit.
+//! unlike the other routes which return a bare status. Three different things
+//! are 422 for a link (self-link, over-long reason, cycle) and the editor
+//! needs to tell the user which one it hit.
 
 use axum::{
     Extension, Json,
@@ -24,13 +38,11 @@ use crate::events::{BoardEvent, BroadcastEvent};
 use crate::models::{DbCard, DbCardLink, DbColumn};
 use crate::routes::boards::{AppState, editor_sub, find_board_by_slug};
 
-// The four distinct 422s and the 409 this module can return. Each carries its
+// The three distinct 422s and the 409 this module can return. Each carries its
 // message because, unlike the other route modules, the link editor has to tell
 // the user *which* rule they broke. `ApiError::Unprocessable(Some(..))` renders
 // the same plain-text response the `(StatusCode, &str)` tuples used to.
 const SELF_LINK: ApiError = ApiError::Unprocessable(Some("a card cannot be linked to itself"));
-const CROSS_BOARD: ApiError =
-    ApiError::Unprocessable(Some("linked cards must be on the same board"));
 const REASON_TOO_LONG: ApiError =
     ApiError::Unprocessable(Some("reason is longer than 200 characters"));
 const CYCLE: ApiError = ApiError::Unprocessable(Some("linking these cards would create a loop"));
@@ -40,10 +52,15 @@ const CYCLE: ApiError = ApiError::Unprocessable(Some("linking these cards would 
 const ALREADY_LINKED: ApiError = ApiError::Conflict(Some(crate::error::ALREADY_LINKED_MESSAGE));
 
 /// The select every link read starts from, followed by `$rest` (a string
-/// literal: the WHERE / ORDER BY). The card numbers are not stored on the link
-/// row; they are joined in from the two cards so the API type can carry them
-/// without a second query per link. Inner joins are safe: the foreign keys
-/// cascade a card's deletion to its links, so both ends always exist.
+/// literal: the WHERE / ORDER BY). The card numbers and each end's board (id
+/// and slug) are not stored on the link row; they are joined in from the two
+/// cards, their columns and their boards, so the API type can carry them
+/// without a second query per link.
+///
+/// Inner joins are safe all the way up: a card's deletion cascades to its
+/// links, and `cards.column_id` / `columns.board_id` are `ON DELETE RESTRICT`,
+/// so every link has two cards, each card has a column, and each column has
+/// a board.
 ///
 /// A macro rather than a `const` + `format!` so the whole statement is still
 /// one string literal (`concat!` runs at compile time), which is what sqlx
@@ -51,10 +68,16 @@ const ALREADY_LINKED: ApiError = ApiError::Conflict(Some(crate::error::ALREADY_L
 macro_rules! link_select {
     ($rest:literal) => {
         concat!(
-            "SELECT l.*, p.number AS predecessor_number, s.number AS successor_number \
+            "SELECT l.*, p.number AS predecessor_number, s.number AS successor_number, \
+             pc.board_id AS predecessor_board_id, sc.board_id AS successor_board_id, \
+             pb.name AS predecessor_board_slug, sb.name AS successor_board_slug \
              FROM card_links l \
              JOIN cards p ON p.id = l.predecessor_id \
-             JOIN cards s ON s.id = l.successor_id ",
+             JOIN cards s ON s.id = l.successor_id \
+             JOIN columns pc ON pc.id = p.column_id \
+             JOIN columns sc ON sc.id = s.column_id \
+             JOIN boards pb ON pb.id = pc.board_id \
+             JOIN boards sb ON sb.id = sc.board_id ",
             $rest
         )
     };
@@ -73,13 +96,11 @@ async fn load_link(db: &Db, link_id: &str) -> Result<Option<DbCardLink>, sqlx::E
         .await
 }
 
-/// Every link on a board, oldest first. A link's board is the board of the
-/// cards it joins; both ends are always on the same one, so the predecessor
-/// alone is enough to scope the query.
+/// Every link with at least one end on the board, oldest first. A
+/// cross-board link is listed on both of its boards.
 async fn board_links(db: &Db, board_ulid: &str) -> Result<Vec<DbCardLink>, sqlx::Error> {
     sqlx::query_as(link_select!(
-        "JOIN columns pc ON pc.id = p.column_id \
-         WHERE pc.board_id = $1 ORDER BY l.created_at, l.id"
+        "WHERE pc.board_id = $1 OR sc.board_id = $1 ORDER BY l.created_at, l.id"
     ))
     .bind(board_ulid)
     .fetch_all(db)
@@ -89,6 +110,21 @@ async fn board_links(db: &Db, board_ulid: &str) -> Result<Vec<DbCardLink>, sqlx:
         "card_links",
     ))
     .await
+}
+
+/// Every `(predecessor_id, successor_id)` pair in the database, on every
+/// board. The duplicate and loop checks need the whole graph: with links
+/// allowed across boards, a loop can run through boards neither end is on.
+/// Only the two ids are read, so this stays cheap even with many links.
+async fn all_link_pairs(db: &Db) -> Result<Vec<(String, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT predecessor_id, successor_id FROM card_links")
+        .fetch_all(db)
+        .traced(DbQuery::new(
+            "links.all_link_pairs",
+            DbOperation::Select,
+            "card_links",
+        ))
+        .await
 }
 
 /// Every link with `card_id` at either end.
@@ -120,8 +156,77 @@ async fn select_card(
         .await
 }
 
-/// The board a card sits on, via its column. `None` when the column has gone
-/// — the caller should then treat the board as unknown rather than fail.
+/// The JSON a link's history row stores: the API shape **minus the two board
+/// slugs**.
+///
+/// The slugs are left out on purpose. A history row is permanent and lives on
+/// a board's history, so storing the far board's name there would copy it
+/// into the other board's record for good — which becomes a leak to redact
+/// once boards are private (card #12). The summaries only render card numbers
+/// (`#P → #S`), and `shared::CardLink`'s `#[serde(default)]` slugs let these
+/// snapshots still parse.
+fn link_snapshot(link: &shared::CardLink) -> Result<serde_json::Value, ApiError> {
+    let mut value = serde_json::to_value(link)?;
+    // `as_object_mut` is `Some` for any struct serialized by serde_json; the
+    // `if let` just avoids an unwrap.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("predecessor_board_slug");
+        object.remove("successor_board_slug");
+    }
+    Ok(value)
+}
+
+/// Write one history row per board the link touches. `before` / `after` are
+/// the snapshots (already slug-free, from [`link_snapshot`]).
+#[allow(clippy::too_many_arguments)]
+async fn record_link_audit(
+    state: &AppState,
+    claims: &Claims,
+    boards: &[String],
+    link_id: &str,
+    action: &'static str,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+    batch_group: Option<&str>,
+) -> Result<(), ApiError> {
+    for board_id in boards {
+        audit::record_and_broadcast(
+            &state.db,
+            &state.events,
+            audit::AuditRecord {
+                claims,
+                board_id: board_id.clone(),
+                entity_type: "card_link",
+                entity_id: link_id,
+                action,
+                snapshot_before: before.clone(),
+                snapshot_after: after.clone(),
+                restored_from: None,
+                batch_group: batch_group.map(str::to_string),
+                audit_edit_session: None,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Send `event` to every board in `boards`. `BroadcastEvent` carries one
+/// board id and each SSE subscriber filters on its own board, so a
+/// cross-board link's event has to go out once per board.
+fn broadcast_link_event(state: &AppState, boards: &[String], event: &BoardEvent) {
+    for board_id in boards {
+        // `send` only fails when nobody is subscribed, which is fine.
+        let _ = state.events.send(BroadcastEvent {
+            board_id: board_id.clone(),
+            event: event.clone(),
+        });
+    }
+}
+
+/// The board a card sits on, via its column. `None` when the column is gone,
+/// which the `ON DELETE RESTRICT` foreign key should make impossible; the
+/// caller treats it as a missing card.
 async fn board_of_card(db: &Db, card: &DbCard) -> Result<Option<String>, sqlx::Error> {
     let column: Option<DbColumn> = sqlx::query_as("SELECT * FROM columns WHERE id = $1")
         .bind(&card.column_id)
@@ -133,23 +238,6 @@ async fn board_of_card(db: &Db, card: &DbCard) -> Result<Option<String>, sqlx::E
         ))
         .await?;
     Ok(column.map(|c| c.board_id))
-}
-
-/// The board a link belongs to, via its predecessor card, falling back to the
-/// successor when the predecessor (or its column) is already gone. `None`
-/// only when neither end resolves to a board.
-async fn board_of_link(db: &Db, link: &DbCardLink) -> Result<Option<String>, sqlx::Error> {
-    let predecessor = select_card(db, &link.predecessor_id, "links.board_of_link").await?;
-    if let Some(card) = predecessor
-        && let Some(board_id) = board_of_card(db, &card).await?
-    {
-        return Ok(Some(board_id));
-    }
-    let successor = select_card(db, &link.successor_id, "links.board_of_link").await?;
-    match successor {
-        Some(card) => board_of_card(db, &card).await,
-        None => Ok(None),
-    }
 }
 
 /// Map a reason the shared rules rejected onto the 422 the client sees.
@@ -176,8 +264,10 @@ pub async fn list_board_links(
 /// `direction` says which role the *other* card takes, so the same row comes
 /// out whether the user started from the predecessor or the successor.
 ///
-/// 404 unknown card · 409 already linked · 422 self-link, cross-board, reason
-/// too long, or cycle.
+/// The other card may be on any board (card #544).
+///
+/// 404 unknown card · 409 already linked · 422 self-link, reason too long, or
+/// cycle (checked across every board).
 #[tracing::instrument(skip_all, fields(bored.card.id = %card_id))]
 pub async fn create_card_link(
     State(state): State<AppState>,
@@ -199,14 +289,13 @@ pub async fn create_card_link(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    let board_id = board_of_card(&state.db, &card)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let other_board_id = board_of_card(&state.db, &other)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    if board_id != other_board_id {
-        return Err(CROSS_BOARD);
+    // Both ends must resolve to a board. They no longer have to be the same
+    // board; the boards the link touches are read back from the created row
+    // below, so nothing here needs to keep them.
+    for end in [&card, &other] {
+        board_of_card(&state.db, end)
+            .await?
+            .ok_or(ApiError::NotFound)?;
     }
 
     // Validate the reason before touching the graph so a bad reason costs
@@ -218,16 +307,14 @@ pub async fn create_card_link(
         shared::LinkDirection::Successor => (card_id.clone(), payload.other_card_id.clone()),
     };
 
-    // From here to the CREATE the board's link graph must not change under
-    // us — see `AppState::link_lock`. The guard drops at the end of the block.
+    // From here to the CREATE the link graph must not change under us — see
+    // `AppState::link_lock`, which is one process-wide lock, so it already
+    // covers every board. The guard drops at the end of the block.
     let created_id = {
         let _guard = state.link_lock.lock().await;
 
-        let existing = board_links(&state.db, &board_id).await?;
-        let pairs: Vec<(String, String)> = existing
-            .iter()
-            .map(|l| (l.predecessor_id.clone(), l.successor_id.clone()))
-            .collect();
+        // The whole graph, not one board's: a loop may run through any board.
+        let pairs = all_link_pairs(&state.db).await?;
 
         // An exact duplicate is a conflict, not a cycle — checked first so the
         // client gets the more specific answer.
@@ -288,36 +375,31 @@ pub async fn create_card_link(
         id
     };
 
-    // Re-read rather than use the INSERT's return: the card numbers are only
-    // joined in by `link_select!`.
-    let link = load_link(&state.db, &created_id)
+    // Re-read rather than use the INSERT's return: the card numbers and the
+    // boards are only joined in by `link_select!`.
+    let row = load_link(&state.db, &created_id)
         .await?
-        .ok_or_else(|| ApiError::internal("link vanished after create"))?
-        .into_api();
+        .ok_or_else(|| ApiError::internal("link vanished after create"))?;
+    let boards = row.boards();
+    let link = row.into_api();
 
-    let snapshot_after = serde_json::to_value(&link)?;
-    audit::record_and_broadcast(
-        &state.db,
-        &state.events,
-        audit::AuditRecord {
-            claims: &claims,
-            board_id: board_id.clone(),
-            entity_type: "card_link",
-            entity_id: &link.id,
-            action: "create",
-            snapshot_before: None,
-            snapshot_after: Some(snapshot_after),
-            restored_from: None,
-            batch_group: None,
-            audit_edit_session: None,
-        },
+    record_link_audit(
+        &state,
+        &claims,
+        &boards,
+        &link.id,
+        "create",
+        None,
+        Some(link_snapshot(&link)?),
+        None,
     )
     .await?;
 
-    let _ = state.events.send(BroadcastEvent {
-        board_id,
-        event: BoardEvent::CardLinkCreated { link: link.clone() },
-    });
+    broadcast_link_event(
+        &state,
+        &boards,
+        &BoardEvent::CardLinkCreated { link: link.clone() },
+    );
     Ok((StatusCode::CREATED, Json(link)))
 }
 
@@ -341,10 +423,8 @@ pub async fn update_card_link(
         return Ok(Json(existing.into_api()));
     }
 
-    let board_id = board_of_link(&state.db, &existing)
-        .await?
-        .unwrap_or_default();
-    let snapshot_before = serde_json::to_value(existing.into_api())?;
+    let boards = existing.boards();
+    let snapshot_before = link_snapshot(&existing.into_api())?;
 
     sqlx::query("UPDATE card_links SET reason = $2, last_edited_by = $3 WHERE id = $1")
         .bind(&link_id)
@@ -363,29 +443,23 @@ pub async fn update_card_link(
         .ok_or(ApiError::NotFound)?
         .into_api();
 
-    let snapshot_after = serde_json::to_value(&link)?;
-    audit::record_and_broadcast(
-        &state.db,
-        &state.events,
-        audit::AuditRecord {
-            claims: &claims,
-            board_id: board_id.clone(),
-            entity_type: "card_link",
-            entity_id: &link.id,
-            action: "update",
-            snapshot_before: Some(snapshot_before),
-            snapshot_after: Some(snapshot_after),
-            restored_from: None,
-            batch_group: None,
-            audit_edit_session: None,
-        },
+    record_link_audit(
+        &state,
+        &claims,
+        &boards,
+        &link.id,
+        "update",
+        Some(snapshot_before),
+        Some(link_snapshot(&link)?),
+        None,
     )
     .await?;
 
-    let _ = state.events.send(BroadcastEvent {
-        board_id,
-        event: BoardEvent::CardLinkUpdated { link: link.clone() },
-    });
+    broadcast_link_event(
+        &state,
+        &boards,
+        &BoardEvent::CardLinkUpdated { link: link.clone() },
+    );
     Ok(Json(link))
 }
 
@@ -399,41 +473,34 @@ pub async fn delete_card_link(
     let existing = load_link(&state.db, &link_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let board_id = board_of_link(&state.db, &existing)
-        .await?
-        .unwrap_or_default();
 
-    delete_one_link(&state, &claims, &board_id, existing, None).await?;
+    delete_one_link(&state, &claims, existing, None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Record, delete, and broadcast the removal of one link. Shared by the
 /// explicit delete route and the cascades below so every removal — however it
-/// came about — leaves the same history row and the same SSE event.
+/// came about — leaves the same history rows and the same SSE events, on
+/// every board the link touches. Deleting board B therefore tells board A
+/// that its cross-board links to B are gone.
 async fn delete_one_link(
     state: &AppState,
     claims: &Claims,
-    board_id: &str,
     link: DbCardLink,
     batch_group: Option<&str>,
 ) -> Result<(), ApiError> {
     let link_id = link.id.clone();
-    let snapshot_before = serde_json::to_value(link.into_api())?;
-    audit::record_and_broadcast(
-        &state.db,
-        &state.events,
-        audit::AuditRecord {
-            claims,
-            board_id: board_id.to_string(),
-            entity_type: "card_link",
-            entity_id: &link_id,
-            action: "delete",
-            snapshot_before: Some(snapshot_before),
-            snapshot_after: None,
-            restored_from: None,
-            batch_group: batch_group.map(str::to_string),
-            audit_edit_session: None,
-        },
+    let boards = link.boards();
+    let snapshot_before = link_snapshot(&link.into_api())?;
+    record_link_audit(
+        state,
+        claims,
+        &boards,
+        &link_id,
+        "delete",
+        Some(snapshot_before),
+        None,
+        batch_group,
     )
     .await?;
 
@@ -447,10 +514,7 @@ async fn delete_one_link(
         ))
         .await?;
 
-    let _ = state.events.send(BroadcastEvent {
-        board_id: board_id.to_string(),
-        event: BoardEvent::CardLinkDeleted { link_id },
-    });
+    broadcast_link_event(state, &boards, &BoardEvent::CardLinkDeleted { link_id });
     Ok(())
 }
 
@@ -461,16 +525,17 @@ async fn delete_one_link(
 /// `batch_group` ties the link rows to the cascade that caused them. They are
 /// never replayed by a batch restore — a deleted link may no longer be legal
 /// to re-add — but grouping them keeps the history honest about why they went.
+/// For a cross-board link the row on the *other* board carries the same
+/// group, so its history can say which cascade removed the link.
 pub(crate) async fn cascade_delete_card_links(
     state: &AppState,
     claims: &Claims,
-    board_id: &str,
     card_id: &str,
     batch_group: Option<&str>,
 ) -> Result<(), ApiError> {
     let links = links_touching_card(&state.db, card_id).await?;
     for link in links {
-        delete_one_link(state, claims, board_id, link, batch_group).await?;
+        delete_one_link(state, claims, link, batch_group).await?;
     }
     Ok(())
 }

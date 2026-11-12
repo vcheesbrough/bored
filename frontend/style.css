@@ -1925,6 +1925,30 @@ mark.search-hit {
   content: " ·";
 }
 
+/* The linked card's board, for a card on another board only (card #544):
+   "other-board › #12". Muted like the column prefix it replaces; the `›`
+   reads as "on that board, card …". */
+.link-chip-board,
+.link-suggestion-board {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.link-chip-board::after,
+.link-suggestion-board::after {
+  content: " ›";
+}
+
+.link-suggestion-board {
+  /* Inline in the row's button, before the number. */
+  display: inline-block;
+  vertical-align: bottom;
+  margin-right: 0.35em;
+}
+
 .link-chip-card {
   padding: 0;
   border: none;

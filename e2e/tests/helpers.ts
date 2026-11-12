@@ -132,6 +132,9 @@ export interface CardLink {
   successor_id: string;
   predecessor_number: number;
   successor_number: number;
+  /** Slug of each end's board (card #544: the two may differ). */
+  predecessor_board_slug: string;
+  successor_board_slug: string;
   reason: string | null;
 }
 

@@ -388,16 +388,19 @@ pub async fn delete_column(column_id: &str) -> Result<(), ApiError> {
 }
 
 /// Fetch a card by its human-readable sequential number via `GET /api/cards/by-number/:number`.
-/// Used when the URL carries `?card=<number>` rather than the internal ULID.
+/// Used when the URL carries `?card=<number>` rather than the internal ULID,
+/// and by the link picker to find a card on another board (card #544). Card
+/// numbers are global, so the answer carries the slug of the board the card
+/// is on.
 pub async fn fetch_card_by_number(
     number: u32,
     parent: Option<SpanContext>,
-) -> Result<shared::Card, ApiError> {
+) -> Result<shared::CardWithBoard, ApiError> {
     send(
         "GET /api/cards/by-number/{number}",
         parent,
         Request::get(&format!("/api/cards/by-number/{number}")).build(),
-        |r, _| async move { r.json::<shared::Card>().await },
+        |r, _| async move { r.json::<shared::CardWithBoard>().await },
     )
     .await
 }
