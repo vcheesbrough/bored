@@ -288,7 +288,10 @@ steps:
     # that run `sovereign-config render`. The CLI must match the running
     # sovereign-config server (2.46.418, like the provider in
     # backend/Cargo.toml): bump tag and digest together, as a commit.
-    image: &deploy-image registry.desync.link/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
+    # Pulled from public GHCR (card #542), so the step image no longer
+    # depends on Zot; the docker login below is still needed, for the
+    # bored image this step pulls from registry.desync.link.
+    image: &deploy-image ghcr.io/vcheesbrough/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
     volumes: *docker-socket
     environment:
       REGISTRY_USER:
