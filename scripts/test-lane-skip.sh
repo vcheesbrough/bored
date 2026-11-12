@@ -43,10 +43,11 @@ if [ $# -ne 1 ] || [ ! -f "$1" ]; then
     exit 2
 fi
 
-git -c safe.directory='*' ls-files > "${TMPDIR:-/tmp}/lane-skip-tracked.$$"
-trap 'rm -f "${TMPDIR:-/tmp}/lane-skip-tracked.$$"' EXIT
+TRACKED=$(mktemp)
+trap 'rm -f "$TRACKED"' EXIT
+git -c safe.directory='*' ls-files > "$TRACKED"
 
-python3 - "$1" "${TMPDIR:-/tmp}/lane-skip-tracked.$$" <<'PY'
+python3 - "$1" "$TRACKED" <<'PY'
 import copy
 import fnmatch
 import os
