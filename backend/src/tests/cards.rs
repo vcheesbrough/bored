@@ -287,10 +287,51 @@ async fn get_card_by_number() {
         .get(&format!("/api/cards/by-number/{}", card.number))
         .await;
     resp.assert_status_ok();
-    let fetched: shared::Card = resp.json();
-    assert_eq!(fetched.id, card.id);
-    assert_eq!(fetched.number, card.number);
-    assert_eq!(fetched.body, "# Number me");
+    // `CardWithBoard` (card #544): the card's own fields flattened at the top
+    // level, plus the slug of the board it sits on.
+    let fetched: shared::CardWithBoard = resp.json();
+    assert_eq!(fetched.card.id, card.id);
+    assert_eq!(fetched.card.number, card.number);
+    assert_eq!(fetched.card.body, "# Number me");
+    assert_eq!(fetched.board_slug, "test-board");
+}
+
+/// The slug comes from the card's *own* board, not some default: a card on a
+/// second board reports that board. (With only one board, a hard-coded or
+/// first-board slug would pass the test above.)
+#[tokio::test]
+async fn get_card_by_number_names_the_cards_own_board() {
+    let server = test_app().await;
+    setup_board_and_column(&server).await;
+    let other: shared::Board = server
+        .post("/api/boards")
+        .json(&shared::CreateBoardRequest {
+            name: "elsewhere".to_string(),
+        })
+        .await
+        .json();
+    let column: shared::Column = server
+        .post(&format!("/api/boards/{}/columns", other.name))
+        .json(&shared::CreateColumnRequest {
+            name: "Col".to_string(),
+            position: 0,
+        })
+        .await
+        .json();
+    let card: shared::Card = server
+        .post(&format!("/api/columns/{}/cards", column.id))
+        .json(&shared::CreateCardRequest {
+            body: "# Far away".to_string(),
+            ..Default::default()
+        })
+        .await
+        .json();
+
+    let fetched: shared::CardWithBoard = server
+        .get(&format!("/api/cards/by-number/{}", card.number))
+        .await
+        .json();
+    assert_eq!(fetched.board_slug, "elsewhere");
 }
 
 #[tokio::test]

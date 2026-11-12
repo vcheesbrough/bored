@@ -149,8 +149,9 @@ pub struct MoveCardParams {
 pub struct LinkCardsParams {
     /// The ID of the card that comes first.
     pub predecessor_id: String,
-    /// The ID of the card that comes after. Must be on the same board as the
-    /// predecessor, and the link must not close a loop with existing links.
+    /// The ID of the card that comes after. May be on the same board as the
+    /// predecessor or on a different one; the link must not close a loop with
+    /// existing links on any board.
     pub successor_id: String,
     /// Optional short note (at most 200 characters) on why the predecessor
     /// has to come first. Omit or leave empty for no reason.
@@ -737,7 +738,7 @@ impl BoredMcp {
     }
 
     #[tool(
-        description = "Look up a card by its human-readable number (the `?card=N` value in the web UI URL). Returns the full Card object including its ULID, body, column_id, and position."
+        description = "Look up a card by its human-readable number (the `?card=N` value in the web UI URL). Card numbers are unique across all boards. Returns the full Card object including its ULID, body, column_id, and position, plus board_slug — the slug of the board the card is on."
     )]
     async fn get_card_by_number(
         &self,
@@ -866,7 +867,7 @@ impl BoredMcp {
     // ── Card links ────────────────────────────────────────────────────────────
 
     #[tool(
-        description = "List every predecessor/successor link on a board. Returns a JSON array of link objects with id, predecessor_id, successor_id, predecessor_number, successor_number, and an optional reason. A link means the predecessor card comes before the successor card."
+        description = "List every predecessor/successor link with at least one end on a board, including links to cards on other boards. Returns a JSON array of link objects with id, predecessor_id, successor_id, predecessor_number, successor_number, predecessor_board_slug, successor_board_slug, and an optional reason. A link means the predecessor card comes before the successor card."
     )]
     async fn list_board_links(
         &self,
@@ -891,7 +892,7 @@ impl BoredMcp {
     }
 
     #[tool(
-        description = "Link two cards so that `predecessor_id` comes before `successor_id`, with an optional reason. Both cards must be on the same board, a card cannot be linked to itself, an existing pair is rejected (409), and a link that would create a loop through existing links is rejected (422). Returns the created link object including its id."
+        description = "Link two cards so that `predecessor_id` comes before `successor_id`, with an optional reason. The two cards may be on the same board or on different boards. A card cannot be linked to itself, an existing pair is rejected (409), and a link that would create a loop through existing links — on any board — is rejected (422). Returns the created link object including its id."
     )]
     async fn link_cards(
         &self,

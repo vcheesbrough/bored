@@ -6,6 +6,16 @@
 //! same links and a change made anywhere (including over SSE) shows up in
 //! both without either being remounted.
 //!
+//! # Cards on other boards (iteration 78 — card #544)
+//!
+//! A link may join cards on two different boards. **A board name is shown
+//! only for a card that is not on the board being viewed**, on chips and on
+//! picker rows alike, so a same-board link looks exactly as it always has.
+//! [`foreign_board`] is the one place that rule lives. A chip for a card on
+//! another board opens that card *on its own board* ([`card_url`]), and the
+//! picker finds such a card by its number alone ([`remote_lookup_number`]),
+//! since only this board's cards are loaded in the browser.
+//!
 //! Every component here returns `AnyView`: a `view!` compiles to one nested
 //! generic type, and a component boundary caps that nesting so each piece is
 //! type-checked on its own rather than as part of the card it sits in.
@@ -17,6 +27,7 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 use crate::links::BoardLinkIndex;
 use crate::recent::RecentPicks;
 use crate::search::{BoardCardIndex, BoardSearchQuery, query_matches_number};
+use crate::telemetry::Reportable as _;
 
 /// How many cards the picker offers at once.
 const MAX_SUGGESTIONS: usize = 6;
@@ -29,6 +40,16 @@ const MAX_TITLE_CHARS: usize = 32;
 /// title: the prefix is a status word ("todo", "in progress"), and the card it
 /// qualifies has to stay the part you read first.
 const MAX_COLUMN_CHARS: usize = 16;
+
+/// Longest board name shown as a prefix, in characters. A little longer than a
+/// column name — board slugs are names, not status words — but still a label
+/// that must not crowd out the card number it qualifies.
+const MAX_BOARD_CHARS: usize = 20;
+
+/// How long the picker waits after the last keystroke before looking a typed
+/// number up on the server. Typing `544` asks once for `544`, not for `5`,
+/// `54` and `544` in turn.
+const LOOKUP_DEBOUNCE_MS: u32 = 200;
 
 /// Which end of the card a group edits.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,6 +126,87 @@ fn column_name_for(
         return None;
     }
     Some(truncate(name, MAX_COLUMN_CHARS))
+}
+
+/// The board name to show before a linked card, or `None` when the card is on
+/// the board being viewed — the display rule for chips and picker rows.
+///
+/// An empty `card_board_slug` also means "no prefix": it is what a link
+/// serialized before card #544 deserializes to, and every such link was a
+/// same-board link.
+fn foreign_board(current_slug: &str, card_board_slug: &str) -> Option<String> {
+    if card_board_slug.is_empty() || card_board_slug == current_slug {
+        return None;
+    }
+    Some(truncate(card_board_slug, MAX_BOARD_CHARS))
+}
+
+/// Where clicking a linked card goes: that card opened over *its own* board,
+/// which for a card on another board means leaving this one. The full slug is
+/// used here, never the truncated [`foreign_board`] label.
+fn card_url(current_slug: &str, card_board_slug: &str, number: u32) -> String {
+    let board = if card_board_slug.is_empty() {
+        current_slug
+    } else {
+        card_board_slug
+    };
+    format!("/boards/{board}?card={number}")
+}
+
+/// The card number the picker should look up on the server for `typed`, if
+/// any: the text is a whole card number (`42` or `#42`) and no card on this
+/// board has it. Only this board's cards are loaded in the browser, so a
+/// number missing from `local_numbers` may be a card on another board.
+///
+/// Every card on the board counts as local — including the card being edited
+/// and cards already linked — so typing one of those never asks the server
+/// about a card the list already accounts for.
+fn remote_lookup_number(typed: &str, local_numbers: &[u32]) -> Option<u32> {
+    let digits = typed.trim().trim_start_matches('#');
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // A run of digits too large for a `u32` names no card.
+    let number: u32 = digits.parse().ok()?;
+    (!local_numbers.contains(&number)).then_some(number)
+}
+
+/// The lookup answer the picker may show: the stored one, but only while it is
+/// for the number currently wanted. An answer for an earlier number — a slow
+/// response that lands after the user typed on, or one left over from before
+/// the text stopped being a lookup at all — shows nothing.
+fn current_lookup(
+    stored: Option<&shared::CardWithBoard>,
+    wanted: Option<u32>,
+) -> Option<&shared::CardWithBoard> {
+    stored.filter(|found| Some(found.card.number) == wanted)
+}
+
+/// The picker row for a card found by number, or `None` when the picker must
+/// not offer it: it is the card being edited, it is already linked, or
+/// linking it would close a loop the browser can already see.
+fn remote_candidate(
+    found: &shared::CardWithBoard,
+    me: &str,
+    current_slug: &str,
+    already_linked: bool,
+    would_loop: bool,
+) -> Option<Candidate> {
+    if found.card.id == me || already_linked || would_loop {
+        return None;
+    }
+    let title = shared::history::card_title_from_body(&found.card.body);
+    Some(Candidate {
+        id: found.card.id.clone(),
+        number: found.card.number,
+        label: format!(
+            "#{} {}",
+            found.card.number,
+            truncate(&title, MAX_TITLE_CHARS)
+        ),
+        recency: crate::recent::recency_key(&found.card.updated_at),
+        board: foreign_board(current_slug, &found.board_slug),
+    })
 }
 
 /// Editable before/after link groups for one card.
@@ -211,10 +313,25 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
     let navigate = StoredValue::new(use_navigate());
 
     // The chip describes the *other* card, whichever end of the link that is.
-    let (other_id, other_number) = match side {
-        Side::Before => (link.predecessor_id.clone(), link.predecessor_number),
-        Side::After => (link.successor_id.clone(), link.successor_number),
+    let (other_id, other_number, other_board_slug) = match side {
+        Side::Before => (
+            link.predecessor_id.clone(),
+            link.predecessor_number,
+            link.predecessor_board_slug.clone(),
+        ),
+        Side::After => (
+            link.successor_id.clone(),
+            link.successor_number,
+            link.successor_board_slug.clone(),
+        ),
     };
+    // Read once: a chip belongs to one board view, and moving to another board
+    // clears the link index, which unmounts every chip before new ones mount.
+    let current_slug = params.with_untracked(|p| p.get("slug").unwrap_or_default());
+    // The other board's name when the linked card is not on this board — shown
+    // *instead of* the column prefix, since that column is not on this board.
+    let board = foreign_board(&current_slug, &other_board_slug);
+    let is_foreign = board.is_some();
     // Reactive: the title fills in once the other card's column has loaded.
     let id_for_column = other_id.clone();
     let label = Signal::derive(move || card_label(cards, &other_id, other_number));
@@ -228,6 +345,9 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
     // re-render the prefix when an unrelated card edit leaves the name the
     // same.
     let column = Memo::new(move |_| {
+        if is_foreign {
+            return None;
+        }
         let (Some(cards), Some(columns)) = (cards, columns) else {
             return None;
         };
@@ -267,10 +387,10 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
         }
     });
 
+    // The card opens on its own board, whichever board that is.
+    let url = card_url(&current_slug, &other_board_slug, other_number);
     let open_card = move |e: leptos::ev::MouseEvent| {
         e.stop_propagation();
-        let slug = params.with_untracked(|p| p.get("slug").unwrap_or_default());
-        let url = format!("/boards/{slug}?card={other_number}");
         navigate.with_value(|nav| nav(&url, NavigateOptions::default()));
     };
 
@@ -348,6 +468,9 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
             // while these closures are still queued to run (the delete prunes
             // the board's link index, which is what notifies them). A disposed
             // chip renders nothing useful either way — it is on its way out.
+            // The other board's name, for a card on another board only. Not
+            // reactive: a link's two boards never change.
+            {board.map(|name| view! { <span class="link-chip-board">{name}</span> })}
             {move || {
                 column
                     .try_get()
@@ -440,6 +563,9 @@ struct Candidate {
     /// Sort key for how recently the card itself changed — see
     /// [`crate::recent::recency_key`], which is what built it.
     recency: String,
+    /// The card's board name when it is not on the board being viewed (see
+    /// [`foreign_board`]); `None` for every card of this board.
+    board: Option<String>,
 }
 
 /// Order the picker's candidates most-recently-used first and cut the list to
@@ -484,7 +610,12 @@ fn candidate_matches(number: u32, title: &str, typed: &str) -> bool {
 /// The popup only ever offers cards the server would accept: not this card,
 /// not one already linked in either direction, and not one that would close
 /// a loop. The server still checks — another client may have changed the
-/// graph since the list was built — and its refusal lands in `error`.
+/// graph since the list was built, and a loop through another board's links
+/// is invisible here — and its refusal lands in `error`.
+///
+/// Typing a whole card number that is not on this board looks it up on the
+/// server and, if it exists, offers it at the top of the list with its board
+/// name in front (card #544).
 #[component]
 fn LinkPicker(
     side: Side,
@@ -501,6 +632,51 @@ fn LinkPicker(
     let active: RwSignal<Option<usize>> = RwSignal::new(None);
     let input_focused = RwSignal::new(false);
     let input_ref = NodeRef::<leptos::html::Input>::new();
+    let current_slug =
+        StoredValue::new(use_params_map().with_untracked(|p| p.get("slug").unwrap_or_default()));
+
+    // ── Looking a number up on other boards ──────────────────────────────
+    // The number to look up, if the typed text calls for one. A `Memo` so the
+    // effect below re-runs only when that number changes, not per keystroke.
+    let wanted: Memo<Option<u32>> = Memo::new(move |_| {
+        let cards = cards?;
+        let typed = draft.try_get()?;
+        let local: Vec<u32> = cards.all_cards().iter().map(|c| c.number).collect();
+        remote_lookup_number(&typed, &local)
+    });
+    // The last card the lookup found. Kept only while it is still the number
+    // wanted; `suggestions` re-checks that, so a slow answer for an old number
+    // never shows up under a new one.
+    let remote: RwSignal<Option<shared::CardWithBoard>> = RwSignal::new(None);
+    Effect::new(move |_| {
+        let Some(number) = wanted.try_get().flatten() else {
+            let _ = remote.try_set(None);
+            return;
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(LOOKUP_DEBOUNCE_MS).await;
+            // Still the number wanted after the pause? (`try_`: the picker may
+            // have been unmounted meanwhile, and then nothing is wanted.)
+            let still_wanted = || wanted.try_get_untracked().flatten() == Some(number);
+            if !still_wanted() {
+                return;
+            }
+            match crate::api::fetch_card_by_number(number, None).await {
+                Ok(found) if still_wanted() => {
+                    let _ = remote.try_set(Some(found));
+                    // The found card leads the list, so every row below it
+                    // moves down one: an index highlighted before it arrived
+                    // would now name a different card (PR #96 review).
+                    let _ = active.try_set(None);
+                }
+                Ok(_) => {}
+                // No such card: nothing to offer, and nothing worth reporting —
+                // typing a number that does not exist is ordinary.
+                Err(e) if e.status() == Some(404) => {}
+                Err(e) => crate::telemetry::error("link picker lookup failed", &e),
+            }
+        });
+    });
 
     let suggestions = Signal::derive(move || {
         let Some(cards) = cards else {
@@ -532,12 +708,33 @@ fn LinkPicker(
                 label: format!("#{} {}", c.number, truncate(&title, MAX_TITLE_CHARS)),
                 recency: crate::recent::recency_key(&c.updated_at),
                 id: c.id,
+                board: None,
             })
             .collect();
         // Cards arrive in column order; the user's own link history, then
         // board activity, is what puts the likely one within reach.
         let picked = recent.map(|r| r.cards.get()).unwrap_or_default();
         found = order_candidates(found, &picked);
+        // A card found on another board is an exact match for the typed
+        // number, so it leads the list.
+        let looked_up = remote.get();
+        if let Some(looked_up) = current_lookup(looked_up.as_ref(), wanted.get()) {
+            let (pred, succ) = match side {
+                Side::Before => (looked_up.card.id.as_str(), me.as_str()),
+                Side::After => (me.as_str(), looked_up.card.id.as_str()),
+            };
+            let row = remote_candidate(
+                looked_up,
+                &me,
+                &current_slug.get_value(),
+                links.are_linked(&me, &looked_up.card.id),
+                links.would_create_cycle(pred, succ),
+            );
+            if let Some(row) = row {
+                found.insert(0, row);
+                found.truncate(MAX_SUGGESTIONS);
+            }
+        }
         found
     });
 
@@ -686,6 +883,11 @@ fn LinkPicker(
                         key=|(index, c): &(usize, Candidate)| format!("{index}:{}", c.id)
                         children=move |(index, candidate): (usize, Candidate)| {
                             let label = candidate.label.clone();
+                            // A card on another board names it first, as its
+                            // chip will once it is linked.
+                            let board = candidate.board.clone().map(|name| {
+                                view! { <span class="link-suggestion-board">{name}</span> }
+                            });
                             let picked = candidate.clone();
                             view! {
                                 <li>
@@ -704,7 +906,7 @@ fn LinkPicker(
                                             e.stop_propagation();
                                             commit(picked.clone());
                                         }
-                                    >{label}</button>
+                                    >{board}{label}</button>
                                 </li>
                             }
                         }
@@ -903,6 +1105,7 @@ mod tests {
             number,
             label: format!("#{number} Title"),
             recency: crate::recent::recency_key(updated_at),
+            board: None,
         }
     }
 
@@ -998,5 +1201,145 @@ mod tests {
         let name = column_name_for(&cards, &columns, "card-a").expect("column resolves");
         assert_eq!(name.chars().count(), MAX_COLUMN_CHARS);
         assert!(name.ends_with('…'), "{name} should be elided");
+    }
+
+    // ── Cards on other boards (card #544) ────────────────────────────────
+
+    #[test]
+    fn a_card_on_this_board_gets_no_board_prefix() {
+        assert_eq!(foreign_board("work", "work"), None);
+    }
+
+    #[test]
+    fn a_card_on_another_board_is_prefixed_with_that_board() {
+        assert_eq!(foreign_board("work", "home"), Some("home".to_string()));
+    }
+
+    /// A link serialized before card #544 has empty slugs; every such link was
+    /// a same-board link, so it must not grow an empty prefix.
+    #[test]
+    fn an_unknown_board_gets_no_prefix() {
+        assert_eq!(foreign_board("work", ""), None);
+    }
+
+    #[test]
+    fn a_long_board_name_is_elided() {
+        let long = "a-really-long-board-name-for-testing";
+        let label = foreign_board("work", long).expect("prefixed");
+        assert_eq!(label.chars().count(), MAX_BOARD_CHARS);
+        assert!(label.ends_with('…'), "{label} should be elided");
+    }
+
+    #[test]
+    fn a_same_board_card_opens_on_this_board() {
+        assert_eq!(card_url("work", "work", 12), "/boards/work?card=12");
+    }
+
+    #[test]
+    fn a_card_on_another_board_opens_on_its_own_board() {
+        assert_eq!(card_url("work", "home", 12), "/boards/home?card=12");
+    }
+
+    /// The URL takes the full slug even when the label had to be elided.
+    #[test]
+    fn a_long_board_name_is_not_elided_in_the_url() {
+        let long = "a-really-long-board-name-for-testing";
+        assert_eq!(card_url("work", long, 3), format!("/boards/{long}?card=3"));
+    }
+
+    #[test]
+    fn a_pre_544_link_opens_on_this_board() {
+        assert_eq!(card_url("work", "", 12), "/boards/work?card=12");
+    }
+
+    #[test]
+    fn a_number_not_on_this_board_is_looked_up() {
+        assert_eq!(remote_lookup_number("544", &[1, 2, 3]), Some(544));
+        assert_eq!(remote_lookup_number("#544", &[1, 2, 3]), Some(544));
+        assert_eq!(remote_lookup_number("  #544 ", &[]), Some(544));
+    }
+
+    #[test]
+    fn a_number_on_this_board_is_not_looked_up() {
+        assert_eq!(remote_lookup_number("2", &[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn text_that_is_not_a_whole_number_is_not_looked_up() {
+        for typed in ["", "#", "Beta", "12a", "1 2", "-5"] {
+            assert_eq!(remote_lookup_number(typed, &[]), None, "{typed:?}");
+        }
+        // Too large for a card number.
+        assert_eq!(remote_lookup_number("99999999999", &[]), None);
+    }
+
+    fn found(id: &str, number: u32, board_slug: &str) -> shared::CardWithBoard {
+        shared::CardWithBoard {
+            card: shared::Card {
+                id: id.to_string(),
+                column_id: "col".to_string(),
+                body: "# Far away\nbody".to_string(),
+                position: 0,
+                number,
+                tags: vec![],
+                last_edited_by: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            board_slug: board_slug.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_answer_for_the_wanted_number_is_shown() {
+        let far = found("far", 544, "home");
+        assert_eq!(
+            current_lookup(Some(&far), Some(544)).map(|f| f.card.number),
+            Some(544)
+        );
+    }
+
+    /// A slow answer for `54` must not appear once the user has typed on to
+    /// `544` — nor once the text is no longer a number at all.
+    #[test]
+    fn a_stale_answer_is_not_shown() {
+        let old = found("old", 54, "home");
+        assert!(current_lookup(Some(&old), Some(544)).is_none());
+        assert!(current_lookup(Some(&old), None).is_none());
+    }
+
+    #[test]
+    fn no_answer_shows_nothing() {
+        assert!(current_lookup(None, Some(544)).is_none());
+    }
+
+    #[test]
+    fn a_card_found_on_another_board_is_offered_with_its_board() {
+        let row = remote_candidate(&found("far", 544, "home"), "me", "work", false, false)
+            .expect("offered");
+        assert_eq!(row.id, "far");
+        assert_eq!(row.number, 544);
+        assert_eq!(row.label, "#544 Far away");
+        assert_eq!(row.board.as_deref(), Some("home"));
+    }
+
+    /// A card on this board that the index has not loaded yet can still be
+    /// found by number — and then it is a same-board card: no prefix.
+    #[test]
+    fn a_card_found_on_this_board_is_offered_without_a_board() {
+        let row = remote_candidate(&found("near", 9, "work"), "me", "work", false, false)
+            .expect("offered");
+        assert_eq!(row.board, None);
+    }
+
+    #[test]
+    fn a_found_card_is_not_offered_when_the_server_would_refuse_it() {
+        let far = found("far", 544, "home");
+        // The card itself.
+        assert!(remote_candidate(&found("me", 544, "home"), "me", "work", false, false).is_none());
+        // Already linked.
+        assert!(remote_candidate(&far, "me", "work", true, false).is_none());
+        // Would close a loop the browser can see.
+        assert!(remote_candidate(&far, "me", "work", false, true).is_none());
     }
 }

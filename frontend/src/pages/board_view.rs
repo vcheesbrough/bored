@@ -506,7 +506,9 @@ pub fn BoardView() -> AnyView {
         Some(num) => {
             wasm_bindgen_futures::spawn_local(async move {
                 match crate::api::fetch_card_by_number(num, None).await {
-                    Ok(card) => maximised_card.set(Some(card)),
+                    // Only the card is needed here; `board_slug` is for the
+                    // link picker.
+                    Ok(found) => maximised_card.set(Some(found.card)),
                     Err(e) => crate::telemetry::error("fetch maximised card failed", &e),
                 }
             });
@@ -1312,6 +1314,8 @@ mod tests {
             successor_id: to.to_string(),
             predecessor_number: 0,
             successor_number: 0,
+            predecessor_board_slug: String::new(),
+            successor_board_slug: String::new(),
             reason: None,
             last_edited_by: None,
             created_at: String::new(),

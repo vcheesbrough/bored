@@ -294,6 +294,8 @@ mod tests {
             successor_id: to.to_string(),
             predecessor_number: 0,
             successor_number: 0,
+            predecessor_board_slug: String::new(),
+            successor_board_slug: String::new(),
             reason: None,
             last_edited_by: None,
             created_at: String::new(),

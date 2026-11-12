@@ -298,12 +298,16 @@ pub async fn get_card(
 /// `GET /api/cards/by-number/:number` — fetch a card by its human-readable
 /// sequential number. Card numbers are globally unique (single counter), so no
 /// board scoping is needed. Used by the frontend when the URL carries
-/// `?card=<number>` instead of the internal ULID.
+/// `?card=<number>` instead of the internal ULID, and by the link picker to
+/// find a card on another board (card #544).
+///
+/// The response is the card plus `board_slug`, the board it sits on
+/// ([`shared::CardWithBoard`]) — on the wire a plain card with one extra field.
 #[tracing::instrument(skip_all, fields(bored.card.number = i64::from(number)))]
 pub async fn get_card_by_number(
     State(state): State<AppState>,
     Path(number): Path<u32>,
-) -> Result<Json<shared::Card>, ApiError> {
+) -> Result<Json<shared::CardWithBoard>, ApiError> {
     // `number` is an `integer` column; a path value above `i32::MAX` cannot
     // name any card, so it is a plain 404 rather than an overflow.
     let Ok(number) = i32::try_from(number) else {
@@ -319,10 +323,30 @@ pub async fn get_card_by_number(
         ))
         .await?;
 
-    match card {
-        Some(c) => Ok(Json(c.into_api())),
-        None => Err(ApiError::NotFound),
-    }
+    let Some(card) = card else {
+        return Err(ApiError::NotFound);
+    };
+
+    // The board's slug, via the card's column. `query_scalar` reads the one
+    // selected column straight into a `String`. The foreign keys are
+    // `ON DELETE RESTRICT`, so a card always has a column and a column always
+    // has a board; a miss here would be corruption, reported as a 500.
+    let board_slug: String = sqlx::query_scalar(
+        "SELECT b.name FROM columns c JOIN boards b ON b.id = c.board_id WHERE c.id = $1",
+    )
+    .bind(&card.column_id)
+    .fetch_one(&state.db)
+    .traced(DbQuery::new(
+        "cards.get_card_by_number",
+        DbOperation::Select,
+        "boards",
+    ))
+    .await?;
+
+    Ok(Json(shared::CardWithBoard {
+        card: card.into_api(),
+        board_slug,
+    }))
 }
 
 #[tracing::instrument(skip_all, fields(bored.column.id = %col_id))]
@@ -511,8 +535,7 @@ pub async fn delete_card(
     // delete rows precede the card delete row in history. They share no batch
     // group: restoring the card would not bring its links back (another link
     // could have closed a loop meanwhile), so there is nothing to replay.
-    crate::routes::links::cascade_delete_card_links(&state, &claims, &board_id, &card_id, None)
-        .await?;
+    crate::routes::links::cascade_delete_card_links(&state, &claims, &card_id, None).await?;
 
     let snapshot_before = serde_json::to_value(existing.clone().into_api())?;
     audit::record_and_broadcast(

@@ -107,14 +107,8 @@ pub(crate) async fn delete_cards(
             // Nothing locked; dropping `tx` just ends it.
             continue;
         };
-        crate::routes::links::cascade_delete_card_links(
-            state,
-            claims,
-            board_id,
-            &entity_id,
-            Some(batch),
-        )
-        .await?;
+        crate::routes::links::cascade_delete_card_links(state, claims, &entity_id, Some(batch))
+            .await?;
         let snapshot_before = serde_json::to_value(card.clone().into_api())?;
         audit::record_and_broadcast(
             &state.db,

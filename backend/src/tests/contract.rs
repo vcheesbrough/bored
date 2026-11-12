@@ -95,7 +95,13 @@ enum Shape {
     Board,
     Column,
     Card,
+    /// `GET /api/cards/by-number/:n`: a card plus its board's slug (card #544).
+    CardWithBoard,
     CardLink,
+    /// A `card_link` audit snapshot: the link minus the two board slugs, which
+    /// are left out so a board's permanent history never stores another
+    /// board's name (see `routes::links::link_snapshot`).
+    CardLinkSnapshot,
     AuditEntry,
     CardPosition,
     UserInfo,
@@ -128,7 +134,32 @@ impl Shape {
                 "tags",
                 "updated_at",
             ],
+            Shape::CardWithBoard => &[
+                "board_slug",
+                "body",
+                "column_id",
+                "created_at",
+                "id",
+                "last_edited_by",
+                "number",
+                "position",
+                "tags",
+                "updated_at",
+            ],
             Shape::CardLink => &[
+                "created_at",
+                "id",
+                "last_edited_by",
+                "predecessor_board_slug",
+                "predecessor_id",
+                "predecessor_number",
+                "reason",
+                "successor_board_slug",
+                "successor_id",
+                "successor_number",
+                "updated_at",
+            ],
+            Shape::CardLinkSnapshot => &[
                 "created_at",
                 "id",
                 "last_edited_by",
@@ -163,9 +194,12 @@ impl Shape {
     /// Fields that must match [`TIMESTAMP`].
     fn timestamps(self) -> &'static [&'static str] {
         match self {
-            Shape::Board | Shape::Column | Shape::Card | Shape::CardLink => {
-                &["created_at", "updated_at"]
-            }
+            Shape::Board
+            | Shape::Column
+            | Shape::Card
+            | Shape::CardWithBoard
+            | Shape::CardLink
+            | Shape::CardLinkSnapshot => &["created_at", "updated_at"],
             Shape::AuditEntry => &["created_at"],
             Shape::CardPosition | Shape::UserInfo | Shape::AppInfo => &[],
         }
@@ -177,8 +211,8 @@ impl Shape {
         match self {
             Shape::Board => &["id"],
             Shape::Column => &["id", "board_id"],
-            Shape::Card => &["id", "column_id"],
-            Shape::CardLink => &["id", "predecessor_id", "successor_id"],
+            Shape::Card | Shape::CardWithBoard => &["id", "column_id"],
+            Shape::CardLink | Shape::CardLinkSnapshot => &["id", "predecessor_id", "successor_id"],
             Shape::AuditEntry => &[
                 "id",
                 "entity_id",
@@ -252,12 +286,13 @@ fn assert_shape(value: &Value, shape: Shape, context: &str) {
 
     if let Shape::AuditEntry = shape {
         // A snapshot is the `into_api()` form of the entity the row records,
-        // so it is held to that entity's contract too.
+        // so it is held to that entity's contract too — for a link, minus the
+        // two board slugs.
         let snapshot_shape = match object["entity_type"].as_str() {
             Some("board") => Shape::Board,
             Some("column") => Shape::Column,
             Some("card") => Shape::Card,
-            Some("card_link") => Shape::CardLink,
+            Some("card_link") => Shape::CardLinkSnapshot,
             other => panic!("{context}: unknown audit entity_type {other:?}"),
         };
         for field in ["snapshot_before", "snapshot_after"] {
@@ -615,7 +650,11 @@ async fn every_route_and_event_honours_the_contract() {
         StatusCode::OK,
         "GET /api/cards/by-number/:n",
     );
-    assert_shape(&by_number, Shape::Card, "GET /api/cards/by-number/:n");
+    assert_shape(
+        &by_number,
+        Shape::CardWithBoard,
+        "GET /api/cards/by-number/:n",
+    );
 
     let updated = body(
         server

@@ -115,7 +115,8 @@ pub struct UpdateCardRequest {
     pub audit_edit_session: Option<String>,
 }
 
-/// One predecessor/successor link between two cards on the same board.
+/// One predecessor/successor link between two cards, which may be on the same
+/// board or on two different boards (card #544).
 ///
 /// A link is a single bidirectional fact — it is created from either end,
 /// visible and editable from both, and the two `*_id` fields say which card
@@ -133,6 +134,17 @@ pub struct CardLink {
     pub predecessor_number: u32,
     /// Human-readable number of `successor_id`.
     pub successor_number: u32,
+    /// Slug of the board `predecessor_id` sits on. Joined in when the link is
+    /// read, never stored, so it is always the board's current slug at read
+    /// time. `#[serde(default)]` lets links serialized before card #544 — and
+    /// the audit snapshots, which deliberately leave both slugs out (see
+    /// `backend::routes::links::link_snapshot`) — still parse, as `""`.
+    #[serde(default)]
+    pub predecessor_board_slug: String,
+    /// Slug of the board `successor_id` sits on. Same rules as
+    /// `predecessor_board_slug`.
+    #[serde(default)]
+    pub successor_board_slug: String,
     /// Optional note on *why* one card precedes the other. Never an empty
     /// string — see [`links::normalize_reason`].
     #[serde(default)]
@@ -147,6 +159,38 @@ impl CardLink {
     pub fn touches(&self, card_id: &str) -> bool {
         self.predecessor_id == card_id || self.successor_id == card_id
     }
+
+    /// The end of this link that is *not* `card_id`.
+    ///
+    /// When `card_id` is the predecessor this is the successor, and in every
+    /// other case — including a `card_id` that is neither end — the
+    /// predecessor. Callers only ask about a card the link touches, so the
+    /// fallback is never meaningful; it just keeps the function total.
+    pub fn other_end(&self, card_id: &str) -> LinkEnd<'_> {
+        if self.predecessor_id == card_id {
+            LinkEnd {
+                id: &self.successor_id,
+                number: self.successor_number,
+                board_slug: &self.successor_board_slug,
+            }
+        } else {
+            LinkEnd {
+                id: &self.predecessor_id,
+                number: self.predecessor_number,
+                board_slug: &self.predecessor_board_slug,
+            }
+        }
+    }
+}
+
+/// One end of a [`CardLink`], borrowed from it (`'a` is the link's lifetime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkEnd<'a> {
+    pub id: &'a str,
+    pub number: u32,
+    /// Slug of the board this end's card sits on; `""` when the link came
+    /// from a payload that predates card #544.
+    pub board_slug: &'a str,
 }
 
 /// Which end of a new link the *other* card takes, relative to the card the
@@ -167,8 +211,8 @@ pub enum LinkDirection {
 pub struct CreateCardLinkRequest {
     /// Role of `other_card_id` relative to the card in the URL.
     pub direction: LinkDirection,
-    /// The card at the other end of the link. Must be on the same board and
-    /// must not be the card in the URL.
+    /// The card at the other end of the link. May be on any board (card
+    /// #544), but must not be the card in the URL.
     pub other_card_id: String,
     /// Optional reason; trimmed, and an empty reason is stored as none.
     #[serde(default)]
@@ -183,6 +227,20 @@ pub struct UpdateCardLinkRequest {
     /// Full replacement for the reason. `None` or an empty string clears it.
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// Response of `GET /api/cards/by-number/:number`: the card plus the slug of
+/// the board it sits on, so a caller that found a card by its global number
+/// (the link picker, card #544) can tell which board that is.
+///
+/// `#[serde(flatten)]` writes the card's own fields at the top level beside
+/// `board_slug`, so on the wire this is a plain `Card` with one extra field —
+/// a client that still deserializes a `Card` simply ignores it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardWithBoard {
+    #[serde(flatten)]
+    pub card: Card,
+    pub board_slug: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -393,11 +451,84 @@ mod tests {
             successor_id: successor_id.into(),
             predecessor_number: 1,
             successor_number: 2,
+            predecessor_board_slug: "board-p".into(),
+            successor_board_slug: "board-s".into(),
             reason: None,
             last_edited_by: None,
             created_at: "x".into(),
             updated_at: "x".into(),
         }
+    }
+
+    #[test]
+    fn other_end_of_the_predecessor_is_the_successor() {
+        let l = link("a", "b");
+        assert_eq!(
+            l.other_end("a"),
+            LinkEnd {
+                id: "b",
+                number: 2,
+                board_slug: "board-s"
+            }
+        );
+    }
+
+    #[test]
+    fn other_end_of_the_successor_is_the_predecessor() {
+        let l = link("a", "b");
+        assert_eq!(
+            l.other_end("b"),
+            LinkEnd {
+                id: "a",
+                number: 1,
+                board_slug: "board-p"
+            }
+        );
+    }
+
+    /// A link serialized before card #544 (and every audit snapshot, which
+    /// leaves the slugs out on purpose) has no board slugs. It must still
+    /// parse, with the slugs empty, or history rendering and an MCP built
+    /// against the old shape would break.
+    #[test]
+    fn a_link_without_board_slugs_still_deserializes() {
+        let old = json!({
+            "id": "l", "predecessor_id": "a", "successor_id": "b",
+            "predecessor_number": 1, "successor_number": 2,
+            "reason": null, "last_edited_by": null,
+            "created_at": "x", "updated_at": "x"
+        });
+        let parsed: CardLink = serde_json::from_value(old).expect("old shape parses");
+        assert_eq!(parsed.predecessor_board_slug, "");
+        assert_eq!(parsed.successor_board_slug, "");
+        assert_eq!(parsed.successor_number, 2);
+    }
+
+    /// `CardWithBoard` must be a plain card on the wire plus `board_slug`, so
+    /// clients that read a `Card` from `GET /api/cards/by-number/:n` (the MCP
+    /// tool, older browsers) keep working.
+    #[test]
+    fn card_with_board_is_a_flat_card_plus_board_slug() {
+        let value = serde_json::to_value(CardWithBoard {
+            card: Card {
+                id: "c".into(),
+                column_id: "col".into(),
+                body: "# Title".into(),
+                position: 0,
+                number: 7,
+                tags: vec![],
+                last_edited_by: None,
+                created_at: "x".into(),
+                updated_at: "x".into(),
+            },
+            board_slug: "other".into(),
+        })
+        .expect("serializes");
+        assert_eq!(value["number"], json!(7));
+        assert_eq!(value["board_slug"], json!("other"));
+        assert!(value.get("card").is_none(), "card fields are flattened");
+        let as_card: Card = serde_json::from_value(value).expect("reads as a Card");
+        assert_eq!(as_card.number, 7);
     }
 
     #[test]
