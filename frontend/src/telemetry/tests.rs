@@ -587,3 +587,42 @@ fn a_token_is_judged_on_the_wall_clock_so_sleeping_past_it_expires_it() {
     platform::fake_clock::set(WALL_0 + 28_860_000_000_000, MONO_0 + 60_001_000_000);
     assert_eq!(test_support::token(runtime::Now::read()), None);
 }
+
+#[test]
+fn an_export_refetches_30_s_early_but_the_final_flush_spends_the_token_to_the_end() {
+    platform::fake_clock::set(WALL_0, MONO_0);
+    test_support::reset();
+    configure(Some(&enabled()));
+    // Handed out at WALL_0, good for 900 s. Hand-worked boundaries: an export
+    // refetches once fewer than 30 s remain, so it spends the token only
+    // before 870 s; the final flush has no chance to refetch, so it spends
+    // it right up to 900 s.
+    test_support::store_token("t", 900);
+    let at = |seconds: u64| {
+        let nanos = seconds * 1_000_000_000;
+        platform::fake_clock::set(WALL_0 + nanos, MONO_0 + nanos);
+    };
+
+    at(869);
+    assert_eq!(test_support::export_token().as_deref(), Some("t"), "869 s");
+    at(871);
+    assert_eq!(
+        test_support::export_token(),
+        None,
+        "871 s: inside the margin"
+    );
+
+    // Same 871 s: the flush still spends it…
+    start_span("a", SpanKind::Internal, None).end();
+    assert!(
+        test_support::flush_spends_token(),
+        "871 s: flush waives the margin"
+    );
+    at(899);
+    start_span("b", SpanKind::Internal, None).end();
+    assert!(test_support::flush_spends_token(), "899 s: still alive");
+    // …until it has really expired.
+    at(901);
+    start_span("c", SpanKind::Internal, None).end();
+    assert!(!test_support::flush_spends_token(), "901 s: expired");
+}

@@ -841,6 +841,71 @@ pub mod test_support {
         with_state(|state| state.valid_token(now, TOKEN_MARGIN_MS)).flatten()
     }
 
+    /// Whether the export loop's own token check, [`ensure_token`], would
+    /// spend the cached token at the clocks' current reading (`Some`) or go
+    /// to fetch a fresh one (`None`).
+    ///
+    /// It runs the real `async fn`, polled once by hand: a cached, valid token
+    /// returns at the first poll without touching the network. Going to fetch
+    /// reaches a browser API, which on the host panics ("cannot call
+    /// wasm-bindgen imported functions on non-wasm targets"); that panic is
+    /// caught and read as "would fetch". So the margin under test is the one
+    /// the production call site passes, not a copy of it.
+    pub fn export_token() -> Option<String> {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        // `pin!` fixes the future in place, which polling requires.
+        let mut future = std::pin::pin!(ensure_token(Now::read()));
+        let mut context = Context::from_waker(Waker::noop());
+        match expecting_host_panic(|| future.as_mut().poll(&mut context)) {
+            Some(Poll::Ready(token)) => token,
+            Some(Poll::Pending) | None => None,
+        }
+    }
+
+    /// Whether the final flush, [`flush`], would spend the cached token at the
+    /// clocks' current reading: run for real, and observed through whether it
+    /// took the buffered traces. Taking them happens before the send, which
+    /// is the part that panics on the host (no `window`); that panic is
+    /// caught. Buffer at least one span first.
+    pub fn flush_spends_token() -> bool {
+        let _ = expecting_host_panic(|| flush(Flush::Final));
+        // Nothing left in the outbox: the flush took it, so it had a token.
+        drain(Signal::Traces).is_empty()
+    }
+
+    thread_local! {
+        /// Set while [`expecting_host_panic`] runs on this thread.
+        static EXPECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Run `f`, which is expected to reach a browser API and panic on the
+    /// host: `Some` of its result if it finished, `None` if it panicked.
+    ///
+    /// The panic hook is process-wide, so a quiet one is installed once
+    /// (`Once` makes that thread-safe), and it stays quiet only on a thread
+    /// that is inside this function. Every other panic — a failing
+    /// assertion's message in another test, say — goes to the default hook.
+    fn expecting_host_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let default = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if !EXPECTING.with(std::cell::Cell::get) {
+                    default(info);
+                }
+            }));
+        });
+        EXPECTING.with(|expecting| expecting.set(true));
+        // `AssertUnwindSafe`: we promise nothing is left half-updated by the
+        // panic — the state's borrow is always released before a browser
+        // call is reached.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok();
+        EXPECTING.with(|expecting| expecting.set(false));
+        result
+    }
+
     pub fn has_retry(signal: Signal) -> bool {
         with_state(|state| state.retry[signal_index(signal)].is_some()).unwrap_or(false)
     }
