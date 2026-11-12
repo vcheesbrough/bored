@@ -364,7 +364,7 @@ fn signal_index(signal: Signal) -> usize {
 thread_local! {
     // `RefCell` gives checked, run-time borrowing of the one `State`; the
     // `thread_local!` makes it a per-thread global without `unsafe`.
-    static STATE: RefCell<State> = RefCell::new(State::new(platform::now_ms()));
+    static STATE: RefCell<State> = RefCell::new(State::new(platform::wall_ms()));
 }
 
 /// Run `f` against the state, or return `None` if it is already borrowed (see
@@ -396,7 +396,7 @@ pub fn start() {
 
 /// One export pass: at most one batch per signal.
 async fn tick() {
-    let now = platform::now_ms();
+    let now = platform::wall_ms();
     // Decide, under one short borrow, whether there is anything to do.
     let proceed = with_state(|state| {
         warn(state.expire_launch_buffer(now));
@@ -462,7 +462,7 @@ async fn export_pass(now: f64) {
                 attempt,
                 verdict,
                 transition,
-                platform::now_ms(),
+                platform::wall_ms(),
             ));
         });
     }
@@ -633,7 +633,7 @@ pub fn flush_now() {
 ///
 /// See [`Flush`] for the two occasions and how they differ.
 pub fn flush(kind: Flush) {
-    let now = platform::now_ms();
+    let now = platform::wall_ms();
     let requests = with_state(|state| {
         let Phase::Enabled { endpoint } = &state.phase else {
             return Vec::new();
@@ -717,7 +717,7 @@ pub mod test_support {
 
     /// Put the state back to "just loaded", as at page start.
     pub fn reset() {
-        STATE.with(|cell| *cell.borrow_mut() = State::new(platform::now_ms()));
+        STATE.with(|cell| *cell.borrow_mut() = State::new(platform::wall_ms()));
     }
 
     /// Take everything buffered for `signal`, decoded back to JSON values.
@@ -744,7 +744,7 @@ pub mod test_support {
     /// Drive a verdict through `apply_verdict` as the export loop would.
     pub fn respond(signal: Signal, status: u16, attempt: u32) -> Option<String> {
         with_state(|state| {
-            let now = platform::now_ms();
+            let now = platform::wall_ms();
             let items = state
                 .next_batch(signal, now + 1e12, usize::MAX)
                 .map(|(items, _)| items)
@@ -777,7 +777,7 @@ pub mod test_support {
     pub fn unload(signal: Signal, kind: Flush) -> Option<usize> {
         with_state(|state| {
             state
-                .unload_batch(signal, kind, platform::now_ms())
+                .unload_batch(signal, kind, platform::wall_ms())
                 .map(|items| items.len())
         })
         .flatten()

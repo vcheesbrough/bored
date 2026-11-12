@@ -58,6 +58,7 @@ type ExportedSpan = {
   parentSpanId?: string;
   name: string;
   startTimeUnixNano: string;
+  endTimeUnixNano: string;
   attributes?: Attr[];
   links?: { traceId: string; spanId: string }[];
   resource: Resource;
@@ -110,14 +111,15 @@ function attr(attrs: Attr[] | undefined, key: string): unknown {
 const service = (r: Resource) => attr(r.attributes, 'service.name');
 
 // Never pick "this test's span" by comparing its timestamp with the test
-// runner's `Date.now()` (card #454). The SPA stamps spans with
+// runner's `Date.now()` (card #454). The SPA used to stamp spans with
 // `performance.timeOrigin + performance.now()`, and in headless Chromium that
-// clock can lag the system wall clock by over a second for a whole document —
+// clock could lag the system wall clock by over a second for a whole document —
 // measured at -1.09 s to -1.19 s in exactly the runs that failed, and ~0 in
-// every run that passed. A span that did arrive then looked older than the
-// test's mark and was never found. Spans are identified by what they did
-// instead (the board they loaded), or against a mark read from the page's own
-// clock.
+// every run that passed. Since card #458 spans are anchored to the page's
+// `Date.now()`, but the page's clock is still not the runner's (Playwright's
+// fake clock, for one, moves it at will). Spans are identified by what they
+// did instead (the board they loaded), or against a mark read from the page's
+// own clock.
 
 /**
  * The `screen board` span of a load of `boardName`, found through the request
@@ -153,14 +155,17 @@ const VIA_TRACE_LINKS =
   ' — reached via server span → http.client span → screen span, so a traceparent the server did not adopt also ends here';
 
 /**
- * The page's telemetry clock, read in the page: the same
- * `performance.timeOrigin + performance.now()` the SPA stamps spans with, so a
- * span started after this call carries a start time at or after it whatever
- * that clock's offset from the runner's.
+ * The page's telemetry clock, read in the page: `Date.now()`, the wall clock a
+ * root span is anchored to (card #458), so a span started after this call
+ * carries a start time at or after it whatever that clock's offset from the
+ * runner's.
  */
 function pageClockMs(page: Page): Promise<number> {
-  return page.evaluate(() => performance.timeOrigin + performance.now());
+  return page.evaluate(() => Date.now());
 }
+
+/** An OTLP nanosecond timestamp (a decimal string) in milliseconds. */
+const toMs = (nanos: string) => Number(BigInt(nanos) / 1_000n) / 1_000;
 
 /**
  * Whether an OTLP nanosecond timestamp is a page-clock mark taken while the
@@ -171,8 +176,7 @@ function pageClockMs(page: Page): Promise<number> {
  * clock can run seconds ahead of this one (the panic test's runs 6 s ahead),
  * and the receiver keeps every test's spans.
  */
-const atPausedMark = (nanos: string, markMs: number) =>
-  Math.abs(Number(BigInt(nanos) / 1_000n) / 1_000 - markMs) <= 1;
+const atPausedMark = (nanos: string, markMs: number) => Math.abs(toMs(nanos) - markMs) <= 1;
 
 /** Poll the receiver until `pick` finds something, or fail after `timeout`. */
 async function waitFor<T>(pick: () => T | undefined, what: string, timeout = 30_000): Promise<T> {
@@ -259,6 +263,89 @@ test.describe('client telemetry', () => {
       "the server's span under the browser request",
     );
     expect(server.traceId).toBe(screen.traceId);
+  });
+
+  test('browser spans and logs follow the wall clock even when the page clock lags it', async ({ page, request }) => {
+    // Card #458. Make this page's high-resolution clock lag the wall clock by
+    // a minute — what a device that slept with the tab open looks like, and a
+    // bigger version of the 1.1 s lag headless Chromium showed in card #454.
+    // `timeOrigin` is redefined on the prototype before any page script runs,
+    // so the SPA's own reads see it too: the SPA's old
+    // `timeOrigin + performance.now()` clock stamps every span a minute early
+    // here, and this test fails. The anchored clock reads `Date.now()`
+    // instead, and passes.
+    const LAG_MS = 60_000;
+    await page.addInitScript((lagMs) => {
+      const real = Object.getOwnPropertyDescriptor(Performance.prototype, 'timeOrigin')!.get!;
+      Object.defineProperty(Performance.prototype, 'timeOrigin', {
+        configurable: true,
+        get() {
+          return real.call(this) - lagMs;
+        },
+      });
+    }, LAG_MS);
+    const board = await boardWithCard(request, 'otel-clock');
+    const crashes = watchCrashes(page);
+    // `?card=` a number that does not exist: its fetch fails, which is an
+    // error log record — the log half of this test. Random, so this run's
+    // server span is the only one with this number in its path.
+    const missing = 900_000_000 + Math.floor(Math.random() * 90_000_000);
+    await page.goto(`/boards/${board.name}?card=${missing}`);
+    await page.waitForSelector('.columns-row');
+    // The lag really is in place in this page (else the test proves nothing).
+    const lag = await page.evaluate(() => Date.now() - (performance.timeOrigin + performance.now()));
+    expect(lag).toBeGreaterThan(LAG_MS - 1_000);
+
+    const screen = await waitFor(() => boardLoad(board.name), `the screen board span${VIA_TRACE_LINKS}`);
+    const spanIn = (name: string) => readReceiver().spans.find((s) => s.traceId === screen.traceId && s.name === name);
+    const columns = await waitFor(() => spanIn('GET /api/boards/{slug}/columns'), 'the columns http.client span');
+    const serverUnder = (parent: ExportedSpan) =>
+      readReceiver().spans.find((s) => service(s.resource) === 'bored' && s.parentSpanId === parent.spanId);
+    const server = await waitFor(() => serverUnder(columns), "the server's span under the browser request");
+
+    // The child is inside its parent: one anchor times the whole trace.
+    expect(toMs(columns.startTimeUnixNano)).toBeGreaterThanOrEqual(toMs(screen.startTimeUnixNano));
+    expect(toMs(columns.endTimeUnixNano)).toBeLessThanOrEqual(toMs(screen.endTimeUnixNano));
+
+    // The browser's request span starts just before the server's span for
+    // that request. Browser and server read the same host's clock here, so
+    // the gap is the request's trip to the backend: at most a second, even on
+    // a loaded CI runner, against the minute the old clock was off by. The
+    // 50 ms the other way absorbs `Date.now()`'s whole-millisecond reading.
+    const lead = toMs(server.startTimeUnixNano) - toMs(columns.startTimeUnixNano);
+    expect(lead).toBeGreaterThanOrEqual(-50);
+    expect(lead).toBeLessThanOrEqual(1_000);
+
+    // The failed card fetch's error record, stamped with `Date.now()` when
+    // the response came back: just after the server's span for that request
+    // ended. Found through the server span (the only one with this test's
+    // card number) → its parent, the browser's request span → the record
+    // filed against that span.
+    const failedServer = await waitFor(
+      () =>
+        readReceiver().spans.find(
+          (s) =>
+            service(s.resource) === 'bored' && attr(s.attributes, 'url.path') === `/api/cards/by-number/${missing}`,
+        ),
+      "the server's span for the missing card",
+    );
+    const failed = await waitFor(
+      () =>
+        readReceiver().logs.find(
+          (l) =>
+            service(l.resource) === 'bored-spa' &&
+            l.body?.stringValue === 'fetch maximised card failed' &&
+            l.spanId === failedServer.parentSpanId,
+        ),
+      'the failed card fetch log record',
+    );
+    const after = toMs(failed.timeUnixNano) - toMs(failedServer.endTimeUnixNano);
+    expect(after).toBeGreaterThanOrEqual(-50);
+    expect(after).toBeLessThanOrEqual(1_000);
+    // And the page is still alive and reacting.
+    expect(crashes).toEqual([]);
+    await page.locator('.navbar-search-input').fill('Telemetry card');
+    await expect(page.locator('.card-item', { hasText: 'Telemetry card' })).toBeVisible();
   });
 
   test('the telemetry token is handed only to a browser session', async ({ playwright, baseURL }) => {

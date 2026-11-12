@@ -329,6 +329,12 @@ README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
   D2); the ingest does not stamp email or full name.
 - **The unload flush is a `keepalive` fetch**, not `sendBeacon` (D3): a beacon
   cannot carry `Authorization`.
+- **Span times come from an anchored clock** (card #458, `telemetry/clock.rs`):
+  wall-clock epoch from `Date.now()` at the trace's root, durations from
+  `performance.now()`, one anchor shared by the whole trace through
+  `SpanContext`. Cost, as in OpenTelemetry JS: a device that sleeps *while a
+  trace is open* loses the sleep from that trace's durations; the next trace
+  re-anchors. Log records use `Date.now()`.
 - **e2e reaches the ingest cross-origin** (CORS on). The rig's Traefik edge
   (`app` in `e2e/docker-compose.test.yml`, card #449) routes only the app;
   same-origin routing of `/v1/` is Traefik's contract, not bored's.

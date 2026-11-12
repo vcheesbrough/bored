@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "1.79.0"
+version = "1.82.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "1.79.0"
+version = "1.82.0"
 dependencies = [
  "gloo-net",
  "gloo-timers",
@@ -2163,7 +2163,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp"
-version = "1.79.0"
+version = "1.82.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3767,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "1.79.0"
+version = "1.82.0"
 dependencies = [
  "serde",
  "serde_json",

@@ -13,6 +13,7 @@
 //! | Rule | Where |
 //! | --- | --- |
 //! | OTLP/HTTP JSON, hex ids, string int64s, numeric enums | [`otlp`] |
+//! | Span times: wall-clock epoch, monotonic durations, one anchor per trace | [`clock`] |
 //! | Bounded buffer, drop-oldest, counted | [`outbox`] |
 //! | Retry only 429/502/503/504, jitter, `Retry-After`, one refresh on 401 | [`policy`] |
 //! | No configuration → OTLP never initialised | [`config`] |
@@ -35,6 +36,7 @@
 //! failing or refusing ingest changes what reaches the console at warning
 //! level, and nothing else.
 
+mod clock;
 mod config;
 pub mod otlp;
 mod outbox;
@@ -44,6 +46,7 @@ mod runtime;
 
 pub use otlp::{SpanContext, SpanKind};
 
+use clock::ClockAnchor;
 use otlp::{ErrorStatus, KeyValue, Link, LogRecord, Severity, Span, SpanId, TraceId, UnixNanos};
 
 /// Start the export loop. Call once, first thing in `main`.
@@ -70,6 +73,9 @@ pub struct ActiveSpan {
     parent: Option<SpanId>,
     name: &'static str,
     kind: SpanKind,
+    /// The trace's clock anchor: both this span's start and its end are read
+    /// on it, and so are its children's (see [`clock`]).
+    anchor: ClockAnchor,
     start: UnixNanos,
     attributes: Vec<KeyValue>,
     links: Vec<Link>,
@@ -88,15 +94,21 @@ pub fn start_span(name: &'static str, kind: SpanKind, parent: Option<SpanContext
         || TraceId::from_random(platform::random_bytes()),
         |parent| parent.trace_id,
     );
+    // So is the clock anchor (card #458): a child is timed on its parent's
+    // timeline, which keeps it inside the parent. Only a root reads the wall
+    // clock afresh, which is what pins each trace to real time.
+    let anchor = parent.map_or_else(ClockAnchor::now, |parent| parent.anchor);
     ActiveSpan {
         context: SpanContext {
             trace_id,
             span_id: SpanId::from_random(platform::random_bytes()),
+            anchor,
         },
         parent: parent.map(|parent| parent.span_id),
         name,
         kind,
-        start: UnixNanos(platform::now_nanos()),
+        anchor,
+        start: anchor.read(),
         attributes: Vec::new(),
         links: Vec::new(),
         status: None,
@@ -150,11 +162,8 @@ impl ActiveSpan {
 
     /// Record a span this one relates to without being its child — the
     /// server's SSE stream span.
-    pub fn add_link(&mut self, other: SpanContext) {
-        self.links.push(Link {
-            trace_id: other.trace_id,
-            span_id: other.span_id,
-        });
+    pub fn add_link(&mut self, other: Link) {
+        self.links.push(other);
     }
 
     /// End the span now. Equivalent to dropping it; reads better at the call
@@ -169,7 +178,9 @@ impl ActiveSpan {
             name: self.name,
             kind: self.kind,
             start_time_unix_nano: self.start,
-            end_time_unix_nano: UnixNanos(platform::now_nanos()),
+            // The same anchor as the start, so the duration is the monotonic
+            // clock's: it cannot come out negative or jump with the wall clock.
+            end_time_unix_nano: self.anchor.read(),
             // `mem::take` moves the vectors out, leaving empty ones behind;
             // the span is being destroyed, so nothing reads them again.
             attributes: std::mem::take(&mut self.attributes),
@@ -248,7 +259,11 @@ fn emit(
     context: Option<SpanContext>,
 ) {
     let record = LogRecord {
-        time: UnixNanos(platform::now_nanos()),
+        // The wall clock, not a trace's anchor (card #458): a log record is a
+        // single moment and has no duration to protect, and a record without
+        // a span has no anchor to borrow. `Date.now()` is the clock the server
+        // and the backend's ingestion window agree with.
+        time: UnixNanos(platform::wall_nanos()),
         severity,
         body,
         attributes,

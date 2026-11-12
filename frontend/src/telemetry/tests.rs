@@ -171,7 +171,7 @@ fn enabled_keeps_the_launch_buffer_and_a_later_off_is_honoured() {
 fn the_launch_buffer_is_discarded_if_configuration_never_arrives() {
     test_support::reset();
     start_span("screen home", SpanKind::Internal, None).end();
-    let now = platform::now_ms();
+    let now = platform::wall_ms();
     let line = runtime::with_state(|state| state.expire_launch_buffer(now + 1_000.0)).unwrap();
     assert_eq!(line, None, "still within the bound");
     let line = runtime::with_state(|state| {
@@ -308,7 +308,7 @@ fn a_panic_is_logged_inside_a_span_under_the_current_screen() {
 fn a_401_drops_the_batch_and_the_cached_token_once_then_stops() {
     test_support::reset();
     configure(Some(&enabled()));
-    let far = platform::now_ms() + 1e9;
+    let far = platform::wall_ms() + 1e9;
     test_support::set_token("t1", far);
     start_span("a", SpanKind::Internal, None).end();
     let line = test_support::respond(Signal::Traces, 401, 1);
@@ -380,4 +380,122 @@ fn transition_lines_name_the_endpoint_and_the_dropped_count() {
     start_span("b", SpanKind::Internal, None).end();
     let line = test_support::respond(Signal::Traces, 200, 1).unwrap();
     assert!(line.contains("working again"), "{line}");
+}
+
+// ── Timestamps: the anchored clock (card #458) ───────────────────────────
+//
+// These run on `platform::fake_clock`, so the wall clock and the monotonic
+// clock can be made to disagree the way a browser's do. Every expected time is
+// a literal worked by hand from the readings set just before it, never a
+// value computed by the code under test.
+
+/// 2023-11-14T22:13:20Z in nanoseconds: the wall clock when each test starts.
+const WALL_0: u64 = 1_700_000_000_000_000_000;
+/// `performance.now()` at that moment: 3 s into the document's life.
+const MONO_0: u64 = 3_000_000_000;
+
+/// A span's exported start or end time (a JSON string of nanoseconds).
+fn nanos(span: &serde_json::Value, key: &str) -> u64 {
+    span[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("{key} is a string"))
+        .parse()
+        .expect("nanoseconds")
+}
+
+/// Find one exported span by name.
+fn named<'a>(spans: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+    spans
+        .iter()
+        .find(|span| span["name"] == name)
+        .unwrap_or_else(|| panic!("span {name} exported"))
+}
+
+#[test]
+fn a_trace_starts_at_wall_time_and_its_children_stay_inside_their_parent() {
+    platform::fake_clock::set(WALL_0, MONO_0);
+    test_support::reset();
+    let root = start_span("screen board", SpanKind::Internal, None);
+    let root_ctx = root.context().unwrap();
+
+    // 10 ms later by the monotonic clock — but the wall clock has been
+    // corrected *backwards* by half a second meanwhile (an NTP step). A child
+    // stamped from the wall clock would start 490 ms before its parent.
+    platform::fake_clock::set(WALL_0 - 500_000_000, MONO_0 + 10_000_000);
+    let child = start_span("GET /api/boards/{slug}", SpanKind::Client, Some(root_ctx));
+
+    // 20 ms on, the wall clock jumps forward two seconds; the child ends.
+    platform::fake_clock::set(WALL_0 + 2_000_000_000, MONO_0 + 30_000_000);
+    child.end();
+
+    // 10 ms more, and the root ends.
+    platform::fake_clock::set(WALL_0 + 2_100_000_000, MONO_0 + 40_000_000);
+    root.end();
+
+    let spans = test_support::drain(Signal::Traces);
+    let root = named(&spans, "screen board");
+    let child = named(&spans, "GET /api/boards/{slug}");
+    // Root: starts at the wall clock's reading, not the monotonic clock's
+    // 3 s, and lasts the monotonic 40 ms, whatever the wall clock did.
+    assert_eq!(nanos(root, "startTimeUnixNano"), 1_700_000_000_000_000_000);
+    assert_eq!(nanos(root, "endTimeUnixNano"), 1_700_000_000_040_000_000);
+    // Child: on the root's timeline — 10 ms to 30 ms after the root began.
+    assert_eq!(nanos(child, "startTimeUnixNano"), 1_700_000_000_010_000_000);
+    assert_eq!(nanos(child, "endTimeUnixNano"), 1_700_000_000_030_000_000);
+}
+
+#[test]
+fn a_new_trace_re_anchors_so_a_sleep_cannot_push_it_into_the_past() {
+    platform::fake_clock::set(WALL_0, MONO_0);
+    test_support::reset();
+    start_span("screen home", SpanKind::Internal, None).end();
+
+    // The device sleeps for eight hours. The wall clock moves on; the
+    // monotonic clock stood still and has advanced only 1 ms since. The old
+    // `timeOrigin + now()` clock would stamp the next span 1 ms after the
+    // last one — eight hours in the past.
+    platform::fake_clock::set(WALL_0 + 28_800_000_000_000, MONO_0 + 1_000_000);
+    let after_sleep = start_span("screen board", SpanKind::Internal, None);
+    platform::fake_clock::set(WALL_0 + 28_800_005_000_000, MONO_0 + 6_000_000);
+    after_sleep.end();
+
+    let spans = test_support::drain(Signal::Traces);
+    let span = named(&spans, "screen board");
+    // 1_700_000_000 s + 28_800 s = 1_700_028_800 s; then the 5 ms it ran.
+    assert_eq!(nanos(span, "startTimeUnixNano"), 1_700_028_800_000_000_000);
+    assert_eq!(nanos(span, "endTimeUnixNano"), 1_700_028_800_005_000_000);
+}
+
+#[test]
+fn log_records_are_stamped_with_the_wall_clock() {
+    platform::fake_clock::set(WALL_0, MONO_0);
+    test_support::reset();
+    let request = start_span("PUT /api/cards/{id}", SpanKind::Client, None);
+
+    // 1 ms later by the monotonic clock, 5 s later by the wall clock (it was
+    // corrected forward). The record is a moment, not part of a duration: it
+    // takes the wall clock, even though it names the open span's trace.
+    platform::fake_clock::set(WALL_0 + 5_000_000_000, MONO_0 + 1_000_000);
+    struct Failed(SpanContext);
+    impl std::fmt::Display for Failed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "failed")
+        }
+    }
+    impl Reportable for Failed {
+        fn error_type(&self) -> String {
+            "network".to_string()
+        }
+        fn trace(&self) -> Option<SpanContext> {
+            Some(self.0)
+        }
+    }
+    error("card save failed", &Failed(request.context().unwrap()));
+    error_detail("render failed", &"detail", "render");
+
+    let logs = test_support::drain(Signal::Logs);
+    assert_eq!(logs.len(), 2);
+    for log in &logs {
+        assert_eq!(nanos(log, "timeUnixNano"), 1_700_000_005_000_000_000);
+    }
 }
