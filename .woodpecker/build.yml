@@ -2,6 +2,9 @@
 # Push/manual: version → build(local, no push) → e2e → publish
 #   build only builds+validates locally; publish pushes to the registry ONLY after every test step is green, so the
 #   registry holds tested images only (PR #47).
+#   lane-check → e2e (skip guard first) → lane-mark-e2e: e2e skips when every file it tests already passed e2e
+#   (woodpecker-plugin-lane-skip, card #531; the lane is in the root lanes.yml). FULL_RUN=1 on a manual pipeline
+#   forces it. A skipped e2e still lets publish run — see "Publishing after a skipped e2e" on the publish step.
 #   A push never deploys: dev is deployed by hand, from any branch, with a deployment event (card #461). That lets
 #   several branches build at once without racing for the one shared dev environment.
 # Deploy: resolve → (apply-authentik-blueprint-<target> → attach-sqltool-outpost-<target>) → deploy-<target>
@@ -118,11 +121,67 @@ steps:
       - apk add --no-cache jq
       - ./scripts/test-metrics-network-order.sh
 
+  lane-check:
+    # Decides whether e2e runs (lane-skip, card #531): writes .lane/e2e.key,
+    # plus .lane/e2e.skip when that key already has a green marker at
+    # refs/ci/green/e2e/<key> on GitHub. The key covers every tracked file the
+    # Dockerfile's build context admits plus the `app` lane's inputs in
+    # lanes.yml, read from HEAD — so a push that changes only what
+    # .dockerignore leaves out (root docs, the licence) skips. Any error means
+    # run, never skip; FULL_RUN=1 (a manual pipeline variable) forces a run and
+    # still writes the key, so lane-mark-e2e records the pass. Reads from git
+    # alone, so it needs no build and runs beside it. The repo is public, so
+    # reading markers needs no token; github_token is passed so a private repo
+    # would still work.
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: &lane-skip-image ghcr.io/vcheesbrough/woodpecker-plugin-lane-skip:0.1.0@sha256:be07505d1c29ad2d9b3123e8d25422ea119d53f802161c28bb13cb646428be66
+    settings:
+      mode: check
+      config: &lanes-config lanes.yml
+      steps: [e2e]
+      github_token: *github-token
+
+  lane-files:
+    # The lane config's own checks (card #531), with the same pinned image the
+    # gates use, so what is checked is exactly what they hash: `verify` fails
+    # on a context or input HEAD lacks (a renamed path would silently drop out
+    # of the key), and `files` lists every path the `app` key covers for
+    # lane-validation to hold against scripts/test-lane-skip.sh's lists.
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: *lane-skip-image
+    commands:
+      - PLUGIN_MODE=verify PLUGIN_CONFIG=lanes.yml /plugin
+      - mkdir -p .lane/files
+      - PLUGIN_MODE=files PLUGIN_CONFIG=lanes.yml PLUGIN_LANE=app /plugin > .lane/files/app.txt
+
+  lane-validation:
+    # scripts/test-lane-skip.sh: the lane-skip wiring in this file (check
+    # before e2e, the guard first, mark only after a pass, publish after e2e),
+    # and the covered-file list lane-files wrote — every file e2e reads is in
+    # the key, and the docs a docs-only push changes are not.
+    when:
+      - event: [push, manual]
+    depends_on:
+      - lane-files
+    image: *alpine-image
+    commands:
+      - apk add --no-cache python3 py3-yaml bash git
+      - ./scripts/test-lane-skip.sh .lane/files/app.txt
+
   e2e:
+    # The first command is lane-skip's guard (card #531): when lane-check found
+    # a green marker for this key, it prints that marker (the commit, branch
+    # and pipeline that passed) and ends the step green before anything else
+    # runs. It must stay the first command; scripts/test-lane-skip.sh holds it.
     when:
       - event: [push, manual]
     depends_on:
       - build
+      - lane-check
     image: *docker-image
     volumes: *docker-socket
     # One compose project per pipeline (-p overrides the file's `name:`): with
@@ -135,6 +194,7 @@ steps:
     # leaks its project for good, so each run first removes bored-e2e-*
     # projects whose containers are hours old — never a live run's.
     commands:
+      - '[ ! -e .lane/e2e.skip ] || { cat .lane/e2e.skip; exit 0; }'
       - |
         ./scripts/prune-stale-e2e-projects.sh bored-e2e-$$CI_PIPELINE_NUMBER || echo "WARNING: stale e2e project cleanup failed"
       - |
@@ -146,6 +206,26 @@ steps:
         echo "Test report: $$REPORT/index.html"
         exit $$RC
 
+  lane-mark-e2e:
+    # Records e2e's pass (card #531): creates refs/ci/green/e2e/<key> for the
+    # key lane-check computed before the tests ran, create-only. It depends on
+    # e2e and has no `when: status`, so Woodpecker runs it only after e2e
+    # succeeded (after a skip it reports "already marked"). A failure to mark
+    # warns and exits 0 — the tests passed, and a missing marker only costs one
+    # re-run. Pushes a ref, so it needs github_token's contents write (the same
+    # access `version` needs for refs/builds/*). Nothing waits on it: a marker
+    # is not part of what publish ships.
+    when:
+      - event: [push, manual]
+    depends_on:
+      - e2e
+    image: *lane-skip-image
+    settings:
+      mode: mark
+      config: *lanes-config
+      step: e2e
+      github_token: *github-token
+
   publish:
     # Push the built + validated image to the registry ONLY after every test
     # step is green, so the registry never contains an untested image. This is
@@ -155,12 +235,28 @@ steps:
     # The plugin re-checks the version/revision labels, refuses a version the
     # registry already holds (or cannot rule out), and pushes :<version> only
     # — no :commit-<sha> or :latest (card #477).
+    #
+    # Publishing after a skipped e2e (card #531). A skipped e2e step is green,
+    # so publish runs and the commit gets a deployable version. That image is
+    # not untested: e2e skips only when lane-check found a green marker for a
+    # key over every file the image is built from (the whole build context
+    # through .dockerignore, the Dockerfile, .dockerignore, lanes.yml) and
+    # every file e2e reads — so its sources are byte-identical to a build that
+    # passed e2e. Everything else ran in this pipeline: fmt, clippy and the
+    # unit and Postgres tests inside `build`, and every other test step below.
+    # Only the burned-in version and revision differ. What a key cannot
+    # promise is byte-identical output (the final stage's `apt-get install` is
+    # not version-pinned); FULL_RUN=1 on a manual pipeline re-runs e2e when
+    # that matters. Skipping publish instead would leave a docs-only commit
+    # with no published build, so a docs-only squash-merge to main could not
+    # be deployed to prod, and re-running its pipeline would skip again.
     when:
       - event: [push, manual]
     depends_on:
       - e2e
       - sql-console-script-validation
       - metrics-network-order
+      - lane-validation
     image: *release-versions-image
     pull: true
     volumes: *docker-socket

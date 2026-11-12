@@ -14,3 +14,6 @@ lcov.info
 .cursor/mcp.json
 deploy/otel.env
 deploy/ingest.env
+# lane-skip decision files (.lane/<step>.key/.skip) and the covered-file lists
+# lane-files writes, all per pipeline — card #531
+/.lane/

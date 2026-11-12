@@ -1,0 +1,32 @@
+# Lanes for the lane-skip plugin (card #531): the e2e step skips when exactly
+# the files it tests have already passed e2e.
+#
+# At the repo root, not the plugin's default .woodpecker/lanes.yml: Woodpecker
+# parses every .yml in .woodpecker/ as a workflow, so a lane config there would
+# break every pipeline (v-note hit exactly this). Every lane-skip step in
+# .woodpecker/build.yml therefore sets `config: lanes.yml`;
+# scripts/test-lane-skip.sh holds that.
+#
+# The `app` lane's key is a sha256 over the blobs of every tracked file in the
+# Dockerfile's build context — everything the root .dockerignore admits, so a
+# file added to the repo is in the key by construction — plus the `inputs`
+# below, and implicitly this file, the Dockerfile and .dockerignore. Only
+# what .dockerignore leaves out (root Markdown docs, the licence, agent and
+# editor config) can change without re-running e2e. When that key already has
+# a green marker (refs/ci/green/e2e/<key> on GitHub), e2e skips.
+#
+# `inputs` repeats what the e2e step reads outside the image, although the
+# context covers it today: the e2e rig, the pipeline that runs it and the
+# scripts that step and the build call. It keeps them in the key if
+# .dockerignore is ever narrowed to what the Dockerfile COPYs, and `verify`
+# fails if one is renamed away.
+lanes:
+  app:
+    context: Dockerfile
+    inputs:
+      - e2e
+      - .woodpecker/build.yml
+      - scripts/prune-stale-e2e-projects.sh
+      - scripts/with-test-postgres.sh
+      - scripts/check-image-metadata.sh
+    steps: [e2e]

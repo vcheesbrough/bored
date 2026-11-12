@@ -3,3 +3,15 @@ target/
 .git/
 .idea/
 .run/
+# Card #531: the e2e lane's key is every file this context admits (lanes.yml),
+# so what is excluded here is exactly what a push can change without re-running
+# e2e. Keep this list to files neither the image nor the e2e step reads: root
+# Markdown docs (`*.md` matches the root only, as in every .dockerignore), the
+# licence, and agent/editor config. Never exclude source, e2e/, scripts/ or
+# .woodpecker/ to make a push skip.
+*.md
+LICENSE
+.claude/
+.cursor/
+# lane-skip's per-pipeline decision files must never reach an image.
+.lane/
