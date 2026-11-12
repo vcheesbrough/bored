@@ -99,7 +99,25 @@ plain_docker() (
   done
   docker "$@"
 )
-if plain_docker volume inspect "$PG_VOLUME" > /dev/null 2>&1; then
+#
+# Only docker's own "no such volume" answer counts as missing. Any other
+# failure (the daemon or its socket unreachable, a permission error) says
+# nothing about the volume, so it fails the deploy with docker's message and
+# never takes the create-it path, override or not: on prod that volume is
+# the data.
+if inspect_out=$(plain_docker volume inspect --format '{{.Name}}' "$PG_VOLUME" 2>&1); then
+  volume=present
+else
+  case "$inspect_out" in
+    *"no such volume"*) volume=missing ;;
+    *)
+      echo "ERROR: could not check database volume $PG_VOLUME:" >&2
+      echo "$inspect_out" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$volume" = present ]; then
   echo "==> database volume $PG_VOLUME present"
 elif [ "${BORED_ALLOW_EMPTY_DB:-}" = 1 ]; then
   echo "==> database volume $PG_VOLUME missing; BORED_ALLOW_EMPTY_DB=1, creating it (this environment starts with an empty database)"
