@@ -207,8 +207,12 @@ pub(crate) async fn successor_reaches_predecessor(
     .await
 }
 
-/// Every link with `card_id` at either end.
-async fn links_touching_card(db: &Db, card_id: &str) -> Result<Vec<DbCardLink>, sqlx::Error> {
+/// Every link with `card_id` at either end. Generic over the executor (see
+/// [`load_link`]) so the card delete can read them on its own transaction.
+async fn links_touching_card<'e, E>(db: E, card_id: &str) -> Result<Vec<DbCardLink>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query_as(link_select!(
         "WHERE l.predecessor_id = $1 OR l.successor_id = $1 \
          ORDER BY l.created_at, l.id"
@@ -544,23 +548,21 @@ pub async fn update_card_link(
     // the module docs. Dropping `tx` on an early return rolls it back.
     let mut tx = state.db.begin().await?;
 
-    let updated =
-        sqlx::query("UPDATE card_links SET reason = $2, last_edited_by = $3 WHERE id = $1")
-            .bind(&link_id)
-            .bind(&reason)
-            .bind(editor_sub(&claims))
-            .execute(&mut *tx)
-            .traced(DbQuery::new(
-                "links.update_card_link",
-                DbOperation::Update,
-                "card_links",
-            ))
-            .await?;
-    // Deleted since `load_link` above: nothing to update or record.
-    if updated.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
-    }
+    sqlx::query("UPDATE card_links SET reason = $2, last_edited_by = $3 WHERE id = $1")
+        .bind(&link_id)
+        .bind(&reason)
+        .bind(editor_sub(&claims))
+        .execute(&mut *tx)
+        .traced(DbQuery::new(
+            "links.update_card_link",
+            DbOperation::Update,
+            "card_links",
+        ))
+        .await?;
 
+    // A link deleted since `load_link` above is not here to read back: the
+    // UPDATE matched nothing, and the `?` returns 404 with `tx` dropped —
+    // rolled back, so no history row is written.
     let link = load_link(&mut *tx, &link_id)
         .await?
         .ok_or(ApiError::NotFound)?
@@ -608,32 +610,39 @@ pub async fn delete_card_link(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Delete, record, and broadcast the removal of one link. Shared by the
-/// explicit delete route and the cascades below so every removal — however it
-/// came about — leaves the same history rows and the same SSE events, on
-/// every board the link touches. Deleting board B therefore tells board A
-/// that its cross-board links to B are gone.
+/// One link removal that has been written (row deleted, history rows
+/// inserted) on some transaction but not yet announced. The caller sends it
+/// with [`announce_link_removal`] once that transaction has committed.
+pub(crate) struct LinkRemoval {
+    link_id: String,
+    boards: Vec<String>,
+    entries: Vec<shared::AuditLogEntry>,
+}
+
+/// Delete one link and write its history rows (one per board) on `tx`,
+/// **without** committing or announcing anything. The building block both
+/// [`delete_one_link`] (its own transaction) and [`sweep_card_links`] (the
+/// card delete's transaction) use, so every removal — however it came
+/// about — leaves the same history rows and the same SSE events, on every
+/// board the link touches. Deleting board B therefore tells board A that its
+/// cross-board links to B are gone.
 ///
-/// The delete and its history rows commit together (card #547), and the
-/// events go out after the commit. Returns `false`, writing nothing, when
-/// the link was already gone: a concurrent delete got there first and wrote
-/// the history itself, so a second set of rows would record one removal
-/// twice.
-async fn delete_one_link(
-    state: &AppState,
+/// Returns `None`, writing nothing, when the link was already gone: a
+/// concurrent delete got there first and wrote the history itself, so a
+/// second set of rows would record one removal twice.
+async fn remove_link(
+    tx: &mut sqlx::PgConnection,
     claims: &Claims,
     link: DbCardLink,
     batch_group: Option<&str>,
-) -> Result<bool, ApiError> {
+) -> Result<Option<LinkRemoval>, ApiError> {
     let link_id = link.id.clone();
     let boards = link.boards();
     let snapshot_before = link_snapshot(&link.into_api())?;
 
-    let mut tx = state.db.begin().await?;
-
-    // Delete first, inside the transaction: the row lock this takes makes a
-    // concurrent delete of the same link wait for our commit and then find
-    // nothing (0 rows), so exactly one of them records the removal.
+    // Delete first: the row lock this takes makes a concurrent delete of the
+    // same link wait for our commit and then find nothing (0 rows), so
+    // exactly one of them records the removal.
     let deleted = sqlx::query("DELETE FROM card_links WHERE id = $1")
         .bind(&link_id)
         .execute(&mut *tx)
@@ -644,12 +653,11 @@ async fn delete_one_link(
         ))
         .await?;
     if deleted.rows_affected() == 0 {
-        // Nothing deleted; dropping `tx` just ends it.
-        return Ok(false);
+        return Ok(None);
     }
 
     let entries = record_link_audit(
-        &mut tx,
+        tx,
         claims,
         &boards,
         &link_id,
@@ -659,16 +667,77 @@ async fn delete_one_link(
         batch_group,
     )
     .await?;
+    Ok(Some(LinkRemoval {
+        link_id,
+        boards,
+        entries,
+    }))
+}
 
-    tx.commit().await?;
-
+/// Announce a committed [`LinkRemoval`]: its history rows, then
+/// `CardLinkDeleted`, on every board the link touched.
+pub(crate) fn announce_link_removal(state: &AppState, removal: LinkRemoval) {
+    let LinkRemoval {
+        link_id,
+        boards,
+        entries,
+    } = removal;
     announce_link_change(
         state,
         entries,
         &boards,
         &BoardEvent::CardLinkDeleted { link_id },
     );
+}
+
+/// Delete, record, and broadcast the removal of one link in a transaction of
+/// its own: the delete and its history rows commit together (card #547), and
+/// the events go out after the commit. Returns `false`, writing nothing, when
+/// the link was already gone (see [`remove_link`]).
+async fn delete_one_link(
+    state: &AppState,
+    claims: &Claims,
+    link: DbCardLink,
+    batch_group: Option<&str>,
+) -> Result<bool, ApiError> {
+    let mut tx = state.db.begin().await?;
+    // `&mut tx` derefs to the transaction's `&mut PgConnection`. On `None`
+    // or an error, dropping `tx` just ends (rolls back) the transaction.
+    let Some(removal) = remove_link(&mut tx, claims, link, batch_group).await? else {
+        return Ok(false);
+    };
+    tx.commit().await?;
+    announce_link_removal(state, removal);
     Ok(true)
+}
+
+/// The card-delete route's link sweep: remove every link touching `card_id`
+/// **on the delete's own transaction** `tx`, and return the removals for the
+/// caller to announce after it commits.
+///
+/// Running on the caller's transaction means the whole card delete uses one
+/// pooled connection from start to finish. Holding the card's row lock on one
+/// connection while taking more from the pool would let enough concurrent
+/// deletes hold every connection and wait on each other for a free one
+/// (PR #101 review). It also makes the link removals commit — or roll back —
+/// together with the card.
+///
+/// The caller must already hold the card's row lock on `tx` (see
+/// [`cascade_delete_card_links`] for why).
+pub(crate) async fn sweep_card_links(
+    tx: &mut sqlx::PgConnection,
+    claims: &Claims,
+    card_id: &str,
+) -> Result<Vec<LinkRemoval>, ApiError> {
+    let links = links_touching_card(&mut *tx, card_id).await?;
+    let mut removals = Vec::with_capacity(links.len());
+    for link in links {
+        // `None`: already gone (a concurrent explicit delete recorded it).
+        if let Some(removal) = remove_link(&mut *tx, claims, link, None).await? {
+            removals.push(removal);
+        }
+    }
+    Ok(removals)
 }
 
 /// Remove every link touching `card_id`, recording each removal. Called by

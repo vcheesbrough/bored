@@ -1247,3 +1247,197 @@ async fn a_link_created_during_a_card_delete_is_not_lost_silently() {
         .await
         .assert_status(StatusCode::CREATED);
 }
+
+/// Hold a row lock on link `link_id` from a connection of the test's own
+/// (outside the app's pool), run `requests` — which must each end up waiting
+/// on that lock — until `waiters` sessions are blocked, then let them go.
+/// Returns what the requests returned. Used to force two removals of one
+/// link to meet at its row, rather than hoping they do.
+async fn race_on_link_row<F, T>(db: &crate::db::Db, link_id: &str, waiters: i64, requests: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    use sqlx::{ConnectOptions as _, Connection as _};
+    use std::time::{Duration, Instant};
+
+    let options = (*db.connect_options()).clone();
+    let mut holder = options.connect().await.expect("lock connection");
+    let mut watch = options.connect().await.expect("watch connection");
+    let mut hold = holder.begin().await.expect("begin");
+    sqlx::query("SELECT 1 FROM card_links WHERE id = $1 FOR UPDATE")
+        .bind(link_id)
+        .execute(&mut *hold)
+        .await
+        .expect("lock the link");
+
+    let release = async {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lock_waiters(&mut watch).await < waiters {
+            assert!(
+                Instant::now() < deadline,
+                "the requests never all blocked on the link"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        hold.rollback().await.expect("release the lock");
+    };
+    let (out, ()) = tokio::join!(requests, release);
+    out
+}
+
+/// PR #101 review: two explicit deletes of the same cross-board link that
+/// meet at its row. Exactly one removes it (204) and records it — one
+/// `delete` history row and one event pair per board; the other finds it
+/// gone and answers 404, writing nothing.
+#[tokio::test]
+async fn racing_deletes_of_one_link_record_it_once() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+    drain_link_events(&mut rx);
+
+    let path = format!("/api/links/{}", link.id);
+    let (first, second) = race_on_link_row(&db, &link.id, 2, async {
+        tokio::join!(
+            std::future::IntoFuture::into_future(server.delete(&path)),
+            std::future::IntoFuture::into_future(server.delete(&path)),
+        )
+    })
+    .await;
+
+    // One of each, in either order.
+    let mut statuses = vec![first.status_code(), second.status_code()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        vec![StatusCode::NO_CONTENT, StatusCode::NOT_FOUND]
+    );
+
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &link.id).await,
+            vec!["delete", "create"],
+            "history of {}",
+            board.name
+        );
+    }
+    let mut expected = vec![
+        ("history:delete".to_string(), near.id.clone()),
+        ("history:delete".to_string(), far.id.clone()),
+        ("deleted".to_string(), near.id.clone()),
+        ("deleted".to_string(), far.id.clone()),
+    ];
+    let mut seen = drain_link_events(&mut rx);
+    // The order *within* the one removal is fixed, but compare as sets so
+    // the assertion is about "once", not about scheduling.
+    expected.sort();
+    seen.sort();
+    assert_eq!(seen, expected);
+
+    // Liveness: the same two cards can be linked again.
+    link_after(&server, &a, &far_cards[0], None)
+        .await
+        .assert_status(StatusCode::CREATED);
+}
+
+/// PR #101 review: an explicit delete of a link racing the link sweep of a
+/// delete of one of its cards. The card delete succeeds whichever wins; the
+/// explicit delete is 204 if it won and 404 if the sweep did. Either way the
+/// removal is recorded exactly once on each board.
+#[tokio::test]
+async fn an_explicit_delete_racing_a_card_delete_records_the_link_once() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+
+    let link_path = format!("/api/links/{}", link.id);
+    let card_path = format!("/api/cards/{}", a.id);
+    let (explicit, card_delete) = race_on_link_row(&db, &link.id, 2, async {
+        tokio::join!(
+            std::future::IntoFuture::into_future(server.delete(&link_path)),
+            std::future::IntoFuture::into_future(server.delete(&card_path)),
+        )
+    })
+    .await;
+
+    card_delete.assert_status(StatusCode::NO_CONTENT);
+    assert!(
+        [StatusCode::NO_CONTENT, StatusCode::NOT_FOUND].contains(&explicit.status_code()),
+        "explicit delete answered {}",
+        explicit.status_code()
+    );
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &link.id).await,
+            vec!["delete", "create"],
+            "history of {}",
+            board.name
+        );
+    }
+}
+
+/// PR #101 review: `DELETE /api/cards/:id` holds the card's row lock on one
+/// pooled connection for the whole delete, so it must not need a second
+/// connection while it holds it — or enough concurrent deletes would hold
+/// every connection and each wait for another. With a pool of exactly one
+/// connection, a delete that needed two would wait for itself until the
+/// acquire timeout; here it must simply succeed, links and history included.
+#[tokio::test]
+async fn a_card_delete_with_links_needs_only_one_connection() {
+    let db = db::connect_test().await.expect("test db");
+    // The same database, through a pool that can never lend a second
+    // connection.
+    let single = crate::db::pool_options(1).connect_lazy_with((*db.connect_options()).clone());
+    let state = AppState::new(single);
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, b, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let local: shared::CardLink = link_after(&server, &a, &b, None).await.json();
+    let crossing: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+    drain_link_events(&mut rx);
+
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    // Both links went, each recorded on every board it touched.
+    assert_eq!(
+        board_link_actions(&server, &near, &local.id).await,
+        vec!["delete", "create"]
+    );
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &crossing.id).await,
+            vec!["delete", "create"],
+            "history of {}",
+            board.name
+        );
+    }
+    assert!(board_links(&server, &near).await.is_empty());
+    assert!(board_links(&server, &far).await.is_empty());
+    // And announced after the commit: the local link once, the crossing link
+    // on both boards (history row, then removal, per link).
+    assert_eq!(
+        drain_link_events(&mut rx),
+        vec![
+            ("history:delete".to_string(), near.id.clone()),
+            ("deleted".to_string(), near.id.clone()),
+            ("history:delete".to_string(), near.id.clone()),
+            ("history:delete".to_string(), far.id.clone()),
+            ("deleted".to_string(), near.id.clone()),
+            ("deleted".to_string(), far.id.clone()),
+        ]
+    );
+}
