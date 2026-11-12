@@ -4,8 +4,9 @@
     <option name="command" value="run -p backend" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs>
-      <env name="DATABASE_PATH" value="/tmp/bored-dev.db" />
-      <env name="LOG_LEVEL" value="debug,surrealdb::core::kvs=warn" />
+      <env name="BORED__DATABASE__HOST" value="localhost" />
+      <env name="BORED__DATABASE__PASSWORD" value="dev" />
+      <env name="BORED__OBSERVABILITY__LOG_LEVEL" value="debug" />
     </envs>
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />
