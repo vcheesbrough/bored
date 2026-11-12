@@ -171,6 +171,17 @@ fn remote_lookup_number(typed: &str, local_numbers: &[u32]) -> Option<u32> {
     (!local_numbers.contains(&number)).then_some(number)
 }
 
+/// The lookup answer the picker may show: the stored one, but only while it is
+/// for the number currently wanted. An answer for an earlier number — a slow
+/// response that lands after the user typed on, or one left over from before
+/// the text stopped being a lookup at all — shows nothing.
+fn current_lookup(
+    stored: Option<&shared::CardWithBoard>,
+    wanted: Option<u32>,
+) -> Option<&shared::CardWithBoard> {
+    stored.filter(|found| Some(found.card.number) == wanted)
+}
+
 /// The picker row for a card found by number, or `None` when the picker must
 /// not offer it: it is the card being edited, it is already linked, or
 /// linking it would close a loop the browser can already see.
@@ -653,6 +664,10 @@ fn LinkPicker(
             match crate::api::fetch_card_by_number(number, None).await {
                 Ok(found) if still_wanted() => {
                     let _ = remote.try_set(Some(found));
+                    // The found card leads the list, so every row below it
+                    // moves down one: an index highlighted before it arrived
+                    // would now name a different card (PR #96 review).
+                    let _ = active.try_set(None);
                 }
                 Ok(_) => {}
                 // No such card: nothing to offer, and nothing worth reporting —
@@ -702,14 +717,14 @@ fn LinkPicker(
         found = order_candidates(found, &picked);
         // A card found on another board is an exact match for the typed
         // number, so it leads the list.
-        let looked_up = remote.get().filter(|r| Some(r.card.number) == wanted.get());
-        if let Some(looked_up) = looked_up {
+        let looked_up = remote.get();
+        if let Some(looked_up) = current_lookup(looked_up.as_ref(), wanted.get()) {
             let (pred, succ) = match side {
                 Side::Before => (looked_up.card.id.as_str(), me.as_str()),
                 Side::After => (me.as_str(), looked_up.card.id.as_str()),
             };
             let row = remote_candidate(
-                &looked_up,
+                looked_up,
                 &me,
                 &current_slug.get_value(),
                 links.are_linked(&me, &looked_up.card.id),
@@ -1273,6 +1288,29 @@ mod tests {
             },
             board_slug: board_slug.to_string(),
         }
+    }
+
+    #[test]
+    fn the_answer_for_the_wanted_number_is_shown() {
+        let far = found("far", 544, "home");
+        assert_eq!(
+            current_lookup(Some(&far), Some(544)).map(|f| f.card.number),
+            Some(544)
+        );
+    }
+
+    /// A slow answer for `54` must not appear once the user has typed on to
+    /// `544` — nor once the text is no longer a number at all.
+    #[test]
+    fn a_stale_answer_is_not_shown() {
+        let old = found("old", 54, "home");
+        assert!(current_lookup(Some(&old), Some(544)).is_none());
+        assert!(current_lookup(Some(&old), None).is_none());
+    }
+
+    #[test]
+    fn no_answer_shows_nothing() {
+        assert!(current_lookup(None, Some(544)).is_none());
     }
 
     #[test]

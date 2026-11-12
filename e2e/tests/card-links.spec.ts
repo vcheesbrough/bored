@@ -974,6 +974,18 @@ test.describe('cross-board links', () => {
     await expect(options.locator('.link-chip-board, .link-suggestion-board')).toHaveCount(0);
     await options.click();
 
+    // A number no card has: the lookup answers 404 and nothing is offered.
+    // Waiting for that answer is what makes the "nothing" assertion mean
+    // something rather than pass before the lookup has even been sent.
+    const missing = 2_000_000_000;
+    const notFound = page.waitForResponse(
+      response =>
+        response.url().endsWith(`/api/cards/by-number/${missing}`) && response.status() === 404
+    );
+    await input.fill(`#${missing}`);
+    await notFound;
+    await expect(page.locator('.link-suggestions')).toHaveCount(0);
+
     // The other board's card, by its number: offered with that board's name.
     await input.fill(`#${remote.number}`);
     const remoteRow = options.filter({ hasText: 'Remote card' });

@@ -755,6 +755,49 @@ async fn deleting_a_board_cascades_its_links() {
         .assert_status(StatusCode::NOT_FOUND);
 }
 
+/// A cascade on the far board tags the near board's link delete row with the
+/// cascade's own batch group, so the near board's history can say which
+/// cascade removed the link. A column delete rather than a board delete, so
+/// the far board — and its history — is still there to compare against.
+#[tokio::test]
+async fn a_far_cascade_groups_the_near_boards_link_row_with_it() {
+    let server = test_app().await;
+    let (board, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (other, far) = setup_other_board(&server, "other-board", &["# Elsewhere"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far[0], None).await.json();
+
+    server
+        .delete(&format!("/api/columns/{}", far[0].column_id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let history = |slug: String| {
+        let server = &server;
+        async move {
+            server
+                .get(&format!("/api/boards/{slug}/history"))
+                .await
+                .json::<Vec<shared::AuditLogEntry>>()
+        }
+    };
+    let far_hist = history(other.name.clone()).await;
+    let column_group = far_hist
+        .iter()
+        .find(|e| e.entity_type == "column" && e.action == "delete")
+        .and_then(|e| e.batch_group.clone())
+        .expect("the column delete is grouped");
+    let near_hist = history(board.name.clone()).await;
+    let near_delete = near_hist
+        .iter()
+        .find(|e| e.entity_id == link.id && e.action == "delete")
+        .expect("the near board records the link's removal");
+    assert_eq!(
+        near_delete.batch_group.as_deref(),
+        Some(column_group.as_str())
+    );
+    assert!(board_links(&server, &board).await.is_empty());
+}
+
 #[tokio::test]
 async fn link_audit_rows_are_not_restorable() {
     let server = test_app().await;
