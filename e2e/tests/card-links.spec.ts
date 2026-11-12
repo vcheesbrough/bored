@@ -985,6 +985,8 @@ test.describe('cross-board links', () => {
     await input.fill(`#${missing}`);
     await notFound;
     await expect(page.locator('.link-suggestions')).toHaveCount(0);
+    // An ordinary miss, not a failure: no error line either.
+    await expect(page.locator('.link-editor-error')).toHaveCount(0);
 
     // The other board's card, by its number: offered with that board's name.
     await input.fill(`#${remote.number}`);
@@ -1042,6 +1044,73 @@ test.describe('cross-board links', () => {
     await expect(cardWith(page, 'Remote card').locator('.link-badge-before')).toHaveText(
       `↑#${alpha.number}`
     );
+  });
+
+  test('a looked-up card arriving under a highlighted row clears the highlight', async ({
+    page,
+    request,
+  }) => {
+    // The lookup's answer goes in at the top of the list, moving every row
+    // down one, so a highlight set before it arrived would name a different
+    // card — and Enter would link that one (PR #96 review). The answer is
+    // held back until a local row is highlighted, then released.
+    //
+    // The typed number has to match a local row (by number prefix) without
+    // being a local card itself. Push the card counter to 10 or more on a
+    // scratch board first, so this board's cards all have two or more digits
+    // and `floor(alpha / 10)` is a smaller number no card here has.
+    const scratch = await apiCreateBoard(request, `xb-scr-${Date.now().toString(36)}`);
+    const scratchCol = await apiCreateColumn(request, scratch.name, 'Col');
+    let filler = await apiCreateCard(request, scratchCol.id, '# Filler');
+    while (filler.number < 10) {
+      filler = await apiCreateCard(request, scratchCol.id, '# Filler');
+    }
+    const { near, far, alpha, remote } = await twoBoards(request);
+    const prefix = Math.floor(alpha.number / 10);
+
+    // The held answer: a card on the far board under the typed number.
+    let release!: () => void;
+    const held = new Promise<void>(resolve => (release = resolve));
+    await page.route(`**/api/cards/by-number/${prefix}`, async route => {
+      await held;
+      await route.fulfill({
+        json: {
+          id: remote.id,
+          column_id: remote.column_id,
+          body: '# Held answer',
+          position: 0,
+          number: prefix,
+          tags: [],
+          last_edited_by: null,
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:00:00Z',
+          board_slug: far.name,
+        },
+      });
+    });
+
+    await gotoBoardView(page, near.name);
+    await cardWith(page, 'Beta card').click();
+    const input = page.locator(
+      '.card-item.card-expanded .link-group[data-side="after"] .link-picker-input'
+    );
+    const options = page.locator('.link-suggestions .link-suggestion');
+    const highlighted = page.locator('.link-suggestions .link-suggestion-active');
+
+    // Alpha matches the prefix; highlight it while the lookup is held.
+    await input.fill(String(prefix));
+    await expect(options.filter({ hasText: 'Alpha card' })).toHaveCount(1);
+    await input.press('ArrowDown');
+    await expect(highlighted).toHaveCount(1);
+
+    // The answer lands on top: the highlight must not now name it.
+    release();
+    await expect(options.first()).toContainText('Held answer');
+    await expect(highlighted).toHaveCount(0);
+
+    // Liveness: arrowing still works on the new list.
+    await input.press('ArrowDown');
+    await expect(highlighted).toContainText('Held answer');
   });
 
   test('cross-board link changes reach both boards over SSE', async ({ browser, request }) => {
