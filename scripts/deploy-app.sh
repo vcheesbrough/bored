@@ -1,5 +1,6 @@
 #!/bin/sh
-# The app half of a deploy: the compose up of the backend and its database,
+# The app half of a deploy: a check that the database volume exists (card
+# #537), the compose up of the backend and its database,
 # then the read-only SQL console (card #473) when it is enabled. (Until card
 # #489 it first ran the one-off SurrealDB import check, card #471.) Run under `sovereign-config render
 # … --` so every part sees the rendered telemetry and compose layers.
@@ -8,6 +9,10 @@
 #   e.g. deploy-app.sh -p bored-dev -f deploy/docker-compose.yml
 #
 # Environment, besides what deploy/docker-compose.yml interpolates:
+#   PG_VOLUME                          the Postgres data volume; it must already
+#                                      exist (card #537)
+#   BORED_ALLOW_EMPTY_DB               `1` creates a missing PG_VOLUME instead of
+#                                      refusing — a genuinely new environment only
 #   COMPOSE_PROFILES                   naming `sqltool` enables the SQL console
 # Required only when COMPOSE_PROFILES names `sqltool` (rendered from
 # /bored/devops/<env>/compose):
@@ -73,6 +78,57 @@ case ",${COMPOSE_PROFILES:-}," in
     export PGWEB_AUTH_B64=""
     ;;
 esac
+
+# --- the database volume (card #537) ----------------------------------------
+#
+# Postgres initialises an empty database on an empty data directory, and the
+# backend would then migrate it and serve an empty board with no error. So a
+# missing volume — renamed, removed by hand, or a host restored without it —
+# stops the deploy here instead of being silently recreated. Only a
+# genuinely new environment starts empty, and only when the deploy says so:
+#   BORED_ALLOW_EMPTY_DB=1   create the missing volume and carry on
+# (or create it by hand first: `docker volume create <volume>` is the same
+# explicit decision). A volume that exists is used as it is, override or not.
+#
+# The docker CLI runs without the OTEL_* variables (see below), here in a
+# subshell because compose-up-with-otel.sh still needs them afterwards.
+: "${PG_VOLUME:?PG_VOLUME is required (the Postgres data volume, e.g. bored-dev-pg)}"
+plain_docker() (
+  for name in $(env | sed -n 's/^\(OTEL_[A-Z0-9_]*\)=.*/\1/p'); do
+    unset "$name"
+  done
+  docker "$@"
+)
+#
+# Only docker's own "no such volume" answer counts as missing. Any other
+# failure (the daemon or its socket unreachable, a permission error) says
+# nothing about the volume, so it fails the deploy with docker's message and
+# never takes the create-it path, override or not: on prod that volume is
+# the data.
+if inspect_out=$(plain_docker volume inspect --format '{{.Name}}' "$PG_VOLUME" 2>&1); then
+  volume=present
+else
+  case "$inspect_out" in
+    *"no such volume"*) volume=missing ;;
+    *)
+      echo "ERROR: could not check database volume $PG_VOLUME:" >&2
+      echo "$inspect_out" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$volume" = present ]; then
+  echo "==> database volume $PG_VOLUME present"
+elif [ "${BORED_ALLOW_EMPTY_DB:-}" = 1 ]; then
+  echo "==> database volume $PG_VOLUME missing; BORED_ALLOW_EMPTY_DB=1, creating it (this environment starts with an empty database)"
+  plain_docker volume create "$PG_VOLUME" > /dev/null
+else
+  echo "ERROR: database volume $PG_VOLUME does not exist." >&2
+  echo "  Deploying would start Postgres on an empty database and serve an empty board." >&2
+  echo "  Restoring? Create the volume, deploy, then load the dump (mini-config RECOVERY.md step 11b)." >&2
+  echo "  A genuinely new environment? Deploy with BORED_ALLOW_EMPTY_DB=1." >&2
+  exit 1
+fi
 
 # --- the backend ------------------------------------------------------------
 

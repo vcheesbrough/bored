@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tests for scripts/deploy-app.sh (cards #471, #473, #489).
+# Tests for scripts/deploy-app.sh (cards #471, #473, #489, #537).
 #
 # deploy-app.sh is copied into a scratch tree beside a stand-in for the
 # script it runs, and a fake `docker` goes first on PATH. Every stand-in
@@ -33,6 +33,20 @@ echo "docker \$*" >> "$WORK_DIR/calls"
 env | grep '^OTEL_' >> "$WORK_DIR/docker-otel" || true
 env | grep '^PGWEB_AUTH_B64=' >> "$WORK_DIR/docker-b64" || true
 env | grep '^PGWEB_NEW_PASSWORD=' >> "$WORK_DIR/docker-pw" || true
+# The database volume exists unless a test says otherwise (card #537). The
+# messages are docker's own: a missing volume, and an unreachable daemon.
+case "\$*" in
+  "volume inspect "*)
+    if [ -e "$WORK_DIR/daemon-down" ]; then
+      echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+      exit 1
+    fi
+    if [ -e "$WORK_DIR/volume-absent" ]; then
+      echo "Error response from daemon: get \${4:-volume}: no such volume" >&2
+      exit 1
+    fi
+    ;;
+esac
 exit 0
 FAKE
 chmod +x "$WORK_DIR/bin/docker"
@@ -47,13 +61,14 @@ reset() {
   : > "$WORK_DIR/docker-otel"
   : > "$WORK_DIR/docker-b64"
   : > "$WORK_DIR/docker-pw"
-  rm -f "$WORK_DIR"/*.status
+  rm -f "$WORK_DIR"/*.status "$WORK_DIR/volume-absent" "$WORK_DIR/daemon-down"
 }
 
 # Run deploy-app.sh with extra environment given as arguments to `env`.
+# PG_VOLUME is set as the pipeline sets it; a test can override it.
 run() {
   status=0
-  env PATH="$WORK_DIR/bin:$PATH" OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 "$@" \
+  env PATH="$WORK_DIR/bin:$PATH" OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 PG_VOLUME=bored-dev-pg "$@" \
     sh "$WORK_DIR/scripts/deploy-app.sh" -p bored-dev -f deploy/docker-compose.yml \
     < /dev/null > "$WORK_DIR/out" 2>&1 || status=$?
 }
@@ -61,11 +76,12 @@ run() {
 # --- console off: the backend only, and any console removed -------------------
 reset
 run COMPOSE_PROFILES=
-expected="compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120 bored-db bored
+expected="docker volume inspect --format {{.Name}} bored-dev-pg
+compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120 bored-db bored
 docker compose -p bored-dev -f deploy/docker-compose.yml --profile sqltool rm -sf sqltool
 docker compose -p bored-dev -f deploy/docker-compose.yml exec -T bored-db psql -v ON_ERROR_STOP=1 -q -U bored -d bored -c ALTER ROLE bored_pgweb NOLOGIN"
 if [ "$status" = 0 ] && [ "$(cat "$WORK_DIR/calls")" = "$expected" ]; then
-  pass "without the profile: backend up (named services), console removed, login disabled"
+  pass "without the profile: volume checked, backend up (named services), console removed, login disabled"
 else
   fail "console off: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
@@ -149,16 +165,93 @@ fi
 reset
 echo 1 > "$WORK_DIR/compose-up-with-otel.status"
 run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
-if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 1 ]; then
+if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 2 ] \
+    && [ "$(tail -n 1 "$WORK_DIR/calls" | cut -d' ' -f1)" = compose-up-with-otel ]; then
   pass "a failed backend up fails the deploy before the role or console is touched"
 else
   fail "failed backend up: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
 
+# --- the database volume (card #537) ------------------------------------------
+
+# Absent: refuse, before compose (and so Postgres) is started at all.
+reset
+touch "$WORK_DIR/volume-absent"
+run COMPOSE_PROFILES=
+if [ "$status" = 1 ] && [ "$(cat "$WORK_DIR/calls")" = "docker volume inspect --format {{.Name}} bored-dev-pg" ] \
+    && grep -q 'database volume bored-dev-pg does not exist' "$WORK_DIR/out"; then
+  pass "a missing database volume fails the deploy before anything starts"
+else
+  fail "volume absent: status $status, calls: $(cat "$WORK_DIR/calls"), out: $(cat "$WORK_DIR/out")"
+fi
+
+# Absent, and the override is anything but exactly `1`: still refuse.
+for value in 0 yes true ""; do
+  reset
+  touch "$WORK_DIR/volume-absent"
+  run COMPOSE_PROFILES= BORED_ALLOW_EMPTY_DB="$value"
+  if [ "$status" = 1 ] && ! grep -q 'volume create' "$WORK_DIR/calls"; then
+    pass "BORED_ALLOW_EMPTY_DB='$value' is not the override"
+  else
+    fail "BORED_ALLOW_EMPTY_DB='$value': status $status, calls: $(cat "$WORK_DIR/calls")"
+  fi
+done
+
+# Absent with the override: create it, then carry on with the deploy.
+reset
+touch "$WORK_DIR/volume-absent"
+run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw BORED_ALLOW_EMPTY_DB=1
+create_line=$(grep -nx 'docker volume create bored-dev-pg' "$WORK_DIR/calls" | cut -d: -f1)
+backend_line=$(grep -n '^compose-up-with-otel' "$WORK_DIR/calls" | cut -d: -f1)
+if [ "$status" = 0 ] && [ -n "$create_line" ] && [ -n "$backend_line" ] \
+    && [ "$create_line" -lt "$backend_line" ] && grep -q 'sqltool$' "$WORK_DIR/calls"; then
+  pass "BORED_ALLOW_EMPTY_DB=1 creates the missing volume, then deploys"
+else
+  fail "override: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+if [ -s "$WORK_DIR/docker-otel" ]; then
+  fail "the volume calls saw OTEL variables: $(cut -d= -f1 "$WORK_DIR/docker-otel" | sort -u | tr '\n' ' ')"
+else
+  pass "the volume calls never see the OTEL_* variables either"
+fi
+
+# Present with the override: the override does nothing.
+reset
+run COMPOSE_PROFILES= BORED_ALLOW_EMPTY_DB=1
+if [ "$status" = 0 ] && ! grep -q 'volume create' "$WORK_DIR/calls" \
+    && grep -q '^compose-up-with-otel' "$WORK_DIR/calls"; then
+  pass "an existing volume is used as it is, override or not"
+else
+  fail "present + override: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# Docker itself failing is not a missing volume: refuse with docker's message,
+# and never create the volume, even with the override.
+reset
+touch "$WORK_DIR/daemon-down" "$WORK_DIR/volume-absent"
+run COMPOSE_PROFILES= BORED_ALLOW_EMPTY_DB=1
+if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 1 ] \
+    && grep -q 'could not check database volume bored-dev-pg' "$WORK_DIR/out" \
+    && grep -q 'Cannot connect to the Docker daemon' "$WORK_DIR/out" \
+    && ! grep -q 'does not exist' "$WORK_DIR/out"; then
+  pass "a docker failure is reported as such, not as a missing volume, and creates nothing"
+else
+  fail "daemon down: status $status, calls: $(cat "$WORK_DIR/calls"), out: $(cat "$WORK_DIR/out")"
+fi
+
+# No PG_VOLUME (empty, as unset would be): fail before touching anything.
+reset
+run PG_VOLUME= COMPOSE_PROFILES=
+if [ "$status" != 0 ] && [ ! -s "$WORK_DIR/calls" ] && grep -q 'PG_VOLUME is required' "$WORK_DIR/out"; then
+  pass "a deploy without PG_VOLUME fails before anything runs"
+else
+  fail "no PG_VOLUME: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
 # --- the caller's stdin is left untouched ------------------------------------
 reset
 left=$(printf 'echo the-rest-of-the-step\n' | {
-  PATH="$WORK_DIR/bin:$PATH" COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=x PGWEB_AUTH_USER=u PGWEB_AUTH_PASS=p \
+  PATH="$WORK_DIR/bin:$PATH" PG_VOLUME=bored-dev-pg COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=x PGWEB_AUTH_USER=u PGWEB_AUTH_PASS=p \
     sh "$WORK_DIR/scripts/deploy-app.sh" -p bored-dev -f deploy/docker-compose.yml > /dev/null 2>&1
   cat
 })

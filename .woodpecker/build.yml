@@ -316,10 +316,11 @@ steps:
       COMPOSE_PROFILES: &dev-compose-profiles sqltool
     commands:
       - &docker-login echo "$$REGISTRY_PASSWORD" | docker login registry.desync.link -u "$$REGISTRY_USER" --password-stdin
-      # Postgres's data (card #471). `create` is idempotent: an existing
-      # volume is left as it is. (The retired SurrealKV volume, bored-dev-db,
-      # is no longer created: card #489 removed it.)
-      - docker volume create bored-dev-pg
+      # Postgres's data (card #471) is the bored-dev-pg volume, and the
+      # deploy no longer creates it: deploy-app.sh refuses to start on a
+      # missing volume, so a lost one stops the deploy instead of becoming an
+      # empty board (card #537). A genuinely new environment is started with
+      # BORED_ALLOW_EMPTY_DB=1, or with the volume created by hand first.
       # APP_ENV is the literal `dev`, not the branch it used to be: it becomes
       # the `deployment_environment` Loki label, and a per-branch value there
       # started a fresh stream set on every push with no single value meaning
@@ -400,8 +401,8 @@ steps:
       COMPOSE_PROFILES: &prod-compose-profiles sqltool
     commands:
       - *docker-login
-      # Postgres's data (card #471), as on dev.
-      - docker volume create bored-prod-pg
+      # Postgres's data is bored-prod-pg, which must already exist, as on dev
+      # (card #537).
       # `prod`, not `production`: the value is the `deployment_environment` Loki
       # label and matches what the other homelab apps use. No APP_BRANCH — prod
       # is not built from a branch anyone needs to see, and compose's

@@ -273,7 +273,9 @@ services:
       - traefik.http.middlewares.${BORED_CONTAINER_NAME}-sqltool-auth.headers.customrequestheaders.Authorization=Basic ${PGWEB_AUTH_B64}
 
 volumes:
-  # Postgres's data directory, one per environment, created by the deploy.
+  # Postgres's data directory, one per environment. It must already exist:
+  # scripts/deploy-app.sh refuses a missing one rather than start Postgres on
+  # an empty database (card #537).
   bored-pg:
     name: ${PG_VOLUME:?PG_VOLUME is required}
     external: true
