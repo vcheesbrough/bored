@@ -12,12 +12,11 @@
 /// them — in step with the server's clock, but free to jump when the OS
 /// corrects it.
 ///
-/// The exporter's own bookkeeping (token expiry, retry back-off, the launch
-/// buffer's deadline) runs on this. A token's lifetime is wall time — it
-/// expires on the issuer's clock, sleep or no sleep — and the old
-/// `timeOrigin + now()` clock would have kept treating a token as fresh after
-/// the device woke from a long sleep. Spans are *not* stamped with this
-/// directly: see [`super::clock`].
+/// The exporter judges token expiry on this: a token's lifetime is wall time
+/// — it expires on the issuer's clock, sleep or no sleep. Its *waits* (retry
+/// back-off, the launch buffer) run on [`monotonic_nanos`] instead, which a
+/// clock correction cannot stretch (see `runtime::Now`). Spans are *not*
+/// stamped with this directly: see [`super::clock`].
 #[cfg(target_arch = "wasm32")]
 pub fn wall_ms() -> f64 {
     js_sys::Date::now()

@@ -171,11 +171,16 @@ fn enabled_keeps_the_launch_buffer_and_a_later_off_is_honoured() {
 fn the_launch_buffer_is_discarded_if_configuration_never_arrives() {
     test_support::reset();
     start_span("screen home", SpanKind::Internal, None).end();
-    let now = platform::wall_ms();
-    let line = runtime::with_state(|state| state.expire_launch_buffer(now + 1_000.0)).unwrap();
+    let now = runtime::Now::read();
+    // `..now` fills the remaining fields from `now` (struct update syntax).
+    let later = |ms: f64| runtime::Now {
+        monotonic_ms: now.monotonic_ms + ms,
+        ..now
+    };
+    let line = runtime::with_state(|state| state.expire_launch_buffer(later(1_000.0))).unwrap();
     assert_eq!(line, None, "still within the bound");
     let line = runtime::with_state(|state| {
-        state.expire_launch_buffer(now + config::LAUNCH_BUFFER_MS + 1.0)
+        state.expire_launch_buffer(later(config::LAUNCH_BUFFER_MS + 1.0))
     })
     .unwrap();
     assert_eq!(line.as_deref(), Some(NOT_INITIALISED));
@@ -317,7 +322,7 @@ fn a_401_drops_the_batch_and_the_cached_token_once_then_stops() {
         "first failure is reported"
     );
     assert_eq!(
-        test_support::token(0.0),
+        test_support::token(runtime::Now::read()),
         None,
         "token dropped for a refresh"
     );
@@ -498,4 +503,87 @@ fn log_records_are_stamped_with_the_wall_clock() {
     for log in &logs {
         assert_eq!(nanos(log, "timeUnixNano"), 1_700_000_005_000_000_000);
     }
+}
+
+#[test]
+fn a_panic_long_after_its_screen_loaded_is_stamped_at_wall_time() {
+    platform::fake_clock::set(WALL_0, MONO_0);
+    test_support::reset();
+    let screen = start_span("screen board", SpanKind::Internal, None);
+    set_current_screen(screen.context());
+    let screen_ctx = screen.context().unwrap();
+    screen.end();
+
+    // The tab sleeps eight hours on that board (monotonic clock stalled, 1 ms
+    // on), then panics. The screen's context — anchor included — is still
+    // the current screen.
+    platform::fake_clock::set(WALL_0 + 28_800_000_000_000, MONO_0 + 1_000_000);
+    record_panic(None);
+
+    let spans = test_support::drain(Signal::Traces);
+    let panic = named(&spans, "panic");
+    // Still filed under the screen it hit…
+    assert_eq!(panic["parentSpanId"], screen_ctx.span_id.to_hex());
+    // …but at the wall clock's now: 1_700_000_000 s + 28_800 s. On the
+    // screen's stale anchor it would read 1_700_000_000.001 s.
+    assert_eq!(nanos(panic, "startTimeUnixNano"), 1_700_028_800_000_000_000);
+    assert_eq!(nanos(panic, "endTimeUnixNano"), 1_700_028_800_000_000_000);
+    // And its log record, on the wall clock, sits at the same moment.
+    let logs = test_support::drain(Signal::Logs);
+    assert_eq!(nanos(&logs[0], "timeUnixNano"), 1_700_028_800_000_000_000);
+}
+
+#[test]
+fn a_retry_back_off_ignores_the_wall_clock_stepping_back() {
+    use super::runtime::Flush;
+    // Two ways a waiting retry leaves: the export tick, and a hidden-tab
+    // flush. Both must time the back-off on the monotonic clock.
+    type Take = fn() -> Option<usize>;
+    let takers: [(&str, Take); 2] = [
+        ("export tick", || test_support::next(Signal::Traces)),
+        ("hidden-tab flush", || {
+            test_support::unload(Signal::Traces, Flush::Hidden)
+        }),
+    ];
+    for (how, take) in takers {
+        platform::fake_clock::set(WALL_0, MONO_0);
+        test_support::reset();
+        configure(Some(&enabled()));
+        start_span("a", SpanKind::Internal, None).end();
+        // `Retry-After: 5` — wait 5 s (the jitter-free back-off for a first
+        // attempt is 0.5 s, so the server's 5 s is the floor that wins).
+        let _ = test_support::respond_with(Signal::Traces, 503, 1, Some("5"));
+        assert!(test_support::has_retry(Signal::Traces), "{how}");
+
+        // 4.999 s later the wall clock is stepped back an hour (an NTP
+        // correction): not due yet either way.
+        platform::fake_clock::set(WALL_0 - 3_600_000_000_000, MONO_0 + 4_999_000_000);
+        assert_eq!(take(), None, "{how}: not due at 4.999 s");
+
+        // 5.001 s after the 503: due. On the wall clock it would still be an
+        // hour away, and the signal's export would stall that long.
+        platform::fake_clock::set(WALL_0 - 3_599_999_998_000, MONO_0 + 5_001_000_000);
+        assert_eq!(take(), Some(1), "{how}: due at 5.001 s");
+    }
+}
+
+#[test]
+fn a_token_is_judged_on_the_wall_clock_so_sleeping_past_it_expires_it() {
+    platform::fake_clock::set(WALL_0, MONO_0);
+    test_support::reset();
+    // Handed out now, good for 900 s (it is refetched 30 s early).
+    test_support::store_token("t", 900);
+
+    // A minute on by both clocks: still good.
+    platform::fake_clock::set(WALL_0 + 60_000_000_000, MONO_0 + 60_000_000_000);
+    assert_eq!(
+        test_support::token(runtime::Now::read()).as_deref(),
+        Some("t")
+    );
+
+    // The device then sleeps eight hours. The monotonic clock stood still
+    // (1 ms on), but the issuer's clock did not: the token is long dead, and
+    // must be fetched again rather than spent on a guaranteed 401.
+    platform::fake_clock::set(WALL_0 + 28_860_000_000_000, MONO_0 + 60_001_000_000);
+    assert_eq!(test_support::token(runtime::Now::read()), None);
 }

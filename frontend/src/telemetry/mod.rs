@@ -296,7 +296,19 @@ pub struct PanicLocation<'a> {
 /// by the ingest. The location — a compiled-in source path and line — says
 /// where to look; the message stays in the console for whoever reproduces it.
 pub fn record_panic(location: Option<PanicLocation<'_>>) {
-    let screen = runtime::with_state(|state| state.current_screen).flatten();
+    // The screen's ids, but a fresh clock anchor (card #458). The screen's
+    // context is kept long after its load span ended, so its anchor may
+    // predate a device sleep, and a panic stamped on it would land hours in
+    // the past — and outside its own log record, which reads the wall clock.
+    // A zero-length leaf of a span that ended long ago has no "inside its
+    // parent" to protect, so the wall clock's now is the right time for it.
+    // `..screen` copies the remaining fields (the ids) from `screen`.
+    let screen = runtime::with_state(|state| state.current_screen)
+        .flatten()
+        .map(|screen| SpanContext {
+            anchor: ClockAnchor::now(),
+            ..screen
+        });
     let mut span = start_span("panic", SpanKind::Internal, screen);
     span.fail("panic");
     let mut attributes = vec![KeyValue::new(otlp::keys::EXCEPTION_TYPE, "panic")];

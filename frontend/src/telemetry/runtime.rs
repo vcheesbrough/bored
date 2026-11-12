@@ -57,11 +57,47 @@ const OUTBOX_LIMITS: Limits = Limits {
 /// so a request never leaves with a token that dies in flight.
 const TOKEN_MARGIN_MS: f64 = 30_000.0;
 
+/// Both clocks, read together, for one piece of bookkeeping (card #458).
+///
+/// The exporter waits for two different kinds of thing, and each needs its
+/// own clock:
+///
+/// - **How long since** — a retry's back-off, the launch buffer's 30 s. These
+///   are durations, measured on the monotonic clock (`performance.now()`),
+///   which never steps. On the wall clock, a backwards step (an NTP
+///   correction, a laptop's clock fixed on resume) would stretch a 5 s
+///   back-off by the size of the step and stall that signal's export.
+/// - **Is it past** a moment someone else named — a token's expiry. That is
+///   wall time: the issuer's clock keeps running while this device sleeps,
+///   and the monotonic clock may not, so a token judged on it would look
+///   fresh long after it died.
+///
+/// Each [`State`] method takes a `Now` and reads the field it needs, so which
+/// clock a decision uses is fixed in one place rather than by every caller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Now {
+    /// `Date.now()`, milliseconds since the Unix epoch.
+    pub wall_ms: f64,
+    /// `performance.now()`, milliseconds from an arbitrary origin.
+    pub monotonic_ms: f64,
+}
+
+impl Now {
+    pub fn read() -> Self {
+        Self {
+            wall_ms: platform::wall_ms(),
+            // An `f64` holds milliseconds since the document began exactly
+            // enough: well under 2⁵³ for any page's lifetime.
+            monotonic_ms: platform::monotonic_nanos() as f64 / 1_000_000.0,
+        }
+    }
+}
+
 /// Where telemetry stands for the session.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
     /// No configuration yet. Spans and records are buffered (bounded), for at
-    /// most [`config::LAUNCH_BUFFER_MS`] from `since_ms`.
+    /// most [`config::LAUNCH_BUFFER_MS`] from `since_ms` (monotonic clock).
     Pending { since_ms: f64 },
     /// Export to `endpoint`.
     Enabled { endpoint: String },
@@ -75,12 +111,14 @@ struct RetryBatch {
     items: Vec<String>,
     /// The attempt number the *next* send will be.
     attempt: u32,
+    /// When it may be sent, on the monotonic clock (see [`Now`]).
     not_before_ms: f64,
 }
 
 /// The bearer the ingest wants, as last handed out by `/api/telemetry/token`.
 struct CachedToken {
     value: String,
+    /// When to stop using it, on the wall clock (see [`Now`]).
     valid_until_ms: f64,
 }
 
@@ -102,9 +140,11 @@ pub struct State {
 }
 
 impl State {
-    fn new(now_ms: f64) -> Self {
+    fn new(now: Now) -> Self {
         Self {
-            phase: Phase::Pending { since_ms: now_ms },
+            phase: Phase::Pending {
+                since_ms: now.monotonic_ms,
+            },
             spans: Outbox::new(OUTBOX_LIMITS),
             logs: Outbox::new(OUTBOX_LIMITS),
             policy: ExportPolicy::default(),
@@ -204,9 +244,9 @@ impl State {
 
     /// Housekeeping at each tick: give up waiting for configuration once the
     /// launch buffer's time is up. Returns a console line when that happens.
-    pub fn expire_launch_buffer(&mut self, now_ms: f64) -> Option<String> {
+    pub fn expire_launch_buffer(&mut self, now: Now) -> Option<String> {
         if let Phase::Pending { since_ms } = self.phase
-            && now_ms - since_ms >= config::LAUNCH_BUFFER_MS
+            && now.monotonic_ms - since_ms >= config::LAUNCH_BUFFER_MS
         {
             self.phase = Phase::Disabled;
             self.discard_everything();
@@ -224,7 +264,7 @@ impl State {
         attempt: u32,
         verdict: Verdict,
         transition: Option<Transition>,
-        now_ms: f64,
+        now: Now,
     ) -> Option<String> {
         let index = signal_index(signal);
         match verdict {
@@ -233,7 +273,7 @@ impl State {
                 self.retry[index] = Some(RetryBatch {
                     items,
                     attempt: attempt + 1,
-                    not_before_ms: now_ms + f64::from(delay_ms),
+                    not_before_ms: now.monotonic_ms + f64::from(delay_ms),
                 });
             }
             Verdict::Dropped { refresh_token } => {
@@ -288,12 +328,12 @@ impl State {
     fn next_batch(
         &mut self,
         signal: Signal,
-        now_ms: f64,
+        now: Now,
         max_bytes: usize,
     ) -> Option<(Vec<String>, u32)> {
         let index = signal_index(signal);
         if let Some(retry) = &self.retry[index] {
-            if retry.not_before_ms > now_ms {
+            if retry.not_before_ms > now.monotonic_ms {
                 // A retry is waiting and not yet due: send nothing newer
                 // ahead of it, and nothing at all to an ingest that asked us
                 // to back off.
@@ -314,12 +354,12 @@ impl State {
     /// request. A waiting retry goes first whether or not it is due — there is
     /// no later — provided it fits the keepalive budget (it was taken for an
     /// ordinary request, which may be far larger); otherwise fresh items go.
-    fn unload_batch(&mut self, signal: Signal, flush: Flush, now_ms: f64) -> Option<Vec<String>> {
+    fn unload_batch(&mut self, signal: Signal, flush: Flush, now: Now) -> Option<Vec<String>> {
         let index = signal_index(signal);
         let version = self.version;
         if let Some(retry) = &self.retry[index]
             && flush == Flush::Hidden
-            && retry.not_before_ms > now_ms
+            && retry.not_before_ms > now.monotonic_ms
         {
             // A hidden tab may well come back. The ingest asked us to wait
             // (or our own backoff did), so honour it: send nothing for this
@@ -341,12 +381,27 @@ impl State {
         (!items.is_empty()).then_some(items)
     }
 
-    /// The cached token, if it is still good at `now_ms`.
-    fn valid_token(&self, now_ms: f64) -> Option<String> {
+    /// The cached token, if it is still good at `now` — judged on the wall
+    /// clock, `margin_ms` early.
+    fn valid_token(&self, now: Now, margin_ms: f64) -> Option<String> {
         self.token
             .as_ref()
-            .filter(|token| token.valid_until_ms > now_ms)
+            .filter(|token| token.valid_until_ms - margin_ms > now.wall_ms)
             .map(|token| token.value.clone())
+    }
+
+    /// Cache a token the product handed out at `now`, good for
+    /// `expires_in_s` seconds from then.
+    ///
+    /// The lifetime is relative (seconds from the server), so a browser
+    /// clock that is simply *wrong* cannot make us hold a dead token; it is
+    /// anchored to the wall clock, so a device that sleeps past it does not
+    /// either.
+    fn store_token(&mut self, value: String, expires_in_s: u64, now: Now) {
+        self.token = Some(CachedToken {
+            value,
+            valid_until_ms: now.wall_ms + (expires_in_s as f64) * 1_000.0,
+        });
     }
 }
 
@@ -364,7 +419,7 @@ fn signal_index(signal: Signal) -> usize {
 thread_local! {
     // `RefCell` gives checked, run-time borrowing of the one `State`; the
     // `thread_local!` makes it a per-thread global without `unsafe`.
-    static STATE: RefCell<State> = RefCell::new(State::new(platform::wall_ms()));
+    static STATE: RefCell<State> = RefCell::new(State::new(Now::read()));
 }
 
 /// Run `f` against the state, or return `None` if it is already borrowed (see
@@ -396,7 +451,7 @@ pub fn start() {
 
 /// One export pass: at most one batch per signal.
 async fn tick() {
-    let now = platform::wall_ms();
+    let now = Now::read();
     // Decide, under one short borrow, whether there is anything to do.
     let proceed = with_state(|state| {
         warn(state.expire_launch_buffer(now));
@@ -420,7 +475,7 @@ async fn tick() {
     with_state(|state| state.exporting = false);
 }
 
-async fn export_pass(now: f64) {
+async fn export_pass(now: Now) {
     for signal in [Signal::Traces, Signal::Logs] {
         // The token is read per request, not once per pass: a `401` on the
         // traces batch drops the cached token, and the logs batch must then
@@ -456,35 +511,21 @@ async fn export_pass(now: f64) {
                 retry_after.as_deref(),
                 platform::unit_random(),
             );
-            warn(state.apply_verdict(
-                signal,
-                items,
-                attempt,
-                verdict,
-                transition,
-                platform::wall_ms(),
-            ));
+            warn(state.apply_verdict(signal, items, attempt, verdict, transition, Now::read()));
         });
     }
 }
 
 /// The token for this export, fetched from the product when the cached one is
 /// missing or near expiry.
-async fn ensure_token(now: f64) -> Option<String> {
-    if let Some(token) = with_state(|state| state.valid_token(now)).flatten() {
+async fn ensure_token(now: Now) -> Option<String> {
+    if let Some(token) = with_state(|state| state.valid_token(now, TOKEN_MARGIN_MS)).flatten() {
         return Some(token);
     }
     match fetch_token().await {
         Ok(fetched) => {
             let value = fetched.access_token.clone();
-            with_state(|state| {
-                state.token = Some(CachedToken {
-                    value: fetched.access_token,
-                    // Relative lifetime from the server, so a wrong browser
-                    // clock cannot make us hold a dead token.
-                    valid_until_ms: now + (fetched.expires_in as f64) * 1_000.0 - TOKEN_MARGIN_MS,
-                });
-            });
+            with_state(|state| state.store_token(fetched.access_token, fetched.expires_in, now));
             Some(value)
         }
         Err(status) => {
@@ -633,7 +674,7 @@ pub fn flush_now() {
 ///
 /// See [`Flush`] for the two occasions and how they differ.
 pub fn flush(kind: Flush) {
-    let now = platform::wall_ms();
+    let now = Now::read();
     let requests = with_state(|state| {
         let Phase::Enabled { endpoint } = &state.phase else {
             return Vec::new();
@@ -646,7 +687,7 @@ pub fn flush(kind: Flush) {
         // never leaves with a token about to die, but on the way out there is
         // no chance to fetch a fresh one, and a token with seconds left still
         // gets through. Only a genuinely expired token is not sent.
-        let Some(token) = state.valid_token(now - TOKEN_MARGIN_MS) else {
+        let Some(token) = state.valid_token(now, 0.0) else {
             return Vec::new();
         };
         let version = state.version;
@@ -717,7 +758,7 @@ pub mod test_support {
 
     /// Put the state back to "just loaded", as at page start.
     pub fn reset() {
-        STATE.with(|cell| *cell.borrow_mut() = State::new(platform::wall_ms()));
+        STATE.with(|cell| *cell.borrow_mut() = State::new(Now::read()));
     }
 
     /// Take everything buffered for `signal`, decoded back to JSON values.
@@ -743,14 +784,40 @@ pub mod test_support {
 
     /// Drive a verdict through `apply_verdict` as the export loop would.
     pub fn respond(signal: Signal, status: u16, attempt: u32) -> Option<String> {
+        respond_with(signal, status, attempt, None)
+    }
+
+    /// [`respond`] with a `Retry-After` header. The batch is taken whether or
+    /// not it is due; the verdict is recorded at the clocks' current reading.
+    pub fn respond_with(
+        signal: Signal,
+        status: u16,
+        attempt: u32,
+        retry_after: Option<&str>,
+    ) -> Option<String> {
         with_state(|state| {
-            let now = platform::wall_ms();
+            let now = Now::read();
+            let whenever = Now {
+                wall_ms: now.wall_ms + 1e12,
+                monotonic_ms: now.monotonic_ms + 1e12,
+            };
             let items = state
-                .next_batch(signal, now + 1e12, usize::MAX)
+                .next_batch(signal, whenever, usize::MAX)
                 .map(|(items, _)| items)
                 .unwrap_or_default();
-            let (verdict, transition) = state.policy.on_response(status, attempt, None, 0.0);
+            let (verdict, transition) = state.policy.on_response(status, attempt, retry_after, 0.0);
             state.apply_verdict(signal, items, attempt, verdict, transition, now)
+        })
+        .flatten()
+    }
+
+    /// What the export loop would send for `signal` at the clocks' current
+    /// reading: the number of items, or `None` for nothing (or not yet due).
+    pub fn next(signal: Signal) -> Option<usize> {
+        with_state(|state| {
+            state
+                .next_batch(signal, Now::read(), usize::MAX)
+                .map(|(items, _)| items.len())
         })
         .flatten()
     }
@@ -764,8 +831,14 @@ pub mod test_support {
         });
     }
 
-    pub fn token(now_ms: f64) -> Option<String> {
-        with_state(|state| state.valid_token(now_ms)).flatten()
+    /// Cache a token as the export loop does on fetching one now.
+    pub fn store_token(value: &str, expires_in_s: u64) {
+        with_state(|state| state.store_token(value.to_string(), expires_in_s, Now::read()));
+    }
+
+    /// The token an export would use at `now`, or `None` to fetch a new one.
+    pub fn token(now: Now) -> Option<String> {
+        with_state(|state| state.valid_token(now, TOKEN_MARGIN_MS)).flatten()
     }
 
     pub fn has_retry(signal: Signal) -> bool {
@@ -777,7 +850,7 @@ pub mod test_support {
     pub fn unload(signal: Signal, kind: Flush) -> Option<usize> {
         with_state(|state| {
             state
-                .unload_batch(signal, kind, platform::wall_ms())
+                .unload_batch(signal, kind, Now::read())
                 .map(|items| items.len())
         })
         .flatten()
