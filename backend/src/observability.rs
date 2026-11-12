@@ -429,7 +429,7 @@ fn is_http_client_target(target: &str) -> bool {
 /// - **Spans only**: without this the span layer would also record every event
 ///   as a span event while the log bridge turns the same event into a log
 ///   record — one fact, twice (skill §3).
-/// - **This crate only**: dependencies (surrealdb in particular) open spans at
+/// - **This crate only**: dependencies can open spans of their own, some at
 ///   `trace` level on hot paths; exporting those would be noise, and enabling
 ///   them would cost every call.
 /// - **No level**: the product's log-level knob never touches spans. A `warn`
@@ -458,7 +458,7 @@ impl LogLevel {
     }
 }
 
-/// Parse a log-level directive (`info`, `debug,surrealdb=warn`, …). An
+/// Parse a log-level directive (`info`, `debug,sqlx=warn`, …). An
 /// unparseable one is a config typo, not a reason to refuse to start, so it
 /// falls back to `info` — as the pre-#415 module did.
 fn level_filter(directives: &str) -> EnvFilter {
@@ -649,8 +649,8 @@ where
             })
             .unwrap_or_default();
         // The nearest enclosing span the span layer tracks. The innermost one
-        // may be a dependency's (surrealdb opens `debug` spans) that the span
-        // layer filters out and so has no OTel context; the log bridge still
+        // may be a dependency's own span, which the span layer filters out and
+        // so has no OTel context; the log bridge still
         // correlates the event through the product span around it, and the
         // stdout copy must name the same span. Done *after* formatting, so no
         // extensions are borrowed while the span layer takes its lock.

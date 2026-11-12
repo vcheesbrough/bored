@@ -356,7 +356,8 @@ then the one-comment-at-a-time triage loop). Repo parameters for the skill:
 - `OWNER=vcheesbrough`, `REPO=bored`.
 - **Review criteria:** the baseline five — correctness, security / OWASP, test
   coverage of the changed behaviour, versioning, scope. No repo-specific rubric
-  file; `.woodpecker/pr-review-prompt.md` is dead and is **not** to be applied.
+  file (the old SurrealDB-era `.woodpecker/pr-review-prompt.md` was deleted,
+  card #536).
 - **The local review is the only review this repo gets.** The Woodpecker
   remote-review pipeline is disabled (`pr-review.yml.disabled`), so nothing
   reviews a PR here except the `pr-self-review` subagent Part A spawns.
