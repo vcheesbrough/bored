@@ -47,10 +47,10 @@ pub struct AppState {
     /// Private-cookie cryptography, shared OIDC HTTP client, and refresh-token
     /// rotation coordinator. Present exactly when browser OIDC auth is enabled.
     pub auth_sessions: Option<Arc<AuthSessionManager>>,
-    /// Serialises card-link creation. The cycle check reads the board's
-    /// existing links and then writes a new one; two concurrent creates could
-    /// each pass the check against the *old* graph and together close a loop.
-    /// Holding this across check-and-write makes the pair atomic. One lock for
+    /// Serialises card-link creation. The cycle check walks the existing
+    /// links and then writes a new one; two concurrent creates could each
+    /// pass the check against the *old* graph and together close a loop.
+    /// Holding this across check-and-commit makes the pair atomic. One lock for
     /// every board is deliberate — link creation is rare and human-paced, so
     /// per-board locking would be complexity without a measurable win.
     pub link_lock: Arc<Mutex<()>>,

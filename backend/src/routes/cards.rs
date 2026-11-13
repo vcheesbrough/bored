@@ -55,11 +55,17 @@ async fn select_card(
 }
 
 /// One column by id, or `None`; `name` is the call site, for the span.
-async fn select_column(
-    db: &Db,
+///
+/// Generic over the executor: `&Db` (the pool) or an open transaction's
+/// connection (`&mut *tx`) — the card delete reads it on its transaction.
+async fn select_column<'e, E>(
+    db: E,
     col_id: &str,
     name: &'static str,
-) -> Result<Option<DbColumn>, sqlx::Error> {
+) -> Result<Option<DbColumn>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query_as("SELECT * FROM columns WHERE id = $1")
         .bind(col_id)
         .fetch_optional(db)
@@ -514,19 +520,50 @@ pub async fn delete_card(
     Path(card_id): Path<String>,
     claims: Extension<Claims>,
 ) -> Result<StatusCode, ApiError> {
-    let existing = select_card(&state.db, &card_id, "cards.delete_card").await?;
+    // The card is read *and locked* (`FOR UPDATE`) in a transaction that
+    // lasts until its row is deleted below — the same pattern as the column
+    // and board cascades (`cascade::delete_cards`), card #547.
+    //
+    // Why: the card's links are swept (deleted and audited one by one) before
+    // the card goes. Creating a link takes a share lock on both of its cards
+    // (the foreign-key check does), so while this lock is held a link create
+    // aimed at this card waits, and then finds the card gone — a 404. Without
+    // the lock a link could commit after the sweep read the card's links, and
+    // the card's `DELETE` would remove it through `ON DELETE CASCADE` with no
+    // history row and no event.
+    //
+    // A concurrent move or edit of the card also waits, and then finds it
+    // gone. Dropping `tx` on an early return rolls it back, which releases
+    // the lock.
+    let mut tx = state.db.begin().await?;
+    let existing: Option<DbCard> = sqlx::query_as("SELECT * FROM cards WHERE id = $1 FOR UPDATE")
+        .bind(&card_id)
+        .fetch_optional(&mut *tx)
+        .traced(DbQuery::new(
+            "cards.delete_card",
+            DbOperation::Select,
+            "cards",
+        ))
+        .await?;
 
     let existing = match existing {
         Some(e) => e,
         None => return Err(ApiError::NotFound),
     };
 
-    // Best effort, as before: a failed lookup leaves the board unknown rather
-    // than failing the delete.
-    let board_id = select_column(&state.db, &existing.column_id, "cards.delete_card")
-        .await
-        .ok()
-        .flatten()
+    // Every statement from here to the commit runs on `tx`, the one
+    // connection that holds the card's lock (PR #101 review). Taking more
+    // connections from the pool while holding this one would let enough
+    // concurrent deletes hold every pooled connection and each wait for
+    // another — nothing would move until the acquire timeout failed them all.
+    //
+    // On a transaction a failed statement aborts everything after it, so the
+    // board lookup is no longer "best effort": an error fails the delete
+    // (and rolls it back). `None` cannot happen — the column is `ON DELETE
+    // RESTRICT` and the card is locked — but would leave the board unknown,
+    // as before.
+    let board_id = select_column(&mut *tx, &existing.column_id, "cards.delete_card")
+        .await?
         .map(|c| c.board_id)
         .unwrap_or_default();
 
@@ -535,12 +572,14 @@ pub async fn delete_card(
     // delete rows precede the card delete row in history. They share no batch
     // group: restoring the card would not bring its links back (another link
     // could have closed a loop meanwhile), so there is nothing to replay.
-    crate::routes::links::cascade_delete_card_links(&state, &claims, &card_id, None).await?;
+    // The removals are announced only after the commit below.
+    let link_removals = crate::routes::links::sweep_card_links(&mut tx, &claims, &card_id).await?;
 
+    // The card's history row is written on the transaction too, so it
+    // commits with the delete and is broadcast after it.
     let snapshot_before = serde_json::to_value(existing.clone().into_api())?;
-    audit::record_and_broadcast(
-        &state.db,
-        &state.events,
+    let entry = audit::insert(
+        &mut *tx,
         audit::AuditRecord {
             claims: &claims,
             board_id: board_id.clone(),
@@ -556,36 +595,38 @@ pub async fn delete_card(
     )
     .await?;
 
+    // Inside the transaction that holds the lock, so no other write to this
+    // card can land between the link sweep above and this delete.
     let deleted: Option<DbCard> = sqlx::query_as("DELETE FROM cards WHERE id = $1 RETURNING *")
         .bind(&card_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .traced(DbQuery::new(
             "cards.delete_card",
             DbOperation::Delete,
             "cards",
         ))
         .await?;
-    match deleted {
-        Some(deleted) => {
-            // Look up the column to find the board ID for the SSE event.
-            // Fall back to an empty string if it's gone — SSE delivery is
-            // best-effort and no connected client will be scoped to a
-            // non-existent board anyway.
-            let board_id = select_column(&state.db, &deleted.column_id, "cards.delete_card")
-                .await
-                .unwrap_or(None)
-                .map(|c| c.board_id)
-                .unwrap_or_default();
-            let _ = state.events.send(BroadcastEvent {
-                board_id,
-                event: BoardEvent::CardDeleted {
-                    card_id: card_id.clone(),
-                },
-            });
-            Ok(StatusCode::NO_CONTENT)
-        }
-        None => Err(ApiError::NotFound),
+    // The row is locked by this transaction, so it must still be there.
+    if deleted.is_none() {
+        return Err(ApiError::internal("locked card vanished before its delete"));
     }
+
+    // Commit before announcing, so no tab hears of a delete that could still
+    // roll back. Then announce in history order: each link removal, the
+    // card's history row, and the card's removal itself. The card was locked
+    // throughout, so it never left `board_id`'s column.
+    tx.commit().await?;
+    for removal in link_removals {
+        crate::routes::links::announce_link_removal(&state, removal);
+    }
+    audit::broadcast_appended(&state.events, entry);
+    let _ = state.events.send(BroadcastEvent {
+        board_id,
+        event: BoardEvent::CardDeleted {
+            card_id: card_id.clone(),
+        },
+    });
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `PUT /api/cards/:id/move` — move a card to a position in a column.
