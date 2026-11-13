@@ -1427,17 +1427,114 @@ async fn a_card_delete_with_links_needs_only_one_connection() {
     }
     assert!(board_links(&server, &near).await.is_empty());
     assert!(board_links(&server, &far).await.is_empty());
-    // And announced after the commit: the local link once, the crossing link
-    // on both boards (history row, then removal, per link).
+    // And announced after the commit, in history order (PR #101 review): the
+    // local link once, the crossing link on both boards (history row, then
+    // removal, per link), then the card's own history row, then the card's
+    // removal — the order the comment in `cards::delete_card` promises. A
+    // live history panel depends on that card history event.
+    let n = |kind: &str| (kind.to_string(), near.id.clone());
+    let f = |kind: &str| (kind.to_string(), far.id.clone());
     assert_eq!(
-        drain_link_events(&mut rx),
+        drain_delete_events(&mut rx),
         vec![
-            ("history:delete".to_string(), near.id.clone()),
-            ("deleted".to_string(), near.id.clone()),
-            ("history:delete".to_string(), near.id.clone()),
-            ("history:delete".to_string(), far.id.clone()),
-            ("deleted".to_string(), near.id.clone()),
-            ("deleted".to_string(), far.id.clone()),
+            n("history:card_link:delete"),
+            n("link-deleted"),
+            n("history:card_link:delete"),
+            f("history:card_link:delete"),
+            n("link-deleted"),
+            f("link-deleted"),
+            n("history:card:delete"),
+            n("card-deleted"),
         ]
     );
+}
+
+/// Every event waiting in `rx` that a delete sends — history rows of any
+/// entity, link removals and card removals — as `(kind, board id)`, in the
+/// order sent. Unlike [`drain_link_events`] this keeps the card's own
+/// events, so a test can check where they fall relative to the links'.
+fn drain_delete_events(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::events::BroadcastEvent>,
+) -> Vec<(String, String)> {
+    use crate::events::BoardEvent;
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut seen = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => {
+                let kind = match &msg.event {
+                    BoardEvent::AuditAppended { entry } => {
+                        format!("history:{}:{}", entry.entity_type, entry.action)
+                    }
+                    BoardEvent::CardLinkDeleted { .. } => "link-deleted".to_string(),
+                    BoardEvent::CardDeleted { .. } => "card-deleted".to_string(),
+                    _ => continue,
+                };
+                seen.push((kind, msg.board_id));
+            }
+            Err(TryRecvError::Empty) => return seen,
+            Err(other) => panic!("broadcast channel: {other}"),
+        }
+    }
+}
+
+/// PR #101 review: a card delete's link sweep runs on the delete's own
+/// transaction, so a failure part-way through it takes back the removals
+/// already made in the same sweep, along with the card. With two links on
+/// the card — the first (same-board, oldest, so swept first) removable, the
+/// second (cross-board) refused on the far board — the delete fails and
+/// **both** links are still there, with no history row and no event for
+/// either.
+#[tokio::test]
+async fn a_failed_card_delete_keeps_every_link_it_had_swept() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, b, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    // Created first, so the sweep (oldest first) removes it first; its only
+    // history row is on `near`, which the trigger does not refuse.
+    let local: shared::CardLink = link_after(&server, &a, &b, None).await.json();
+    let crossing: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+    refuse_link_history_on(&db, &far.id).await;
+    drain_delete_events(&mut rx);
+
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The card and both links are untouched.
+    server
+        .get(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status_ok();
+    assert_eq!(
+        board_links(&server, &near).await,
+        vec![local.clone(), crossing.clone()]
+    );
+    assert_eq!(
+        board_link_actions(&server, &near, &local.id).await,
+        vec!["create"],
+        "the swept link's removal rolled back with the card"
+    );
+    assert_eq!(
+        board_link_actions(&server, &near, &crossing.id).await,
+        vec!["create"]
+    );
+    assert_eq!(
+        drain_delete_events(&mut rx),
+        vec![],
+        "no events for a rollback"
+    );
+
+    // Liveness: with the refusal off, the same delete goes through.
+    set_refusal(&db, false).await;
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert!(board_links(&server, &near).await.is_empty());
 }
