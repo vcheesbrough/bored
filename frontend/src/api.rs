@@ -47,7 +47,11 @@ pub struct ApiError {
     error: gloo_net::Error,
     status: Option<u16>,
     error_type: &'static str,
-    trace: Option<SpanContext>,
+    /// Boxed to keep `Result<_, ApiError>` small: every API call returns one,
+    /// and clippy's `result_large_err` holds an error to 128 bytes. The
+    /// context grew a clock anchor (card #458), which tipped this struct over;
+    /// a `Box` is one pointer, and is only allocated when a call has failed.
+    trace: Option<Box<SpanContext>>,
 }
 
 impl ApiError {
@@ -83,7 +87,9 @@ impl telemetry::Reportable for ApiError {
     }
 
     fn trace(&self) -> Option<SpanContext> {
-        self.trace
+        // `as_deref` turns `&Option<Box<T>>` into `Option<&T>`; `copied`
+        // makes the `&SpanContext` an owned copy (it is `Copy`).
+        self.trace.as_deref().copied()
     }
 }
 
@@ -178,7 +184,7 @@ where
             error,
             status,
             error_type,
-            trace: span.context(),
+            trace: span.context().map(Box::new),
         }
     };
 
@@ -619,7 +625,7 @@ impl From<ApiError> for LinkApiError {
         Self {
             status: 0,
             message: format!("request failed: {e}"),
-            trace: e.trace,
+            trace: e.trace.as_deref().copied(),
         }
     }
 }

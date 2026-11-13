@@ -829,3 +829,712 @@ async fn links_for_an_unknown_board_are_404() {
         .await
         .assert_status(StatusCode::NOT_FOUND);
 }
+
+// ── Link write robustness (iteration 81 — card #547) ────────────────────────
+
+/// The loop check is a recursive query over `card_links` now
+/// (`links::successor_reaches_predecessor`). This checks it against a graph
+/// written straight to the database, with every expected answer worked out
+/// by hand from the drawing below — not computed by either implementation.
+/// The browser's in-memory check (`shared::links::would_create_cycle`) is
+/// held to the same hand-written answers, so the two cannot drift apart
+/// without one of them failing here.
+///
+/// ```text
+///   a → b → c → d        f → g        x ⇄ y   (a loop, written past the check)
+///   a → e ─────↗                      z       (no links at all)
+/// ```
+///
+/// Adding `P → S` closes a loop exactly when `S` can already reach `P`.
+#[tokio::test]
+async fn the_loop_check_query_matches_hand_worked_answers() {
+    let db = db::connect_test().await.expect("test db");
+    let mut statements = vec![
+        "INSERT INTO boards (id, name) VALUES ('b1', 'b1')".to_string(),
+        "INSERT INTO columns (id, board_id, name, position) VALUES ('c1', 'b1', 'c', 0)"
+            .to_string(),
+    ];
+    for (position, card) in ["a", "b", "c", "d", "e", "f", "g", "x", "y", "z"]
+        .iter()
+        .enumerate()
+    {
+        statements.push(format!(
+            "INSERT INTO cards (id, column_id, body, position) VALUES ('{card}', 'c1', '{card}', {position})"
+        ));
+    }
+    let edges = [
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "d"),
+        ("a", "e"),
+        ("e", "d"),
+        ("f", "g"),
+        // A loop the routes would never write. It is here to prove the query
+        // still finishes (and answers correctly) if one ever exists.
+        ("x", "y"),
+        ("y", "x"),
+    ];
+    for (n, (from, to)) in edges.iter().enumerate() {
+        statements.push(format!(
+            "INSERT INTO card_links (id, predecessor_id, successor_id) VALUES ('l{n}', '{from}', '{to}')"
+        ));
+    }
+    for statement in &statements {
+        sqlx::query(sqlx::AssertSqlSafe(statement.clone()))
+            .execute(&db)
+            .await
+            .expect(statement);
+    }
+
+    // (predecessor, successor, would the new link close a loop?)
+    let cases = [
+        // d is reached from a along both branches.
+        ("d", "a", true),
+        // c is reached from a through b.
+        ("c", "a", true),
+        // e → d exists, so d → e closes a two-step loop.
+        ("d", "e", true),
+        // Same direction as the chain: nothing points back to a.
+        ("a", "d", false),
+        // b's branch never meets e's: b → c → d only.
+        ("e", "b", false),
+        // A different component, in either direction.
+        ("g", "a", false),
+        ("a", "f", false),
+        // Inside the small component.
+        ("g", "f", true),
+        ("f", "g", false),
+        // Starting inside the existing loop: it must terminate, and b is not
+        // reachable from it.
+        ("b", "x", false),
+        ("y", "x", true),
+        // A card with no links reaches nothing but itself.
+        ("a", "z", false),
+        // The trivial loop: a card is reachable from itself.
+        ("a", "a", true),
+    ];
+    for (predecessor, successor, expected) in cases {
+        let from_query =
+            crate::routes::links::successor_reaches_predecessor(&db, predecessor, successor)
+                .await
+                .expect("loop check query");
+        assert_eq!(
+            from_query, expected,
+            "query: adding {predecessor} → {successor}"
+        );
+        let in_memory = shared::links::would_create_cycle(edges, predecessor, successor);
+        assert_eq!(
+            in_memory, expected,
+            "shared: adding {predecessor} → {successor}"
+        );
+    }
+}
+
+/// Make every `card_link` history row for `board_id` fail to insert, by a
+/// trigger on `audit_log` — a stand-in for any failure between a link's first
+/// and second history row. `ALTER TABLE … DISABLE TRIGGER` switches it off.
+async fn refuse_link_history_on(db: &crate::db::Db, board_id: &str) {
+    // `board_id` is a server-made ULID (`[0-9a-z]` only), so formatting it in
+    // is safe.
+    assert!(board_id.chars().all(|c| c.is_ascii_alphanumeric()));
+    let function = format!(
+        "CREATE FUNCTION test_refuse_link_history() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.board_id = '{board_id}' AND NEW.entity_type = 'card_link' THEN \
+             RAISE EXCEPTION 'refused by test'; \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(function))
+        .execute(db)
+        .await
+        .expect("create trigger function");
+    sqlx::query(
+        "CREATE TRIGGER test_refuse_link_history BEFORE INSERT ON audit_log \
+         FOR EACH ROW EXECUTE FUNCTION test_refuse_link_history()",
+    )
+    .execute(db)
+    .await
+    .expect("create trigger");
+}
+
+async fn set_refusal(db: &crate::db::Db, on: bool) {
+    let statement = if on {
+        "ALTER TABLE audit_log ENABLE TRIGGER test_refuse_link_history"
+    } else {
+        "ALTER TABLE audit_log DISABLE TRIGGER test_refuse_link_history"
+    };
+    sqlx::query(statement)
+        .execute(db)
+        .await
+        .expect("toggle trigger");
+}
+
+/// Every event waiting in `rx` that is about a link — link events and the
+/// history rows for links — as `(kind, board id)`. Other events are skipped.
+fn drain_link_events(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::events::BroadcastEvent>,
+) -> Vec<(String, String)> {
+    use crate::events::BoardEvent;
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut seen = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => {
+                let kind = match &msg.event {
+                    BoardEvent::CardLinkCreated { .. } => "created".to_string(),
+                    BoardEvent::CardLinkUpdated { .. } => "updated".to_string(),
+                    BoardEvent::CardLinkDeleted { .. } => "deleted".to_string(),
+                    BoardEvent::AuditAppended { entry } if entry.entity_type == "card_link" => {
+                        format!("history:{}", entry.action)
+                    }
+                    _ => continue,
+                };
+                seen.push((kind, msg.board_id));
+            }
+            Err(TryRecvError::Empty) => return seen,
+            Err(other) => panic!("broadcast channel: {other}"),
+        }
+    }
+}
+
+/// Item 1 of card #547. A cross-board link has a history row on each board;
+/// when the second board's row cannot be written, the whole change must not
+/// happen — no link row change, no history row on the first board, and no
+/// event to either board. Checked for create, reason change, delete, and the
+/// link sweep of a card delete.
+#[tokio::test]
+async fn a_cross_board_link_change_is_all_or_nothing() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+
+    let (near, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let f = &far_cards[0];
+    // A link from `near` to `far` lists `near` first (`DbCardLink::boards`),
+    // so with `far` refused the near board's row is written first and the
+    // far board's fails — the half-way failure the card is about.
+    refuse_link_history_on(&db, &far.id).await;
+    drain_link_events(&mut rx);
+
+    let link_count = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM card_links")
+            .fetch_one(&db)
+            .await
+            .unwrap()
+    };
+
+    // ── create ──
+    link_after(&server, &a, f, Some("why"))
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(link_count().await, 0, "the link row was rolled back");
+    let near_history: Vec<shared::AuditLogEntry> = server
+        .get(&format!("/api/boards/{}/history", near.name))
+        .await
+        .json();
+    assert!(
+        near_history.iter().all(|e| e.entity_type != "card_link"),
+        "no history row on the near board for a create that did not happen"
+    );
+    assert_eq!(
+        drain_link_events(&mut rx),
+        vec![],
+        "no events for a rollback"
+    );
+
+    // Now make one for real, to fail the other writes against.
+    set_refusal(&db, false).await;
+    let link: shared::CardLink = link_after(&server, &a, f, Some("why")).await.json();
+    set_refusal(&db, true).await;
+    drain_link_events(&mut rx);
+
+    // ── reason change ──
+    server
+        .put(&format!("/api/links/{}", link.id))
+        .json(&shared::UpdateCardLinkRequest {
+            reason: Some("because".to_string()),
+        })
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    // ── explicit delete ──
+    server
+        .delete(&format!("/api/links/{}", link.id))
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    // ── a card delete, whose link sweep hits the same failure ──
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Nothing changed on either board: the link is still there with its old
+    // reason, the card is still there, and each board's history holds only
+    // the create.
+    assert_eq!(board_links(&server, &near).await, vec![link.clone()]);
+    assert_eq!(board_links(&server, &far).await, vec![link.clone()]);
+    server
+        .get(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status_ok();
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &link.id).await,
+            vec!["create"],
+            "history of {}",
+            board.name
+        );
+    }
+    let near_history: Vec<shared::AuditLogEntry> = server
+        .get(&format!("/api/boards/{}/history", near.name))
+        .await
+        .json();
+    assert!(
+        !near_history
+            .iter()
+            .any(|e| e.entity_type == "card" && e.action == "delete"),
+        "the card delete rolled back before writing its own row"
+    );
+    assert_eq!(
+        drain_link_events(&mut rx),
+        vec![],
+        "no events for a rollback"
+    );
+
+    // Liveness: with the failure gone, the same writes go through and both
+    // boards hear about each one.
+    set_refusal(&db, false).await;
+    server
+        .delete(&format!("/api/links/{}", link.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let both = |kind: &str| {
+        vec![
+            (kind.to_string(), near.id.clone()),
+            (kind.to_string(), far.id.clone()),
+        ]
+    };
+    let mut expected = both("history:delete");
+    expected.extend(both("deleted"));
+    assert_eq!(drain_link_events(&mut rx), expected);
+}
+
+/// How many sessions on this test's database are waiting for a lock. Asked
+/// on its own connection, one statement per transaction: inside a longer
+/// transaction Postgres would keep answering from its first snapshot of
+/// `pg_stat_activity`.
+async fn lock_waiters(watch: &mut sqlx::PgConnection) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    )
+    .fetch_one(watch)
+    .await
+    .expect("read pg_stat_activity")
+}
+
+/// Item 3 of card #547. A link created while a card's delete is sweeping its
+/// links must not be removed later by the card row's `ON DELETE CASCADE`,
+/// which writes no history and sends no event. The card delete now holds the
+/// card's row lock for the whole delete, so such a create waits and then
+/// finds the card gone: a 404, with nothing to record.
+///
+/// The interleaving is forced, not hoped for: this test holds a row lock on
+/// the card's one existing link, so the delete stops part-way through its
+/// sweep. Only then is the create sent, and only once it has either finished
+/// or is itself waiting on a lock is the sweep let go.
+#[tokio::test]
+async fn a_link_created_during_a_card_delete_is_not_lost_silently() {
+    use sqlx::{ConnectOptions as _, Connection as _};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (board, _, [x, w, y]) = setup_three_cards(&server).await;
+    // X's one link, which the delete's sweep will stop on.
+    let existing: shared::CardLink = link_after(&server, &x, &w, None).await.json();
+
+    // Two connections of the test's own, outside the app's three-connection
+    // pool: one holds the lock, one watches who is waiting.
+    let options = (*db.connect_options()).clone();
+    let mut holder = options.connect().await.expect("lock connection");
+    let mut watch = options.connect().await.expect("watch connection");
+    let mut hold = holder.begin().await.expect("begin");
+    sqlx::query("SELECT 1 FROM card_links WHERE id = $1 FOR UPDATE")
+        .bind(&existing.id)
+        .execute(&mut *hold)
+        .await
+        .expect("lock the existing link");
+
+    let delete_path = format!("/api/cards/{}", x.id);
+    let delete = std::future::IntoFuture::into_future(server.delete(&delete_path));
+    let delete_is_blocked = tokio::sync::Notify::new();
+    let create_finished = AtomicBool::new(false);
+
+    let create = async {
+        delete_is_blocked.notified().await;
+        let response = link_after(&server, &x, &y, None).await;
+        create_finished.store(true, Ordering::SeqCst);
+        response
+    };
+    let release = async {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // 1. The delete is stuck on our lock, part-way through its sweep.
+        while lock_waiters(&mut watch).await < 1 {
+            assert!(Instant::now() < deadline, "the delete never blocked");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // `notify_one` stores a permit if `create` is not waiting yet, so
+        // the wake-up cannot be missed.
+        delete_is_blocked.notify_one();
+        // 2. The create has either gone through (the bug) or is queued behind
+        //    the card's lock (the fix). The deadline is a backstop only.
+        while !create_finished.load(Ordering::SeqCst)
+            && lock_waiters(&mut watch).await < 2
+            && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // 3. Let the sweep finish.
+        hold.rollback().await.expect("release the lock");
+    };
+    let (delete_response, create_response, ()) = tokio::join!(delete, create, release);
+
+    delete_response.assert_status(StatusCode::NO_CONTENT);
+    // The create lost the race to a card that was being deleted.
+    create_response.assert_status(StatusCode::NOT_FOUND);
+
+    // Independent of the responses: no link anywhere vanished without a
+    // record. Every link with a `create` row in the board's history has a
+    // `delete` row too (none survive — X is gone and every link touched it).
+    let history: Vec<shared::AuditLogEntry> = server
+        .get(&format!("/api/boards/{}/history", board.name))
+        .await
+        .json();
+    let actions_for = |id: &str| -> Vec<&str> {
+        history
+            .iter()
+            .filter(|e| e.entity_type == "card_link" && e.entity_id == id)
+            .map(|e| e.action.as_str())
+            .collect()
+    };
+    let created: std::collections::BTreeSet<&str> = history
+        .iter()
+        .filter(|e| e.entity_type == "card_link" && e.action == "create")
+        .map(|e| e.entity_id.as_str())
+        .collect();
+    assert_eq!(
+        created.into_iter().collect::<Vec<_>>(),
+        vec![existing.id.as_str()],
+        "only the pre-existing link was ever created"
+    );
+    assert_eq!(actions_for(&existing.id), vec!["delete", "create"]);
+    let links_left: i64 = sqlx::query_scalar("SELECT count(*) FROM card_links")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(links_left, 0);
+
+    // Liveness: the app still links the surviving cards.
+    link_after(&server, &w, &y, None)
+        .await
+        .assert_status(StatusCode::CREATED);
+}
+
+/// Hold a row lock on link `link_id` from a connection of the test's own
+/// (outside the app's pool), run `requests` — which must each end up waiting
+/// on that lock — until `waiters` sessions are blocked, then let them go.
+/// Returns what the requests returned. Used to force two removals of one
+/// link to meet at its row, rather than hoping they do.
+async fn race_on_link_row<F, T>(db: &crate::db::Db, link_id: &str, waiters: i64, requests: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    use sqlx::{ConnectOptions as _, Connection as _};
+    use std::time::{Duration, Instant};
+
+    let options = (*db.connect_options()).clone();
+    let mut holder = options.connect().await.expect("lock connection");
+    let mut watch = options.connect().await.expect("watch connection");
+    let mut hold = holder.begin().await.expect("begin");
+    sqlx::query("SELECT 1 FROM card_links WHERE id = $1 FOR UPDATE")
+        .bind(link_id)
+        .execute(&mut *hold)
+        .await
+        .expect("lock the link");
+
+    let release = async {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lock_waiters(&mut watch).await < waiters {
+            assert!(
+                Instant::now() < deadline,
+                "the requests never all blocked on the link"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        hold.rollback().await.expect("release the lock");
+    };
+    let (out, ()) = tokio::join!(requests, release);
+    out
+}
+
+/// PR #101 review: two explicit deletes of the same cross-board link that
+/// meet at its row. Exactly one removes it (204) and records it — one
+/// `delete` history row and one event pair per board; the other finds it
+/// gone and answers 404, writing nothing.
+#[tokio::test]
+async fn racing_deletes_of_one_link_record_it_once() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+    drain_link_events(&mut rx);
+
+    let path = format!("/api/links/{}", link.id);
+    let (first, second) = race_on_link_row(&db, &link.id, 2, async {
+        tokio::join!(
+            std::future::IntoFuture::into_future(server.delete(&path)),
+            std::future::IntoFuture::into_future(server.delete(&path)),
+        )
+    })
+    .await;
+
+    // One of each, in either order.
+    let mut statuses = vec![first.status_code(), second.status_code()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        vec![StatusCode::NO_CONTENT, StatusCode::NOT_FOUND]
+    );
+
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &link.id).await,
+            vec!["delete", "create"],
+            "history of {}",
+            board.name
+        );
+    }
+    let mut expected = vec![
+        ("history:delete".to_string(), near.id.clone()),
+        ("history:delete".to_string(), far.id.clone()),
+        ("deleted".to_string(), near.id.clone()),
+        ("deleted".to_string(), far.id.clone()),
+    ];
+    let mut seen = drain_link_events(&mut rx);
+    // The order *within* the one removal is fixed, but compare as sets so
+    // the assertion is about "once", not about scheduling.
+    expected.sort();
+    seen.sort();
+    assert_eq!(seen, expected);
+
+    // Liveness: the same two cards can be linked again.
+    link_after(&server, &a, &far_cards[0], None)
+        .await
+        .assert_status(StatusCode::CREATED);
+}
+
+/// PR #101 review: an explicit delete of a link racing the link sweep of a
+/// delete of one of its cards. The card delete succeeds whichever wins; the
+/// explicit delete is 204 if it won and 404 if the sweep did. Either way the
+/// removal is recorded exactly once on each board.
+#[tokio::test]
+async fn an_explicit_delete_racing_a_card_delete_records_the_link_once() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, _, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let link: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+
+    let link_path = format!("/api/links/{}", link.id);
+    let card_path = format!("/api/cards/{}", a.id);
+    let (explicit, card_delete) = race_on_link_row(&db, &link.id, 2, async {
+        tokio::join!(
+            std::future::IntoFuture::into_future(server.delete(&link_path)),
+            std::future::IntoFuture::into_future(server.delete(&card_path)),
+        )
+    })
+    .await;
+
+    card_delete.assert_status(StatusCode::NO_CONTENT);
+    assert!(
+        [StatusCode::NO_CONTENT, StatusCode::NOT_FOUND].contains(&explicit.status_code()),
+        "explicit delete answered {}",
+        explicit.status_code()
+    );
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &link.id).await,
+            vec!["delete", "create"],
+            "history of {}",
+            board.name
+        );
+    }
+}
+
+/// PR #101 review: `DELETE /api/cards/:id` holds the card's row lock on one
+/// pooled connection for the whole delete, so it must not need a second
+/// connection while it holds it — or enough concurrent deletes would hold
+/// every connection and each wait for another. With a pool of exactly one
+/// connection, a delete that needed two would wait for itself until the
+/// acquire timeout; here it must simply succeed, links and history included.
+#[tokio::test]
+async fn a_card_delete_with_links_needs_only_one_connection() {
+    let db = db::connect_test().await.expect("test db");
+    // The same database, through a pool that can never lend a second
+    // connection.
+    let single = crate::db::pool_options(1).connect_lazy_with((*db.connect_options()).clone());
+    let state = AppState::new(single);
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, b, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    let local: shared::CardLink = link_after(&server, &a, &b, None).await.json();
+    let crossing: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+    drain_link_events(&mut rx);
+
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    // Both links went, each recorded on every board it touched.
+    assert_eq!(
+        board_link_actions(&server, &near, &local.id).await,
+        vec!["delete", "create"]
+    );
+    for board in [&near, &far] {
+        assert_eq!(
+            board_link_actions(&server, board, &crossing.id).await,
+            vec!["delete", "create"],
+            "history of {}",
+            board.name
+        );
+    }
+    assert!(board_links(&server, &near).await.is_empty());
+    assert!(board_links(&server, &far).await.is_empty());
+    // And announced after the commit, in history order (PR #101 review): the
+    // local link once, the crossing link on both boards (history row, then
+    // removal, per link), then the card's own history row, then the card's
+    // removal — the order the comment in `cards::delete_card` promises. A
+    // live history panel depends on that card history event.
+    let n = |kind: &str| (kind.to_string(), near.id.clone());
+    let f = |kind: &str| (kind.to_string(), far.id.clone());
+    assert_eq!(
+        drain_delete_events(&mut rx),
+        vec![
+            n("history:card_link:delete"),
+            n("link-deleted"),
+            n("history:card_link:delete"),
+            f("history:card_link:delete"),
+            n("link-deleted"),
+            f("link-deleted"),
+            n("history:card:delete"),
+            n("card-deleted"),
+        ]
+    );
+}
+
+/// Every event waiting in `rx` that a delete sends — history rows of any
+/// entity, link removals and card removals — as `(kind, board id)`, in the
+/// order sent. Unlike [`drain_link_events`] this keeps the card's own
+/// events, so a test can check where they fall relative to the links'.
+fn drain_delete_events(
+    rx: &mut tokio::sync::broadcast::Receiver<crate::events::BroadcastEvent>,
+) -> Vec<(String, String)> {
+    use crate::events::BoardEvent;
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut seen = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => {
+                let kind = match &msg.event {
+                    BoardEvent::AuditAppended { entry } => {
+                        format!("history:{}:{}", entry.entity_type, entry.action)
+                    }
+                    BoardEvent::CardLinkDeleted { .. } => "link-deleted".to_string(),
+                    BoardEvent::CardDeleted { .. } => "card-deleted".to_string(),
+                    _ => continue,
+                };
+                seen.push((kind, msg.board_id));
+            }
+            Err(TryRecvError::Empty) => return seen,
+            Err(other) => panic!("broadcast channel: {other}"),
+        }
+    }
+}
+
+/// PR #101 review: a card delete's link sweep runs on the delete's own
+/// transaction, so a failure part-way through it takes back the removals
+/// already made in the same sweep, along with the card. With two links on
+/// the card — the first (same-board, oldest, so swept first) removable, the
+/// second (cross-board) refused on the far board — the delete fails and
+/// **both** links are still there, with no history row and no event for
+/// either.
+#[tokio::test]
+async fn a_failed_card_delete_keeps_every_link_it_had_swept() {
+    let db = db::connect_test().await.expect("test db");
+    let state = AppState::new(db.clone());
+    let mut rx = state.events.subscribe();
+    let server =
+        TestServer::new(app(state, "./dist", DeploymentInfo::new("dev", None)).await).unwrap();
+    let (near, _, [a, b, _]) = setup_three_cards(&server).await;
+    let (far, far_cards) = setup_other_board(&server, "far-board", &["# F"]).await;
+    // Created first, so the sweep (oldest first) removes it first; its only
+    // history row is on `near`, which the trigger does not refuse.
+    let local: shared::CardLink = link_after(&server, &a, &b, None).await.json();
+    let crossing: shared::CardLink = link_after(&server, &a, &far_cards[0], None).await.json();
+    refuse_link_history_on(&db, &far.id).await;
+    drain_delete_events(&mut rx);
+
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The card and both links are untouched.
+    server
+        .get(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status_ok();
+    assert_eq!(
+        board_links(&server, &near).await,
+        vec![local.clone(), crossing.clone()]
+    );
+    assert_eq!(
+        board_link_actions(&server, &near, &local.id).await,
+        vec!["create"],
+        "the swept link's removal rolled back with the card"
+    );
+    assert_eq!(
+        board_link_actions(&server, &near, &crossing.id).await,
+        vec!["create"]
+    );
+    assert_eq!(
+        drain_delete_events(&mut rx),
+        vec![],
+        "no events for a rollback"
+    );
+
+    // Liveness: with the refusal off, the same delete goes through.
+    set_refusal(&db, false).await;
+    server
+        .delete(&format!("/api/cards/{}", a.id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert!(board_links(&server, &near).await.is_empty());
+}

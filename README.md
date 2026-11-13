@@ -352,6 +352,13 @@ too and stops export, which is the point of the rule. Sessions that began before
 get `403` from the route until the next sign-in. The panic record carries the source location
 only, never the panic message (free text that can quote user content).
 
+**Timestamps.** Spans use an *anchored clock* (card #458): a trace's root span reads `Date.now()`
+and `performance.now()` together, and every span in that trace is stamped wall-clock epoch +
+monotonic duration on that one anchor, so browser spans line up with the server spans they parent
+and children stay inside their parents. Log records are stamped with `Date.now()`. The SPA no longer
+uses `performance.timeOrigin + performance.now()`, which drifts from the wall clock (over a second
+in headless Chromium, and by the whole sleep on a device that slept with the tab open).
+
 **Configuration.** The app tells the SPA where to send in `/api/info`'s `telemetry` block, from
 the optional `client-telemetry` config group; no endpoint (or auth disabled) means the SPA never
 initialises OTLP:

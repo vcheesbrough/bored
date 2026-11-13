@@ -70,7 +70,10 @@ pub fn normalize_reason(raw: Option<&str>) -> Result<Option<String>, ReasonError
 /// by `edges` would close a loop.
 ///
 /// `edges` is every existing `(predecessor_id, successor_id)` pair the caller
-/// knows of — on the server, every link on every board. The new edge creates
+/// knows of — in the browser, the links it has loaded. (The server applies
+/// the same rule with a recursive query instead, so it never loads every
+/// link: `backend::routes::links::successor_reaches_predecessor`, card #547.)
+/// The new edge creates
 /// a cycle exactly when the successor can already reach the predecessor by following existing edges forward — including the
 /// trivial case where the two ids are the same card. The walk is a breadth-first
 /// search from the successor along successor edges; it stops early the moment
