@@ -41,6 +41,7 @@ release-versions plugin's gap-free counter on the `1.N` line (baseline §2, the
 | **Images** | one: `registry.desync.link/bored` |
 | **Deploy targets** | `dev` from any branch, `prod` from `main` only — the plugin's default `environments`, so the setting is not set |
 | **Pipelines** | one file, `.woodpecker/build.yml`: `version` → build → tests → `publish` on push/manual; `resolve` → deploy → `tag` beside smoke on deployment |
+| **Skipped tests** | `e2e` may skip by lane-skip (§1); `publish` still runs after a skip, deliberately — README § Skipping an unchanged e2e |
 
 Never create, move or delete release tags or `refs/builds/*` by hand, and never
 push a second tag of an image (`:commit-<sha>`, `:latest`).
@@ -63,6 +64,40 @@ Run the **`ci-watch`** skill (baseline §4). Skill parameters:
 
 The [`.claude/watch-woodpecker.js`](.claude/watch-woodpecker.js) PostToolUse
 hook automates the polling (set `WOODPECKER_TOKEN` for authenticated logs).
+
+### e2e skips when its files already passed (lane-skip, card #531)
+
+`lane-check` → `e2e` (skip guard first) → `lane-mark-e2e`, from
+[`woodpecker-plugin-lane-skip`](https://github.com/vcheesbrough/woodpecker-plugin-lane-skip)
+0.1.0, pinned by digest once (`&lane-skip-image`). How it decides, and why
+`publish` still runs after a skip: README § Skipping an unchanged e2e.
+
+- **A skipped e2e means nothing it tests changed since a green run:** the step
+  ends green in seconds and its log prints the marker (the commit, branch and
+  pipeline that passed). To force a run — a flake hunt, a suspected stale
+  marker — start a manual pipeline with the variable `FULL_RUN=1`.
+- **The lane config is [`lanes.yml`](lanes.yml) at the repo root**, never
+  `.woodpecker/lanes.yml`: Woodpecker parses every `.yml` there as a workflow,
+  and every lane-skip step sets `config: lanes.yml`.
+- **The key is the build context**, so [`.dockerignore`](.dockerignore) decides
+  what can change without re-running e2e. Exclude only files neither the image
+  nor e2e reads; never exclude source, `e2e/`, `scripts/` or `.woodpecker/` to
+  make a push skip. When the e2e step starts reading a path outside the build
+  context, add it to the lane's `inputs`.
+- **[`scripts/test-lane-skip.sh`](scripts/test-lane-skip.sh)** (step
+  `lane-validation`) holds the wiring — check before e2e, the guard first, mark
+  only after a pass, `publish` after every test step — and the covered-file
+  list against `git ls-files`. Changing what may skip means changing its
+  `MAY_SKIP` list too. Locally, after committing (the plugin reads `HEAD`):
+
+  ```bash
+  IMG=$(sed -n 's/.*&lane-skip-image \(.*\)/\1/p' .woodpecker/build.yml)
+  docker run --rm -v "$PWD:/w" -w /w -e PLUGIN_MODE=files -e PLUGIN_CONFIG=lanes.yml \
+    -e PLUGIN_LANE=app "$IMG" > /tmp/app-lane.txt
+  ./scripts/test-lane-skip.sh /tmp/app-lane.txt     # needs python3 + PyYAML
+  ```
+- Never create or delete `refs/ci/green/*` markers by hand to steer a run;
+  deleting one is safe (it costs a re-run), but `FULL_RUN=1` is the tool.
 
 ### Getting `GITHUB_TOKEN`
 
