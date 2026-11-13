@@ -25,6 +25,8 @@
 
 use serde::{Serialize, Serializer};
 
+use super::clock::ClockAnchor;
+
 /// Attribute keys, kept in one place so no call site types a key as a string
 /// literal. Every key is either an OpenTelemetry semantic-convention name or
 /// carries the product prefix `bored.` (skill §4); the unit test
@@ -194,6 +196,15 @@ impl Serialize for SpanId {
 pub struct SpanContext {
     pub trace_id: TraceId,
     pub span_id: SpanId,
+    /// The clock anchor of the trace this span belongs to, so a child span
+    /// started from this context is timed on the same timeline as its parent
+    /// and lands inside it (card #458; see `telemetry::clock`). Never sent
+    /// anywhere: `traceparent` and the OTLP encoding carry only the ids.
+    ///
+    /// Not an `Option`: every `SpanContext` is a span this page started, so it
+    /// always has one. A span from another process — the server's stream
+    /// span — is never a parent here, only a [`Link`], which has no clock.
+    pub anchor: ClockAnchor,
 }
 
 impl SpanContext {
@@ -209,11 +220,14 @@ impl SpanContext {
 }
 
 /// Read the server's `trace` SSE event — `{"trace_id":"<32 hex>","span_id":"<16
-/// hex>"}`, naming the server's span for this stream — into a context to link
-/// to. `None` for anything malformed: a link is a nicety, never worth an error.
-pub fn parse_stream_trace(data: &str) -> Option<SpanContext> {
+/// hex>"}`, naming the server's span for this stream — into a link to it.
+/// `None` for anything malformed: a link is a nicety, never worth an error.
+///
+/// A [`Link`] rather than a [`SpanContext`]: the server's span can be pointed
+/// at, never parented to, and it has no clock anchor on this page.
+pub fn parse_stream_trace(data: &str) -> Option<Link> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
-    Some(SpanContext {
+    Some(Link {
         trace_id: TraceId::from_hex(value.get("trace_id")?.as_str()?)?,
         span_id: SpanId::from_hex(value.get("span_id")?.as_str()?)?,
     })

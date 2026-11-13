@@ -8,6 +8,7 @@ fn ctx(trace_byte: u8, span_byte: u8) -> SpanContext {
     SpanContext {
         trace_id: TraceId::from_random([trace_byte; 16]),
         span_id: SpanId::from_random([span_byte; 8]),
+        anchor: ClockAnchor::new(0, 0),
     }
 }
 
@@ -51,6 +52,7 @@ fn traceparent_is_version_00_and_always_sampled() {
     let context = SpanContext {
         trace_id: TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap(),
         span_id: SpanId::from_hex("00f067aa0ba902b7").unwrap(),
+        anchor: ClockAnchor::new(0, 0),
     };
     assert_eq!(
         context.traceparent(),
