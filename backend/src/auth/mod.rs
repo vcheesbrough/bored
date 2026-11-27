@@ -43,6 +43,11 @@ pub use jwt::{Claims, JwksCache, validate_jwt};
 pub use middleware::auth_middleware;
 pub use provider::AuthConfig;
 pub use session::AuthSessionManager;
+// The router tests mint a real encrypted session to log out of (card #535),
+// which takes a `TokenSet`. `#[cfg(test)]` keeps the re-export out of the
+// production build, where nothing outside `auth` needs the type.
+#[cfg(test)]
+pub use session::TokenSet;
 
 /// Static cookie name for the persistent session token.
 /// Kept in one place so the login/callback/logout routes and the middleware

@@ -55,7 +55,7 @@ impl DeploymentInfo {
 //
 // Routing layout:
 //   Public (no auth required):
-//     /health, /api/info, /auth/login, /auth/callback, /auth/logout
+//     /health, /api/info, /auth/login, /auth/callback, /auth/logout (GET form, POST)
 //   Protected (auth middleware enforced — `auth` cookie or `Bearer` header):
 //     /api/me, /api/boards/*, /api/columns/*, /api/cards/*, /api/events
 //
@@ -145,7 +145,12 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
     let auth_routes = Router::new()
         .route("/login", get(routes::auth::login))
         .route("/callback", get(routes::auth::callback))
-        .route("/logout", get(routes::auth::logout))
+        // POST does the logout; GET only shows a form that POSTs (card #535).
+        // `get(..).post(..)` mounts two handlers on one path, one per method.
+        .route(
+            "/logout",
+            get(routes::auth::logout_confirm).post(routes::auth::logout),
+        )
         .with_state(state);
 
     // `deployment` is captured into the `/api/info` closure below rather than

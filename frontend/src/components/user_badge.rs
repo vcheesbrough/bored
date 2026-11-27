@@ -1,7 +1,7 @@
 // User identity widget for the navbar.
 //
 // Fetches `GET /api/me` once on mount and renders the username + avatar +
-// logout link. Designed to live inside the existing `<nav class="navbar">`
+// sign-out button. Designed to live inside the existing `<nav class="navbar">`
 // blocks at the right-hand edge.
 //
 // On 401 the underlying API helper triggers a redirect to `/auth/login`, so
@@ -31,7 +31,7 @@ pub fn UserBadge() -> impl IntoView {
     }
 }
 
-/// Renders the avatar + name + logout link for a successfully-fetched user.
+/// Renders the avatar + name + sign-out button for a successfully-fetched user.
 /// Split out into its own component so the gravatar URL computation lives
 /// next to the markup that uses it.
 #[component]
@@ -41,29 +41,31 @@ fn UserDetails(user: shared::UserInfo) -> impl IntoView {
     view! {
         <img class="user-avatar" src=avatar_url alt=name.clone() />
         <span class="user-name">{name}</span>
-        // This link must be a real, full-page navigation: the backend's
-        // /auth/logout route clears the session cookies and redirects to the
-        // IdP's end-session endpoint, and both only happen if the browser
-        // actually sends the request.
+        // Sign-out is a real form POST (card #535), not a link and not an SPA
+        // `fetch`.
         //
-        // A plain anchor is NOT enough here (card #252). leptos_router puts
-        // a click listener on every same-origin `<a>`, cancels the click and
-        // navigates client-side. The SPA has no /auth/logout route, so the
-        // user got the "Not found" view, the server route never ran, and the
-        // session survived. The router's handler steps aside for a link with
-        // `rel="external"` or a `target` (see `handle_anchor_click` in
-        // leptos_router's `location` module). Either alone works; both say
-        // plainly "this is a page load", as the panic banner's Reload link
-        // does. e2e: auth.spec.ts, 'clicking "sign out" reaches the server…'.
-        <a
-            class="user-logout"
-            href="/auth/logout"
-            rel="external"
-            target="_self"
-            title="Sign out"
-        >
-            "sign out"
-        </a>
+        // Not a link: the server only ends the session on POST, so a third
+        // party can no longer sign users out by embedding a GET (an `<img>`
+        // or a link to /auth/logout). A GET now shows a confirm page instead.
+        //
+        // Not a `fetch`: the backend answers with a redirect to the identity
+        // provider's end-session page, which must end the *provider's*
+        // session too. Only a top-level navigation follows that redirect in
+        // the window; a fetch would follow it invisibly and leave the user
+        // signed in at the provider.
+        //
+        // A plain `<form>` is a page load: leptos_router only intercepts
+        // clicks on `<a>` elements (the card #252 trap that the old link had
+        // to dodge with `rel="external"`), never form submissions, and this
+        // is not leptos_router's `<Form>` component either. The browser sends
+        // `Origin` and `Sec-Fetch-Site: same-origin` with it, which the
+        // server's cross-origin check accepts. e2e: auth.spec.ts,
+        // 'clicking "sign out" reaches the server…'.
+        <form class="user-logout-form" method="post" action="/auth/logout">
+            <button class="user-logout" type="submit" title="Sign out">
+                "sign out"
+            </button>
+        </form>
     }
 }
 

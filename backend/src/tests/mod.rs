@@ -13,6 +13,7 @@ mod contract;
 pub(crate) mod db_support;
 mod errors;
 mod links;
+mod logout;
 mod outbound_http;
 mod reorder;
 mod router;
@@ -59,6 +60,55 @@ async fn setup_board_and_column(server: &TestServer) -> (shared::Board, shared::
         .await
         .json();
     (board, column)
+}
+
+// ── Browser auth, shared by `router` and `logout` ──────────────────────────
+
+/// The 64-byte key every auth-enabled test state encrypts its session
+/// cookies with. Any 64 bytes will do; a fixed value keeps runs repeatable.
+const TEST_COOKIE_KEY: [u8; 64] = [7u8; 64];
+
+/// An `AppState` with browser auth switched on, built without any network:
+/// the provider endpoints are fixed strings and nothing here fetches the JWKS
+/// or reaches the provider. `end_session_url` is the one knob a test may want
+/// to turn (the logout tests need an RP-initiated logout target).
+async fn auth_enabled_state(end_session_url: Option<String>) -> AppState {
+    let db = db::connect_test().await.expect("failed to connect test db");
+    let auth = crate::auth::AuthConfig {
+        issuer_url: "https://idp.invalid/application/o/bored-test/".to_string(),
+        client_id: "bored-test".to_string(),
+        client_secret: "secret".to_string(),
+        redirect_uri: "https://bored.invalid/auth/callback".to_string(),
+        required_scope: "bored:test:access".to_string(),
+        end_session_url,
+        authorize_endpoint: "https://idp.invalid/authorize".to_string(),
+        token_endpoint: "https://idp.invalid/token".to_string(),
+        jwks_uri: "https://idp.invalid/jwks".to_string(),
+        // No revocation endpoint: a logout test's detached revocation task
+        // then returns at once instead of calling out to `idp.invalid`.
+        revocation_endpoint: None,
+        mcp_issuer_url: None,
+        mcp_client_id: None,
+    };
+    // The state owns the shared outbound client; the auth parts borrow a
+    // handle to it, as `main` wires them.
+    let state = AppState::new(db);
+    let jwks = Arc::new(crate::auth::JwksCache::new(
+        auth.jwks_uri.clone(),
+        state.http.clone(),
+    ));
+    // Any 64 bytes make a valid cookie key; `base64::Engine` is the trait
+    // whose `encode` method the STANDARD engine provides.
+    let cookie_key =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, TEST_COOKIE_KEY);
+    let sessions = Arc::new(
+        crate::auth::AuthSessionManager::from_config(
+            &config::SessionConfig { cookie_key },
+            state.http.clone(),
+        )
+        .expect("a 64-byte key is valid"),
+    );
+    state.with_auth(Arc::new(auth), jwks, sessions)
 }
 
 // ── Log capture, shared by `errors` and `outbound_http` ─────────────────────
