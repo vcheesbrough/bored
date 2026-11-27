@@ -273,7 +273,8 @@ sovereign-config itself** — `/woodpecker/repos/vcheesbrough/bored/bored_{dev,p
 `rotate_connection` + rewrite that Woodpecker secret + redeploy; no app change, no image rebuild.
 
 **Version pin.** `backend/Cargo.toml` pins `sovereign-config-provider` to a sovereign-config
-release tag (currently `2.46.418`, matching the deployed server). The provider negotiates a protocol
+release tag (currently `3.0.1`, the oldest release that speaks protocol `v6`; the deployed server
+may run a newer release, and the CLI image in `.woodpecker/build.yml` is pinned the same way). The provider negotiates a protocol
 version on connect, so a server upgrade does not require rebuilding bored; it fails closed only
 once the server has retired every protocol version the provider speaks.
 `sovereign-config-provider` is a private git dependency; the Docker build fetches it via
