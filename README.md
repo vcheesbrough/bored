@@ -61,7 +61,7 @@ Legacy `v1.x` tags from the old scheme remain in history on earlier release line
 
 ## CI
 
-Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpecker/build.yml):
+Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpecker/build.yml), plus the separate `code-vitals` workflow on `main` pushes (see [Code vitals](#code-vitals)):
 
 **On every push or manual run**:
 
@@ -72,7 +72,7 @@ Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpec
 5. **lane-mark-e2e** — after e2e passes, records the pass (`mode: mark`) so a later pipeline with the same files skips. Nothing waits on it.
 6. **publish** — the release-versions plugin (`mode: publish`) re-checks the image's version/revision labels, refuses a version the registry already holds (or cannot rule out), then pushes `registry.desync.link/bored:<version>` **only after e2e and the other test steps pass**, so the registry holds only images that passed every test step or, where e2e skipped, whose sources are byte-identical to a build that passed e2e (see [Skipping an unchanged e2e](#skipping-an-unchanged-e2e)). This is what makes the deployment-path `resolve` lookup a genuine tested gate.
 
-Beside them, **sql-console-script-validation**, **metrics-network-order** and **lane-files → lane-validation** (the lane config: `verify`, then [`scripts/test-lane-skip.sh`](scripts/test-lane-skip.sh) over the wiring and the covered-file list) are test steps too, and publish waits for all of them.
+Beside them, **sql-console-script-validation**, **metrics-network-order**, **code-vitals-workflow-validation** ([`scripts/test-code-vitals-workflow.sh`](scripts/test-code-vitals-workflow.sh), below) and **lane-files → lane-validation** (the lane config: `verify`, then [`scripts/test-lane-skip.sh`](scripts/test-lane-skip.sh) over the wiring and the covered-file list) are test steps too, and publish waits for all of them.
 
 A push **never deploys** and pushes no git tag (only its `refs/builds/<version>` claim). Dev is deployed by hand, from any branch, with a deployment to `dev` (Woodpecker's Deploy action on a pipeline of the commit). That lets several branches build at once without racing each other for the one shared dev environment. It also means `bored-dev` no longer tracks `main`, and nothing makes a `main` build run on dev before it is deployed to prod: deploy the `main` commit to `dev` first if you want that smoke check against real Authentik, sovereign-config and the Traefik edge, which e2e does not give.
 
@@ -84,6 +84,10 @@ A push **never deploys** and pushes no git tag (only its `refs/builds/<version>`
 4. **tag-release-dev / tag-release-prod** — *after* a successful deploy step, the release-versions plugin (`mode: tag`) pushes the annotated git tag matching `.release-tag`. It runs beside the SQL console smoke test, not after it: a smoke failure fails the pipeline, but the build was deployed and stays tagged. Idempotent: on an already-tagged commit it is a no-op, so a redeploy or dev-then-prod of the same build tags once; it refuses a second tag on a commit or a tag moving commits.
 
 The PR pipeline (`.woodpecker/pr-review.yml.disabled`) runs the Claude PR review agent on every pull request. It is **currently disabled** (renamed to `*.disabled`) because the agent image fails to pull; PR review is handled manually for now (see [`AGENTS.md`](AGENTS.md) §7). Re-enable by renaming back to `pr-review.yml`.
+
+### Code vitals
+
+[`.woodpecker/code-vitals.yml`](.woodpecker/code-vitals.yml) is a workflow of its own (card #567): on every `main` push or manual run, one [code-vitals](https://github.com/vcheesbrough/code-vitals) plugin step records the trunk commits code-vitals has not yet measured (its log shows `collect: bored: … commit(s) measured`). Its `settings:` are bored's measurement config — the trunk, where the version is read (`Cargo.toml` `[workspace.package]`, then `[package]`) and the area rules (`backend/` → backend, `frontend/` → web, `shared/` and `mcp/` → shared, ruleset version 1) — and code-vitals' deployments re-read them from that file at `main`'s head, so they live nowhere else. Changing the area rules needs a new `areas.version`, which re-measures bored's whole history at the next code-vitals deploy (code-vitals README § Measuring a repo). The step is `failure: ignore` and nothing waits on it, so it can never fail or hold up a build; a missed run is caught up by the next. It uses code-vitals' moving `:stable` tag with `pull: true` (code-vitals AGENTS.md § Deviations register) and the docker socket, to start the collector on code-vitals' networks. [`scripts/test-code-vitals-workflow.sh`](scripts/test-code-vitals-workflow.sh) holds that shape on every push.
 
 ### Skipping an unchanged e2e
 
@@ -105,6 +109,7 @@ Pipeline YAML uses `from_secret: <name>` like native Woodpecker secrets, but val
 | `zot_ci_user` / `zot_ci_password` | publish (push to `registry.desync.link`), resolve (read the image's labels there) and deploy-dev / -prod (`docker login` to pull the bored image from it) |
 | `github_token` | `woodpecker-plugin-release-versions` (`version` creates `refs/builds/<version>`, `resolve` lists tags and build refs, `tag` pushes release tags — so it needs push access to the repo), the lane-skip plugin (`lane-check` reads the e2e markers, `lane-mark-e2e` pushes them under `refs/ci/green/`), **and** the `build` step's `docker build --secret id=github_token` (fetches the private `sovereign-config-provider` git dependency — see [Runtime configuration](#runtime-configuration)) |
 | `authentik_api_token` | apply-authentik-blueprint-dev / -prod (Authentik admin API) |
+| `code_vitals_prod_writer_password` | the `code-vitals` workflow — code-vitals' prod writer, from the broker's shared layer (no bored-specific value) |
 | `bored_dev_oidc_client_secret` | blueprint var `AUTHENTIK_BORED_DEV_CLIENT_SECRET` only — deploy-dev reads the OIDC client secret from sovereign-config now, not this secret directly |
 | `bored_prod_oidc_client_secret` | blueprint var `AUTHENTIK_BORED_PROD_CLIENT_SECRET` only (prod deploys) — deploy-prod reads the OIDC client secret from sovereign-config now, not this secret directly |
 | `bored_mcp_prod_client_secret` | blueprint var `AUTHENTIK_BORED_MCP_PROD_CLIENT_SECRET` (MCP OAuth client; prod deploys only) |

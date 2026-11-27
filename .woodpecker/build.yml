@@ -121,6 +121,21 @@ steps:
       - apk add --no-cache jq
       - ./scripts/test-metrics-network-order.sh
 
+  code-vitals-workflow-validation:
+    # scripts/test-code-vitals-workflow.sh (card #567): .woodpecker/code-vitals.yml
+    # records main's commits for code-vitals and must never fail or hold up a
+    # build — main push/manual only, one `failure: ignore` plugin step pulled
+    # every run, nothing waiting on it, the writer password from the broker. It
+    # runs only on main, so a branch pipeline is the one place a mistake in it
+    # can be caught before it merges; hence this check runs on every push.
+    when:
+      - event: [push, manual]
+    depends_on: []
+    image: *alpine-image
+    commands:
+      - apk add --no-cache python3 py3-yaml bash
+      - ./scripts/test-code-vitals-workflow.sh
+
   lane-check:
     # Decides whether e2e runs (lane-skip, card #531): writes .lane/e2e.key,
     # plus .lane/e2e.skip when that key already has a green marker at
@@ -256,6 +271,7 @@ steps:
       - e2e
       - sql-console-script-validation
       - metrics-network-order
+      - code-vitals-workflow-validation
       - lane-validation
     image: *release-versions-image
     pull: true
