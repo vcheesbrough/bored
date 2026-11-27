@@ -121,10 +121,12 @@ async fn get_shows_a_confirm_form_and_clears_no_cookie() {
     // …which no other site may frame (clickjacking the one button).
     assert_eq!(response.header(header::X_FRAME_OPTIONS), "DENY");
     let csp = response.header(header::CONTENT_SECURITY_POLICY);
-    assert!(
-        csp.to_str().unwrap().contains("frame-ancestors 'none'"),
-        "{csp:?}"
-    );
+    let csp = csp.to_str().unwrap();
+    assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+    // …but must not restrict `form-action`: the browser applies it to the
+    // POST's redirect too, and that redirect leaves for the provider's
+    // end-session URL. (e2e proves the hop in a real browser.)
+    assert!(!csp.contains("form-action"), "{csp}");
 }
 
 #[tokio::test]

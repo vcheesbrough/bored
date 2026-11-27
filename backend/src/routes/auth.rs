@@ -321,13 +321,19 @@ pub async fn logout_confirm() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store"),
             // Anti-clickjacking, old and new spelling. `frame-ancestors`
             // lives in CSP; `default-src 'none'` + `style-src 'unsafe-inline'`
-            // lets only the inline <style> above load, and `form-action
-            // 'self'` pins where the one form may submit.
+            // lets only the inline <style> above load.
+            //
+            // Deliberately no `form-action`: browsers check it against every
+            // redirect a form submission follows, not just the form's own
+            // target, and the POST's 303 goes to the provider's end-session
+            // URL on another origin. `form-action 'self'` would block that
+            // hop, leaving the provider session alive (the next login would
+            // sign straight back in). `default-src` does not cover
+            // `form-action`, so leaving it out leaves it unrestricted.
             (header::X_FRAME_OPTIONS, "DENY"),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; style-src 'unsafe-inline'; \
-                 form-action 'self'; frame-ancestors 'none'",
+                "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
             ),
         ],
         Html(LOGOUT_CONFIRM_PAGE),
@@ -399,9 +405,10 @@ pub fn is_cross_origin_request(headers: &HeaderMap, host: Option<&str>) -> bool 
 /// touched (card #535): `is_cross_origin_request` explains the check.
 ///
 /// `Option<Host>`: axum's `Host` extractor reads the host the request was
-/// sent to (the `Host` header, or the URI's authority under HTTP/2). Wrapping
-/// it in `Option` means "give me `None` if there is none" instead of
-/// rejecting the request outright.
+/// sent to: the `Forwarded` or `X-Forwarded-Host` header if a proxy set one
+/// (Traefik does), else `Host`, else the URI's authority. A cross-site form
+/// cannot set any of these. Wrapping it in `Option` means "give me `None` if
+/// there is none" instead of rejecting the request outright.
 #[tracing::instrument(skip_all)]
 pub async fn logout(
     State(state): State<AppState>,

@@ -1,4 +1,47 @@
 import { test, expect, request } from '@playwright/test';
+import type { Page } from '@playwright/test';
+
+/**
+ * Run `click` (a sign-out button) and check the whole logout navigation
+ * happened in the browser: a top-level POST to /auth/logout, the server's 303
+ * to the provider's end-session URL, and then the browser *following* that
+ * redirect to the provider (card #535).
+ *
+ * The last step is the one that a CSP `form-action` on the submitting page
+ * would block. Browsers apply `form-action` to every redirect a form
+ * submission follows, so a blocked hop never reaches the provider, even
+ * though the 303 itself arrived. Waiting for the provider's own response is
+ * the only way to see that.
+ */
+async function submitsLogoutAndReachesEndSession(page: Page, click: () => Promise<void>) {
+  const logoutResponse = page.waitForResponse(
+    res => new URL(res.url()).pathname === '/auth/logout',
+    { timeout: 10_000 },
+  );
+  // The rig's provider is `mock-oidc`; its end-session endpoint is
+  // BORED__OIDC__END_SESSION_URL in docker-compose.test.yml.
+  const endSessionResponse = page.waitForResponse(
+    res => new URL(res.url()).pathname.endsWith('/end-session') && res.request().isNavigationRequest(),
+    { timeout: 10_000 },
+  );
+  await click();
+
+  const res = await logoutResponse;
+  expect(res.request().method()).toBe('POST');
+  expect(res.request().isNavigationRequest()).toBe(true);
+  expect(res.status()).toBe(303);
+  const location = new URL(res.headers()['location']);
+  expect(location.pathname).toContain('end-session');
+  expect(location.searchParams.get('id_token_hint')).toBeTruthy();
+
+  // The browser really followed the 303 to the provider, as a GET. Its
+  // status is the provider's business, not bored's: the rig's mock-oidc
+  // answers 405 at this path, which is fine here, because what matters is
+  // that the browser made the request at all.
+  const endSession = await endSessionResponse;
+  expect(new URL(endSession.url()).origin).toBe(location.origin);
+  expect(endSession.request().method()).toBe('GET');
+}
 
 // These tests assume the suite is run against the docker-compose.test.yml
 // stack, which configures the backend with a mock OIDC provider and
@@ -170,24 +213,46 @@ test.describe('auth — happy path', () => {
         (await ctx.cookies()).filter(cookie => cookie.name.startsWith('auth')).map(c => c.name);
       expect(await sessionCookies()).toEqual(expect.arrayContaining(['auth', 'auth_refresh', 'auth_id']));
 
-      // The click must leave the SPA as a top-level POST navigation that the
-      // server answers with its redirect to the IdP's end-session endpoint.
-      const logoutResponse = page.waitForResponse(
-        res => new URL(res.url()).pathname === '/auth/logout',
-        { timeout: 10_000 },
-      );
-      await signOut.click();
-      const res = await logoutResponse;
-      expect(res.request().method()).toBe('POST');
-      expect(res.request().isNavigationRequest()).toBe(true);
-      expect(res.status()).toBe(303);
-      expect(new URL(res.headers()['location']).pathname).toContain('end-session');
+      await submitsLogoutAndReachesEndSession(page, () => signOut.click());
 
       // Every session cookie is gone, so the next app load starts signed out.
       await expect.poll(sessionCookies, { timeout: 10_000 }).toEqual([]);
       // Liveness: the browser really left the SPA rather than staying on a
       // page that only looks signed out.
       await expect(page).not.toHaveURL(/\/auth\/logout$/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('the GET confirm page\'s button signs out and reaches end-session', async ({ browser }) => {
+    // Card #535: GET /auth/logout is kept for tabs still running the old
+    // SPA's sign-out link, bookmarks and typed URLs. Its button must work in
+    // a real browser, where the page's own CSP is enforced: a `form-action`
+    // directive there would block the POST's redirect to the provider.
+    const ctx = await browser.newContext({
+      baseURL: process.env.BASE_URL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+    });
+    try {
+      const page = await ctx.newPage();
+      await page.goto('/auth/login', { waitUntil: 'load' });
+      await expect(page.locator('form.user-logout-form button.user-logout'))
+        .toBeVisible({ timeout: 15_000 });
+      const sessionCookies = async () =>
+        (await ctx.cookies()).filter(cookie => cookie.name.startsWith('auth')).map(c => c.name);
+
+      // What the old SPA's link (and a typed URL) does: a top-level GET.
+      await page.goto('/auth/logout', { waitUntil: 'load' });
+      // The GET itself signed nobody out.
+      expect(await sessionCookies()).toEqual(expect.arrayContaining(['auth', 'auth_refresh', 'auth_id']));
+
+      await submitsLogoutAndReachesEndSession(
+        page,
+        () => page.getByRole('button', { name: 'Sign out' }).click(),
+      );
+      await expect.poll(sessionCookies, { timeout: 10_000 }).toEqual([]);
     } finally {
       await ctx.close();
     }
