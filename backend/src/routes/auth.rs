@@ -5,7 +5,8 @@
 //
 //   GET /auth/login    — start the flow: generate state → cookie → redirect
 //   GET /auth/callback — finish the flow: verify state → exchange code → set session cookie
-//   GET /auth/logout   — clear session cookie → redirect to RP-initiated logout
+//   POST /auth/logout  — clear session cookie → redirect to RP-initiated logout
+//   GET /auth/logout   — a confirm page whose only control POSTs the above
 //
 // One API route exposes the validated identity to the SPA:
 //
@@ -20,12 +21,23 @@
 // Cookie attributes: `HttpOnly; Secure; SameSite=Lax`. SameSite=Lax permits
 // the redirect from Authentik to attach the cookie on a top-level GET, which
 // is the only flow we use here. Strict would break the callback.
+//
+// Logout is a POST (card #535). As a GET, any third-party page could sign a
+// bored user out with `<img src="https://bored…/auth/logout">`. SameSite=Lax
+// alone does not close that hole for a POST either: a cross-site form POST
+// carries no session cookies, but it is a top-level navigation, and browsers
+// *do* apply `Set-Cookie` from the response to one — so the handler's
+// "expire every session cookie" headers would still sign the user out
+// locally. Hence the cross-origin check in `logout` (see
+// `is_cross_origin_request`), which refuses such a POST before it touches a
+// cookie.
 
 use axum::{
     Extension, Json,
+    extract::Host,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, Uri},
-    response::{IntoResponse, Redirect, Response},
+    http::{HeaderMap, StatusCode, Uri, header},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
@@ -256,10 +268,156 @@ pub async fn callback(
     (jar, response).into_response()
 }
 
-/// `GET /auth/logout` — clear the session cookie and (optionally) bounce to
-/// Authentik's RP-initiated logout endpoint to terminate the upstream session.
+/// The page `GET /auth/logout` answers with: a one-button form that POSTs to
+/// the real logout route (card #535).
+///
+/// Why keep a GET at all, instead of letting axum answer 405? A tab that was
+/// open across the deploy still runs the old SPA, whose "sign out" is a plain
+/// link to `GET /auth/logout`. Without this page that click would land on a
+/// bare "405 Method Not Allowed" and the user would stay signed in. With it,
+/// they get one extra click. Typing the URL by hand works the same way.
+///
+/// The page changes no state, so a third party embedding it gains nothing —
+/// except by framing it and tricking the user into the click (clickjacking).
+/// `frame-ancestors 'none'` (and the older `X-Frame-Options: DENY`) forbid
+/// framing; see `logout_confirm`.
+///
+/// `&'static str`: the markup is a string literal baked into the binary, so
+/// it lives for the whole program and needs no allocation per request.
+const LOGOUT_CONFIRM_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign out of bored</title>
+<style>
+  body { font-family: system-ui, sans-serif; display: grid; place-items: center; min-height: 90vh; }
+  form { text-align: center; }
+  button { font: inherit; padding: 0.4em 1.2em; cursor: pointer; }
+</style>
+</head>
+<body>
+<form method="post" action="/auth/logout">
+  <p>Sign out of bored?</p>
+  <button type="submit">Sign out</button>
+  <p><a href="/">Cancel</a></p>
+</form>
+</body>
+</html>
+"#;
+
+/// `GET /auth/logout` — show the confirm form; never clears a cookie.
+///
+/// Returning a tuple of `(headers, body)` is axum's shorthand for "these
+/// extra headers on top of whatever the body sets": `Html` contributes
+/// `Content-Type: text/html; charset=utf-8`, the array adds the rest. Each
+/// array entry is a `(HeaderName, &str)` pair, which axum knows how to turn
+/// into response headers.
 #[tracing::instrument(skip_all)]
-pub async fn logout(State(state): State<AppState>, headers: HeaderMap, jar: CookieJar) -> Response {
+pub async fn logout_confirm() -> impl IntoResponse {
+    (
+        [
+            // Never cache: the page is tiny and a cached copy has no value.
+            (header::CACHE_CONTROL, "no-store"),
+            // Anti-clickjacking, old and new spelling. `frame-ancestors`
+            // lives in CSP; `default-src 'none'` + `style-src 'unsafe-inline'`
+            // lets only the inline <style> above load, and `form-action
+            // 'self'` pins where the one form may submit.
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; \
+                 form-action 'self'; frame-ancestors 'none'",
+            ),
+        ],
+        Html(LOGOUT_CONFIRM_PAGE),
+    )
+}
+
+/// Does this request come from a page on another origin? Used to refuse a
+/// cross-site logout POST (card #535; see the module comment for why
+/// SameSite=Lax alone is not enough).
+///
+/// The algorithm is the one Go's standard library ships as
+/// `net/http.CrossOriginProtection`, chosen because it is small, has been
+/// reviewed, and needs no configuration (no list of trusted origins):
+///
+/// 1. **`Sec-Fetch-Site`** — every current browser sends it, and the page
+///    cannot forge it. `same-origin` is the SPA's own form; `none` is a
+///    user-initiated navigation (typed URL, bookmark). Anything else —
+///    `cross-site`, `same-site` (a sibling subdomain) — is refused.
+/// 2. Otherwise **`Origin`** — older browsers send it on every POST. It must
+///    name this server's own host (`host` is what the request was addressed
+///    to). `Origin: null` (sandboxed frames, privacy modes) is refused too.
+/// 3. **Neither header** — not a browser, or one too old to send either. A
+///    CSRF needs a victim's browser, and a non-browser client could simply
+///    *omit* the headers anyway, so it is let through. The e2e suite's bare
+///    HTTP requests rely on this.
+///
+/// `host` is an `Option<&str>`: `None` when the request named no host at all
+/// (no `Host` header and no authority in the URI), which only a hand-made
+/// request does. With an `Origin` to compare against, that counts as a
+/// mismatch.
+pub fn is_cross_origin_request(headers: &HeaderMap, host: Option<&str>) -> bool {
+    // `HeaderMap::get` returns `Option<&HeaderValue>`; `if let Some(..)`
+    // runs the block only when the header is present.
+    if let Some(site) = headers.get("sec-fetch-site") {
+        // `as_bytes()` compares the raw value without first converting it to
+        // a `&str` (which can fail on non-ASCII bytes). `matches!` is a
+        // boolean `match`: true when the value is one of the listed
+        // patterns. The leading `!` turns "is same-origin" into "is cross".
+        return !matches!(site.as_bytes(), b"same-origin" | b"none");
+    }
+    // `let … else` is the early-return form of `if let`: bind `origin` when
+    // the header is there, otherwise run the `else` block, which must leave
+    // the function (here: "no Origin either → not a browser CSRF").
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return false;
+    };
+    // An `Origin` value is `scheme://host[:port]`. `to_str()` fails on
+    // non-ASCII bytes, `split_once("://")` fails on `null` or garbage; the
+    // `?`-free chain of `Option`/`Result` combinators means any of those
+    // failures turns into `None` here — and `None` is refused below.
+    let origin_host = origin
+        .to_str()
+        .ok()
+        .and_then(|value| value.split_once("://"))
+        .map(|(_scheme, authority)| authority);
+    // Both sides must be present and equal. Host names are case-insensitive
+    // (RFC 3986 §3.2.2), so compare ignoring ASCII case. `match` on a tuple
+    // of the two `Option`s reads as a small truth table.
+    match (origin_host, host) {
+        (Some(origin_host), Some(host)) => !origin_host.eq_ignore_ascii_case(host),
+        _ => true,
+    }
+}
+
+/// `POST /auth/logout` — clear the session cookie and (optionally) bounce to
+/// Authentik's RP-initiated logout endpoint to terminate the upstream session.
+///
+/// A POST from another origin is refused with 403 before any cookie is
+/// touched (card #535): `is_cross_origin_request` explains the check.
+///
+/// `Option<Host>`: axum's `Host` extractor reads the host the request was
+/// sent to (the `Host` header, or the URI's authority under HTTP/2). Wrapping
+/// it in `Option` means "give me `None` if there is none" instead of
+/// rejecting the request outright.
+#[tracing::instrument(skip_all)]
+pub async fn logout(
+    State(state): State<AppState>,
+    host: Option<Host>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    // `host.as_ref()` borrows the `Option<Host>` as `Option<&Host>`, and
+    // `map(|Host(h)| h.as_str())` destructures the tuple struct to borrow
+    // its inner `String` as `&str` — no copy of the host is made.
+    if is_cross_origin_request(&headers, host.as_ref().map(|Host(h)| h.as_str())) {
+        // No log line: the server span already records the 403 on this
+        // route, and that is the one record a refused request gets.
+        return (StatusCode::FORBIDDEN, "cross-origin logout refused").into_response();
+    }
+
     let clear_state = Cookie::build((STATE_COOKIE, ""))
         .path("/auth")
         .http_only(true)
@@ -338,8 +496,87 @@ pub async fn me(claims: Extension<Claims>) -> Json<shared::UserInfo> {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_return_to, state_return_to};
+    use super::{is_cross_origin_request, safe_return_to, state_return_to};
+    use axum::http::HeaderMap;
     use base64::Engine;
+
+    /// Build a `HeaderMap` from `(name, value)` pairs. `HeaderMap::insert`
+    /// wants typed names and values; `parse()` converts each `&str` (and
+    /// `unwrap` is fine in a test: the literals are all valid).
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn fetch_metadata_decides_when_present() {
+        let host = Some("bored.example");
+        // Allowed: the app's own page, and a user-initiated navigation.
+        for site in ["same-origin", "none"] {
+            assert!(
+                !is_cross_origin_request(&headers(&[("sec-fetch-site", site)]), host),
+                "{site}"
+            );
+        }
+        // Refused: any other site, including a sibling subdomain.
+        for site in ["cross-site", "same-site", "garbage"] {
+            assert!(
+                is_cross_origin_request(&headers(&[("sec-fetch-site", site)]), host),
+                "{site}"
+            );
+        }
+        // Fetch metadata wins over Origin: a matching Origin cannot rescue a
+        // cross-site request, and a mismatching one cannot sink a same-origin
+        // one (it is the browser's verdict, which the page cannot forge).
+        assert!(is_cross_origin_request(
+            &headers(&[
+                ("sec-fetch-site", "cross-site"),
+                ("origin", "https://bored.example")
+            ]),
+            host
+        ));
+        assert!(!is_cross_origin_request(
+            &headers(&[
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "https://elsewhere.example")
+            ]),
+            host
+        ));
+    }
+
+    #[test]
+    fn origin_must_name_this_host_when_fetch_metadata_is_absent() {
+        let host = Some("bored.example:8443");
+        let check =
+            |origin: &'static str| is_cross_origin_request(&headers(&[("origin", origin)]), host);
+        // Same host and port, any scheme spelling, any letter case.
+        assert!(!check("https://bored.example:8443"));
+        assert!(!check("https://BORED.example:8443"));
+        // A different host, a different port, an opaque or malformed origin.
+        assert!(check("https://evil.example"));
+        assert!(check("https://bored.example"));
+        assert!(check("https://bored.example:8443.evil.example"));
+        assert!(check("null"));
+        assert!(check("bored.example:8443"));
+        // An Origin with nothing to compare it to is refused.
+        assert!(is_cross_origin_request(
+            &headers(&[("origin", "https://bored.example:8443")]),
+            None
+        ));
+    }
+
+    #[test]
+    fn no_browser_headers_is_not_cross_origin() {
+        // A non-browser client; with or without a host.
+        assert!(!is_cross_origin_request(
+            &HeaderMap::new(),
+            Some("bored.example")
+        ));
+        assert!(!is_cross_origin_request(&HeaderMap::new(), None));
+    }
 
     #[test]
     fn accepts_same_origin_return_paths() {

@@ -180,11 +180,24 @@ html[data-connection="offline"] .collapsed-column-grip {
   user-select: none;
 }
 
+/* The sign-out control is a form POST (card #535). The form stays inline in
+   the navbar's flex row, and the button drops the browser's button chrome so
+   it still reads as the small text link it replaced. */
+.user-logout-form {
+  display: inline;
+  margin: 0;
+}
+
 .user-logout {
   color: var(--text-muted);
   text-decoration: none;
   opacity: 0.6;
   font-size: 11px;
+  font-family: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .user-logout:hover {

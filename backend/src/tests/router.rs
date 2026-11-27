@@ -207,42 +207,10 @@ async fn api_unknown_route_returns_404_not_spa_fallback() {
 
 // ── Client telemetry configuration (card #416) ─────────────────────────────
 
-/// An app with browser auth switched on, built without any network: the
-/// provider endpoints are fixed strings and nothing here fetches the JWKS.
+/// An app with browser auth switched on, built without any network; the
+/// state comes from the shared `auth_enabled_state` helper in `mod.rs`.
 async fn auth_enabled_app(deployment: DeploymentInfo) -> TestServer {
-    let db = db::connect_test().await.expect("failed to connect test db");
-    let auth = crate::auth::AuthConfig {
-        issuer_url: "https://idp.invalid/application/o/bored-test/".to_string(),
-        client_id: "bored-test".to_string(),
-        client_secret: "secret".to_string(),
-        redirect_uri: "https://bored.invalid/auth/callback".to_string(),
-        required_scope: "bored:test:access".to_string(),
-        end_session_url: None,
-        authorize_endpoint: "https://idp.invalid/authorize".to_string(),
-        token_endpoint: "https://idp.invalid/token".to_string(),
-        jwks_uri: "https://idp.invalid/jwks".to_string(),
-        revocation_endpoint: None,
-        mcp_issuer_url: None,
-        mcp_client_id: None,
-    };
-    // The state owns the shared outbound client; the auth parts borrow a
-    // handle to it, as `main` wires them.
-    let state = AppState::new(db);
-    let jwks = Arc::new(crate::auth::JwksCache::new(
-        auth.jwks_uri.clone(),
-        state.http.clone(),
-    ));
-    // Any 64 bytes make a valid cookie key; `base64::Engine` is the trait
-    // whose `encode` method the STANDARD engine provides.
-    let cookie_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 64]);
-    let sessions = Arc::new(
-        crate::auth::AuthSessionManager::from_config(
-            &config::SessionConfig { cookie_key },
-            state.http.clone(),
-        )
-        .expect("a 64-byte key is valid"),
-    );
-    let state = state.with_auth(Arc::new(auth), jwks, sessions);
+    let state = auth_enabled_state(None).await;
     TestServer::new(app(state, "./dist", deployment).await).unwrap()
 }
 

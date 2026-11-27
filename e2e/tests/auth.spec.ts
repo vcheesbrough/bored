@@ -101,7 +101,7 @@ test.describe('auth — happy path', () => {
       .toEqual([]);
   });
 
-  test('logout clears tokens and forwards an ID token hint', async () => {
+  test('GET /auth/logout only shows a confirm form; POST clears tokens and forwards an ID token hint', async () => {
     // Logout invalidates the refresh-token chain, so this destructive test
     // must not consume the storage state shared by the rest of the suite.
     const ctx = await request.newContext({
@@ -110,32 +110,47 @@ test.describe('auth — happy path', () => {
       storageState: { cookies: [], origins: [] },
       extraHTTPHeaders: {},
     });
+    const sessionCookies = async () =>
+      (await ctx.storageState()).cookies
+        .filter(cookie => cookie.name.startsWith('auth'))
+        .map(cookie => cookie.name)
+        .sort();
 
     try {
       const login = await ctx.get('/auth/login');
       expect(login.ok()).toBe(true);
-      expect((await ctx.storageState()).cookies.some(cookie => cookie.name === 'auth_refresh'))
-        .toBe(true);
+      expect(await sessionCookies()).toEqual(['auth', 'auth_id', 'auth_refresh']);
 
-      const res = await ctx.get('/auth/logout', { maxRedirects: 0 });
-      expect([302, 303, 307]).toContain(res.status());
+      // Card #535: a GET (what an <img> or a third-party link sends) changes
+      // nothing. It answers with a page whose one form POSTs the logout.
+      const confirm = await ctx.get('/auth/logout', { maxRedirects: 0 });
+      expect(confirm.status()).toBe(200);
+      expect(confirm.headers()['set-cookie']).toBeUndefined();
+      expect(await confirm.text()).toContain('<form method="post" action="/auth/logout">');
+      expect(await sessionCookies()).toEqual(['auth', 'auth_id', 'auth_refresh']);
+      expect((await ctx.get('/api/me')).status()).toBe(200);
+
+      // The POST ends the session. A bare HTTP client sends neither Origin
+      // nor Sec-Fetch-Site, which the server's cross-origin check lets by.
+      const res = await ctx.post('/auth/logout', { maxRedirects: 0 });
+      expect(res.status()).toBe(303);
       const location = new URL(res.headers()['location']);
       expect(location.searchParams.get('id_token_hint')).toBeTruthy();
 
-      const remaining = (await ctx.storageState()).cookies;
-      expect(remaining.filter(cookie => cookie.name.startsWith('auth')).map(cookie => cookie.name))
-        .toEqual([]);
+      expect(await sessionCookies()).toEqual([]);
     } finally {
       await ctx.dispose();
     }
   });
 
   test('clicking "sign out" reaches the server and ends the session', async ({ browser }) => {
-    // Card #252. The test above drives /auth/logout as a bare HTTP request,
-    // which is why it never noticed that the *link* did nothing: leptos_router
-    // intercepts every same-origin <a> click and routes it client-side, so a
-    // plain href="/auth/logout" rendered the SPA's "Not found" view and the
-    // server route never ran. Only a real click in a real page exercises that.
+    // Card #252, then #535. The test above drives /auth/logout as bare HTTP
+    // requests, which is why it never noticed that the old *link* did
+    // nothing: leptos_router intercepts every same-origin <a> click and
+    // routes it client-side. Only a real click in a real page exercises the
+    // control. Since #535 the control is a form POST, and a real browser
+    // sends it with Origin and Sec-Fetch-Site, so this test also proves the
+    // server's cross-origin check accepts the SPA's own form.
     //
     // Own context, own login: logout revokes the refresh chain, so it must not
     // touch the storage state the rest of the suite shares.
@@ -149,13 +164,13 @@ test.describe('auth — happy path', () => {
       // The mock IdP signs in without a form: /auth/login -> IdP -> callback
       // -> the SPA, which then renders the user badge from /api/me.
       await page.goto('/auth/login', { waitUntil: 'load' });
-      const signOut = page.locator('a.user-logout');
+      const signOut = page.locator('form.user-logout-form button.user-logout');
       await expect(signOut).toBeVisible({ timeout: 15_000 });
       const sessionCookies = async () =>
         (await ctx.cookies()).filter(cookie => cookie.name.startsWith('auth')).map(c => c.name);
       expect(await sessionCookies()).toEqual(expect.arrayContaining(['auth', 'auth_refresh', 'auth_id']));
 
-      // The click must leave the SPA as a top-level navigation that the
+      // The click must leave the SPA as a top-level POST navigation that the
       // server answers with its redirect to the IdP's end-session endpoint.
       const logoutResponse = page.waitForResponse(
         res => new URL(res.url()).pathname === '/auth/logout',
@@ -163,14 +178,73 @@ test.describe('auth — happy path', () => {
       );
       await signOut.click();
       const res = await logoutResponse;
-      expect([302, 303, 307]).toContain(res.status());
+      expect(res.request().method()).toBe('POST');
+      expect(res.request().isNavigationRequest()).toBe(true);
+      expect(res.status()).toBe(303);
       expect(new URL(res.headers()['location']).pathname).toContain('end-session');
 
       // Every session cookie is gone, so the next app load starts signed out.
       await expect.poll(sessionCookies, { timeout: 10_000 }).toEqual([]);
-      // Liveness: the browser really left the SPA rather than rendering its
-      // client-side "Not found" for an /auth/logout route it doesn't have.
+      // Liveness: the browser really left the SPA rather than staying on a
+      // page that only looks signed out.
       await expect(page).not.toHaveURL(/\/auth\/logout$/);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('a form on another site cannot sign the user out', async ({ browser }) => {
+    // Card #535. SameSite=Lax keeps the session cookies off a cross-site
+    // POST, but the browser still applies the *response's* Set-Cookie on a
+    // top-level navigation, so without the server's cross-origin check the
+    // "expire every session cookie" headers would sign the user out anyway.
+    // This drives the real attack in a real browser: a page on another
+    // origin submits a form to POST /auth/logout.
+    const ctx = await browser.newContext({
+      baseURL: process.env.BASE_URL,
+      ignoreHTTPSErrors: true,
+      storageState: { cookies: [], origins: [] },
+    });
+    try {
+      const page = await ctx.newPage();
+      await page.goto('/auth/login', { waitUntil: 'load' });
+      await expect(page.locator('form.user-logout-form button.user-logout'))
+        .toBeVisible({ timeout: 15_000 });
+      const sessionCookies = async () =>
+        (await ctx.cookies())
+          .filter(cookie => cookie.name.startsWith('auth'))
+          .map(cookie => cookie.name)
+          .sort();
+      expect(await sessionCookies()).toEqual(['auth', 'auth_id', 'auth_refresh']);
+
+      // The attacker's page, served by Playwright for a host that does not
+      // exist: a genuinely different site from the app's.
+      const appOrigin = new URL(process.env.BASE_URL!).origin;
+      await page.route('https://attacker.invalid/**', route =>
+        route.fulfill({
+          contentType: 'text/html',
+          body: `<!doctype html><form method="post" action="${appOrigin}/auth/logout">
+                   <button id="go" type="submit">win a prize</button></form>`,
+        }),
+      );
+      await page.goto('https://attacker.invalid/', { waitUntil: 'load' });
+
+      const logoutResponse = page.waitForResponse(
+        res => new URL(res.url()).pathname === '/auth/logout',
+        { timeout: 10_000 },
+      );
+      await page.click('#go');
+      const res = await logoutResponse;
+      expect(res.request().method()).toBe('POST');
+      expect(res.status()).toBe(403);
+
+      // The session survived: every cookie is still there…
+      expect(await sessionCookies()).toEqual(['auth', 'auth_id', 'auth_refresh']);
+      // …and still works. Liveness: the app loads signed in again.
+      expect((await ctx.request.get('/api/me')).status()).toBe(200);
+      await page.goto('/', { waitUntil: 'load' });
+      await expect(page.locator('form.user-logout-form button.user-logout'))
+        .toBeVisible({ timeout: 15_000 });
     } finally {
       await ctx.close();
     }
