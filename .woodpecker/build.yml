@@ -381,13 +381,15 @@ steps:
     # The docker CLI image with the sovereign-config CLI baked in — the same
     # pinned image v-note deploys with. It carries docker 27.5.1 with the
     # compose plugin plus sh, so it replaces `*docker-image` for the steps
-    # that run `sovereign-config render`. The CLI must match the running
-    # sovereign-config server (2.46.418, like the provider in
-    # backend/Cargo.toml): bump tag and digest together, as a commit.
+    # that run `sovereign-config render`. The CLI must speak a protocol
+    # version the running sovereign-config server still serves; 3.0.1 (like
+    # the provider in backend/Cargo.toml) is the oldest release that speaks
+    # v6, and the server may run a newer release. Bump tag and digest
+    # together, as a commit.
     # Pulled from public GHCR (card #542), so the step image no longer
     # depends on Zot; the docker login below is still needed, for the
     # bored image this step pulls from registry.desync.link.
-    image: &deploy-image ghcr.io/vcheesbrough/sovereign-config-cli:2.46.418@sha256:68761657b20cedc7064be7808565f36fdcec58d221034de6196f4ea0f51ce1de
+    image: &deploy-image ghcr.io/vcheesbrough/sovereign-config-cli:3.0.1@sha256:f934ef03000c8dad9cef231c036a86aa42233a5f6772e89ffe71c6678e2362f5
     volumes: *docker-socket
     environment:
       REGISTRY_USER:

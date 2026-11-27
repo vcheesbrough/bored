@@ -1591,6 +1591,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -1827,15 +1828,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -2000,7 +1992,7 @@ dependencies = [
  "cfg-if",
  "convert_case 0.7.1",
  "html-escape",
- "itertools 0.14.0",
+ "itertools",
  "leptos_hot_reload",
  "prettyplease",
  "proc-macro-error2",
@@ -2750,7 +2742,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.10.5",
+ "itertools",
  "log",
  "multimap",
  "once_cell",
@@ -2770,7 +2762,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn",
@@ -2783,7 +2775,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn",
@@ -3096,7 +3088,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aadc7c19e3a360bf19cd595d2dc8b58ce67b9240b95a103fbc1317a8ff194237"
 dependencies = [
  "guardian",
- "itertools 0.14.0",
+ "itertools",
  "or_poisoned",
  "paste",
  "reactive_graph",
@@ -3196,6 +3188,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3847,8 +3840,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-client"
-version = "2.46.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
+version = "3.0.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.0.1#b18618f63377074a7f4e04f88dd560f7e36d5cc7"
 dependencies = [
  "async-trait",
  "sovereign-config-core",
@@ -3857,8 +3850,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-core"
-version = "2.46.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
+version = "3.0.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.0.1#b18618f63377074a7f4e04f88dd560f7e36d5cc7"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3869,11 +3862,12 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-native"
-version = "2.46.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
+version = "3.0.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.0.1#b18618f63377074a7f4e04f88dd560f7e36d5cc7"
 dependencies = [
  "async-trait",
  "http 1.4.0",
+ "prost 0.13.5",
  "prost-types",
  "reqwest",
  "rustix",
@@ -3890,8 +3884,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-proto"
-version = "2.46.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
+version = "3.0.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.0.1#b18618f63377074a7f4e04f88dd560f7e36d5cc7"
 dependencies = [
  "prost 0.13.5",
  "prost-types",
@@ -3902,8 +3896,8 @@ dependencies = [
 
 [[package]]
 name = "sovereign-config-provider"
-version = "2.46.0"
-source = "git+https://github.com/vcheesbrough/sovereign-config?tag=2.46.418#7b70e7923331cff9eeb103e014eb6b146975cc52"
+version = "3.0.0"
+source = "git+https://github.com/vcheesbrough/sovereign-config?tag=3.0.1#b18618f63377074a7f4e04f88dd560f7e36d5cc7"
 dependencies = [
  "async-trait",
  "config",
@@ -4208,7 +4202,7 @@ dependencies = [
  "futures",
  "html-escape",
  "indexmap 2.14.0",
- "itertools 0.14.0",
+ "itertools",
  "js-sys",
  "linear-map",
  "next_tuple",

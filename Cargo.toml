@@ -57,6 +57,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # connections serve that as well as one multiplexed h2 connection would.
 # Revisit if a batch processor is configured with concurrent exports
 # (`with_max_concurrent_exports`) or export latency to the collector shows up.
+#
+# Root certificates: `rustls-tls` alone trusts only the bundled webpki roots,
+# but `sovereign-config-native` (via `sovereign-config-provider`, 3.x — card
+# #607) enables `rustls-tls-native-roots`, and Cargo unifies features. So in
+# any build that includes `backend`, every reqwest client here (the shared
+# Authentik client in backend/src/http_client.rs, the OTLP exporter in
+# backend/src/observability.rs) also trusts the OS store — `/etc/ssl/certs`
+# from `ca-certificates` in the runtime image — on top of webpki's. Both are
+# Mozilla's set, and the OTLP exporter talks plain `http://`, so the effect is
+# small; but do not assume these clients are webpki-only.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
