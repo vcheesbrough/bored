@@ -61,7 +61,7 @@ Legacy `v1.x` tags from the old scheme remain in history on earlier release line
 
 ## CI
 
-Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpecker/build.yml):
+Woodpecker has two pipelines, both defined in [`.woodpecker/build.yml`](.woodpecker/build.yml), plus the separate `code-vitals` workflow on `main` pushes (see [Code vitals](#code-vitals)):
 
 **On every push or manual run**:
 
