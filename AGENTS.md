@@ -40,7 +40,7 @@ release-versions plugin's gap-free counter on the `1.N` line (baseline §2, the
 | **Plugin** | `woodpecker-plugin-release-versions` 0.2.0, pinned by digest once in `.woodpecker/build.yml` (`&release-versions-image`) |
 | **Images** | one: `registry.desync.link/bored` |
 | **Deploy targets** | `dev` from any branch, `prod` from `main` only — the plugin's default `environments`, so the setting is not set |
-| **Pipelines** | one file, `.woodpecker/build.yml`: `version` → build → tests → `publish` on push/manual; `resolve` → deploy → `tag` beside smoke on deployment |
+| **Pipelines** | `.woodpecker/build.yml`: `version` → build → tests → `publish` on push/manual; `resolve` → deploy → `tag` beside smoke on deployment. Beside it, `.woodpecker/code-vitals.yml` records `main`'s commits for code-vitals and never gates a build (README § Code vitals) |
 | **Skipped tests** | `e2e` may skip by lane-skip (§1); `publish` still runs after a skip, deliberately — README § Skipping an unchanged e2e |
 
 Never create, move or delete release tags or `refs/builds/*` by hand, and never

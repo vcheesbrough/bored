@@ -1,0 +1,56 @@
+# code-vitals: record this repo's trunk commits (vcheesbrough/code-vitals).
+#
+# One code-vitals plugin step, configured here (code-vitals README § Measuring
+# a repo; card #567). Its `settings:` are bored's measurement config:
+# code-vitals' own deployments re-read them from this file at main's head, so
+# this is the only place they live. They are code-vitals' settings for bored
+# verbatim (its tests/measured_repos.py), at the same ruleset version, so
+# moving them here re-measured nothing. Keep them as they are unless bored's
+# layout changes: changing `areas.rules` needs a new `areas.version`, which
+# re-measures bored's whole history at the next code-vitals deploy.
+#
+# A workflow of its own, so it never blocks or slows the build: its one step is
+# `failure: ignore`, nothing waits on it, and a missed run is harmless — the
+# next one catches up every trunk commit not yet recorded. The file must be
+# named code-vitals.yml: deployments read the settings from it, and the plugin
+# refuses to run from a workflow of any other name. It needs no checkout
+# (skip_clone): the collector clones this public repo itself, with full
+# history and tags. The plugin starts the collector through the docker socket
+# (the repo is trusted for volumes, as `build` and `e2e` need), because
+# code-vitals' prod Postgres and its OTLP collector are on networks a plugin
+# step cannot join. scripts/test-code-vitals-workflow.sh holds this shape.
+when:
+  - event: [push, manual]
+    branch: main
+
+skip_clone: true
+
+steps:
+  code-vitals:
+    # Moving tag `:stable`, which code-vitals' prod deployment moves only after
+    # its checks pass — the approved exception to digest pinning (code-vitals
+    # AGENTS.md § Deviations register). `pull: true` because Woodpecker
+    # otherwise reuses whatever `:stable` the agent already has, and the plugin
+    # starts the collector of its own version, so both would go stale
+    # (code-vitals #573).
+    image: registry.desync.link/code-vitals-plugin:stable
+    pull: true
+    failure: ignore
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    settings:
+      trunk: main
+      # Tried in order at each commit; the minor is the iteration.
+      version_sources:
+        - {path: Cargo.toml, kind: cargo-workspace}
+        - {path: Cargo.toml, kind: cargo-package}
+      areas:
+        version: 1
+        rules:
+          - {glob: "backend/**", area: backend}
+          - {glob: "frontend/**", area: web}
+          - {glob: "shared/**", area: shared}
+          - {glob: "mcp/**", area: shared}
+      # code-vitals' prod writer, from the broker's shared layer.
+      writer_password:
+        from_secret: code_vitals_prod_writer_password
