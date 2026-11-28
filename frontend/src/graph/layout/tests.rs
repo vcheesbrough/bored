@@ -533,21 +533,20 @@ fn assert_manual_testing_board_reads_cleanly(width: f64, max_crossings: usize) {
 fn the_manual_testing_board_has_no_line_through_a_card_at_any_width() {
     // 474px: three columns at a 1440px window — four crossings before card
     // #303's review, none now. 420px: a narrower window, none either.
-    // 370px: the minimum column width (`--col-min-width`); one crossing is
-    // left there, inside the 122 → 121 → 120 → 119 chain.
+    // 370px: the minimum column width (`--col-min-width`), none either.
     assert_manual_testing_board_reads_cleanly(474.0, 0);
     assert_manual_testing_board_reads_cleanly(420.0, 0);
-    assert_manual_testing_board_reads_cleanly(370.0, 1);
+    assert_manual_testing_board_reads_cleanly(370.0, 0);
 }
 
 /// 330px is narrower than any column the board can show (columns are never
-/// below 370px), one slot per row. Within the search's work budget the
-/// transitive chain there still ends with one line through a card: clearing
-/// it needs two cards of the chain moved and an empty row opened between
-/// them, which the budget-bounded search does not find (a budget about
-/// eight times larger does). Recorded, not hidden: run with `--ignored`.
+/// below 370px), with one slot per row. There the search leaves one line
+/// through a card (122 → 119 through 121): clearing it needs two cards of
+/// the chain moved and an empty row opened between them. More budget does
+/// not reliably fix it: measured at 1M, 2M and 4M work units, only 2M
+/// cleared it. Recorded, not hidden: run with `--ignored`.
 #[test]
-#[ignore = "known gap: needs ~8x the layout search budget at a width the board never shows"]
+#[ignore = "known gap at a width the board never shows: the search does not reliably clear 122->119 through 121 at 330px, at any budget tried"]
 fn the_manual_testing_board_at_330px_has_no_line_through_a_card() {
     assert_manual_testing_board_reads_cleanly(330.0, 1);
 }
@@ -623,6 +622,50 @@ fn the_search_stays_within_its_work_budget() {
         assert!(
             within(work, COMPONENT_WORK),
             "{work} units for one component (budget {COMPONENT_WORK})"
+        );
+    }
+}
+
+/// How many (line, card) pairs have the line passing through the card —
+/// counted with the independent brute-force check.
+fn lines_through_cards(layout: &Layout) -> usize {
+    layout
+        .edges
+        .iter()
+        .map(|edge| {
+            layout
+                .nodes
+                .iter()
+                .filter(|n| n.card_id != edge.predecessor && n.card_id != edge.successor)
+                .filter(|n| passes_through(edge.from, edge.to, &n.rect))
+                .count()
+        })
+        .sum()
+}
+
+#[test]
+fn dense_boards_keep_their_quality_within_the_budget() {
+    // A guard on budget tuning: shrinking the search's budget (or its share
+    // for annealing) must not quietly make dense boards worse. Fixed-seed
+    // boards; the bounds are what the budget of card #303's review reached
+    // (`COMPONENT_WORK` 500k, `ANNEAL_PERCENT` 70), counted with the
+    // independent checks above. Lower is fine — tighten them then.
+    let cases = [
+        // (columns, cards, links, half in one column, through, crossings)
+        (4, 40, 60, false, 33, 203),
+        (4, 40, 60, true, 105, 164),
+        (4, 20, 30, false, 0, 28),
+    ];
+    for (columns, cards, links, all_in_one, max_through, max_crossings) in cases {
+        let (c, l) = dense_board(columns, cards, links, all_in_one);
+        let layout = layout(&c, &l, &Params::default());
+        let through = lines_through_cards(&layout);
+        let crossings = crossing_pairs(&layout).len();
+        assert!(
+            through <= max_through && crossings <= max_crossings,
+            "{cards} cards / {links} links (half in one column: {all_in_one}): \
+             {through} lines through cards (at most {max_through}), \
+             {crossings} crossings (at most {max_crossings})"
         );
     }
 }

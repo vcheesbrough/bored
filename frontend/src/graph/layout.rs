@@ -675,23 +675,22 @@ const MAX_PASSES: usize = 12;
 ///
 /// Measured natively (release build, card #303 review) at 30–40 units per
 /// microsecond: a dense 40-card, 60-link component spends its whole budget
-/// in about 10–11 ms, and a 200-card board lays out in about 3 ms (one
-/// giant component, so whole-picture phases are skipped — see
-/// [`WHOLE_PICTURES`]). WebAssembly in a browser is perhaps twice as slow.
-/// The tests hold the search to these budgets in units, not time, so they
-/// are deterministic.
-pub const COMPONENT_WORK: u64 = 400_000;
-/// The budget for every component on the board together — at most about
-/// 40–50 ms natively. A board of many tangled components gives the later
-/// ones less (they still get their initial placement, which never has
-/// overlapping cards).
+/// in about 13–15 ms, and a 200-card, 300-link board lays out in about
+/// 12–13 ms. WebAssembly in a browser is perhaps twice as slow. The budget
+/// is the smallest that, with [`ANNEAL_PERCENT`], gets the user's
+/// `manual-testing` board to no crossings at the minimum column width; the
+/// tests hold the search to it in units, not time, so they are
+/// deterministic.
+pub const COMPONENT_WORK: u64 = 500_000;
+/// The budget for every component on the board together. A board of many
+/// tangled components gives the later ones less (they still get their
+/// initial placement, which never has overlapping cards).
 pub const LAYOUT_WORK: u64 = 1_500_000;
 /// How a component's budget is shared out, in percent: the first greedy
-/// descent, the first repair, then the annealing runs together; whatever
-/// is left goes to the final repair, re-slotting and descent.
+/// descent, then the annealing runs together; whatever is left goes to the
+/// final re-slotting and descent.
 const GREEDY_PERCENT: u64 = 20;
-const REPAIR_PERCENT: u64 = 20;
-const ANNEAL_PERCENT: u64 = 35;
+const ANNEAL_PERCENT: u64 = 70;
 /// Annealing temperature, in cost units: at the start a move that costs a
 /// crossing is often taken; by the end only improvements are.
 const ANNEAL_T_START: f64 = 3_000.0;
@@ -702,9 +701,6 @@ const MAX_SLOT_COMBOS: usize = 4_096;
 /// The whole-picture phases run only when this many whole-picture scores
 /// fit in the component's budget.
 const WHOLE_PICTURES: u64 = 20;
-/// How many moves that leave the number of lines through cards unchanged
-/// [`repair`] may take in a row.
-const REPAIR_SIDEWAYS: usize = 3;
 /// The most annealing runs (each with its own seed) a component gets.
 const ANNEAL_MAX_RUNS: u64 = 6;
 
@@ -919,29 +915,6 @@ impl Search<'_> {
         })
     }
 
-    /// Every `(link, card)` where the link's line passes through the card.
-    fn lines_through_cards(&self) -> Vec<(usize, usize)> {
-        let mut found = Vec::new();
-        for e in 0..self.edges.len() {
-            for l in 0..self.row.len() {
-                if self.through_cost(e, l) > 0.0 {
-                    found.push((e, l));
-                }
-            }
-        }
-        found
-    }
-
-    /// Open an empty row at `r`: every card on row `r` or below moves down
-    /// one. Relative order is kept, so no same-column link turns upward.
-    fn insert_row(&mut self, r: usize) {
-        for row in &mut self.row {
-            if *row >= r {
-                *row += 1;
-            }
-        }
-    }
-
     /// Does every same-column link touching `l` still read downward?
     fn order_holds(&self, l: usize) -> bool {
         self.spend(1 + self.edges.len() as u64 / 8);
@@ -986,8 +959,7 @@ fn refine(
     };
 
     // Greedy first, on a share of the budget: cheap, and on most components
-    // all that is needed. Then targeted repair of any line still running
-    // through a card, before the broader (and costlier) annealing.
+    // all that is needed.
     greedy(&mut s, &xs);
 
     // The phases below score whole pictures, and one such score tests every
@@ -1000,10 +972,6 @@ fn refine(
         s.limit = budget;
         greedy(&mut s, &xs);
         return finish(s, row, x);
-    }
-    if !s.lines_through_cards().is_empty() {
-        s.limit = budget * (GREEDY_PERCENT + REPAIR_PERCENT) / 100;
-        repair(&mut s, &xs);
     }
 
     // Then anneal: greedy stops at the first arrangement no single move
@@ -1051,7 +1019,6 @@ fn refine(
     // descend once more from wherever that lands.
     if s.faults() != (0, 0) {
         s.limit = budget;
-        repair(&mut s, &xs);
         slot_columns(&mut s, &xs);
         greedy(&mut s, &xs);
     }
@@ -1164,102 +1131,6 @@ fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
             break;
         }
     }
-}
-
-/// A [`repair`] candidate: its rank (lines through cards, then cost) and the
-/// whole picture's rows and x positions.
-type RepairPick = ((usize, f64), Vec<usize>, Vec<f64>);
-
-/// Targeted repair of the lines that still run through a card. For each such
-/// line, the blocking card and both of the line's ends are tried in every
-/// slot of every row of their column — and also in a freshly opened row at
-/// each height, which is the one move that gives a transitive link a clear
-/// corridor past a chain when the rows are packed (122 → 119 past 121 and
-/// 120 in a one-slot column). Candidates are ranked by how many lines then
-/// run through cards, then by the whole picture's cost.
-///
-/// Such a fix often takes two moves, and the first only trades one line
-/// through a card for another (121 steps aside, and 121 → 119 now runs
-/// through 120 until a row opens below it). So when nothing improves, up
-/// to [`REPAIR_SIDEWAYS`] moves that leave the count unchanged are taken,
-/// never returning to an arrangement already visited. The best arrangement
-/// seen is kept; the budget bounds the whole thing.
-fn repair(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
-    let rank = |s: &Search| (s.lines_through_cards().len(), s.total_cost());
-    let better = |a: (usize, f64), b: (usize, f64)| a.0 < b.0 || (a.0 == b.0 && a.1 < b.1 - 1e-6);
-    let mut best = (rank(s), s.row.clone(), s.x.clone());
-    let mut seen: HashSet<Vec<u64>> = HashSet::new();
-    // An arrangement's fingerprint: every card's row and x, as integers.
-    let key = |s: &Search| -> Vec<u64> {
-        s.row
-            .iter()
-            .zip(&s.x)
-            .flat_map(|(&r, &x)| [r as u64, x.round() as u64])
-            .collect()
-    };
-    seen.insert(key(s));
-    let mut sideways = 0;
-    loop {
-        let faults = s.lines_through_cards();
-        if faults.is_empty() || s.exhausted() {
-            break;
-        }
-        let current = (faults.len(), s.total_cost());
-        // The best candidate so far: its rank and the whole picture.
-        let mut pick: Option<RepairPick> = None;
-        // Each candidate is undone before the next, so stopping anywhere
-        // (at the budget) leaves the picture as it was.
-        'candidates: for (e, blocker) in faults {
-            let (u, v, _) = s.edges[e];
-            for l in [blocker, u, v] {
-                let (home_row, home_x) = (s.row.clone(), s.x.clone());
-                let max_row = s.row.iter().copied().max().unwrap_or(0) + 1;
-                for r in 0..=max_row {
-                    for open in [false, true] {
-                        for &cx in &xs[&s.col[l]] {
-                            if s.exhausted() {
-                                break 'candidates;
-                            }
-                            if open {
-                                s.insert_row(r);
-                            }
-                            s.row[l] = r;
-                            s.x[l] = cx;
-                            if !s.overlaps(l, r, cx, &[])
-                                && s.order_holds(l)
-                                && !seen.contains(&key(s))
-                            {
-                                let candidate = rank(s);
-                                if pick.as_ref().is_none_or(|(c, _, _)| better(candidate, *c)) {
-                                    pick = Some((candidate, s.row.clone(), s.x.clone()));
-                                }
-                            }
-                            s.row.clone_from(&home_row);
-                            s.x.clone_from(&home_x);
-                        }
-                    }
-                }
-            }
-        }
-        let Some((candidate, row, x)) = pick else {
-            break;
-        };
-        if better(candidate, current) {
-            // A real improvement.
-        } else if candidate.0 == current.0 && sideways < REPAIR_SIDEWAYS {
-            sideways += 1;
-        } else {
-            break;
-        }
-        s.row = row;
-        s.x = x;
-        seen.insert(key(s));
-        if better(candidate, best.0) {
-            best = (candidate, s.row.clone(), s.x.clone());
-        }
-    }
-    s.row = best.1;
-    s.x = best.2;
 }
 
 /// For each column of the component, try every way of putting its cards in

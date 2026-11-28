@@ -197,7 +197,7 @@ fn tab_order(nodes: &[NodeView], edges: &[EdgeView]) -> Vec<Focusable> {
 
 /// The last layout and the inputs it was computed from.
 ///
-/// The layout runs a search bounded by a work budget (up to ~10 ms natively
+/// The layout runs a search bounded by a work budget (up to ~15 ms natively
 /// for a tangled component, perhaps twice that in the browser — see
 /// `layout::COMPONENT_WORK`), and most changes the graph's memo sees leave
 /// every position where it was: a card's body edited, a reason reworded, a
