@@ -182,6 +182,42 @@ test.describe('board link graph', () => {
     expect(panics).toEqual([]);
   });
 
+  test('a link chip in a card opened from the graph opens the next card over the graph', async ({
+    page,
+    request,
+  }) => {
+    const { board, cards } = await linkedBoard(request, 'graph-chip');
+    const panics = watchForPanics(page);
+    await gotoGraph(page, board.name);
+
+    await node(page, cards.active.number).click();
+    await expect(page.locator('.modal-card-number')).toHaveText(
+      `#${String(cards.active.number).padStart(3, '0')}`
+    );
+
+    // `active` comes before `next`: its "after" chip opens `next` — still
+    // over the graph, not back in text mode.
+    await page
+      .locator('.modal .link-group[data-side="after"] .link-chip-card', {
+        hasText: `#${cards.next.number}`,
+      })
+      .click();
+    await expect(page).toHaveURL(
+      new RegExp(`/boards/${board.name}/graph\\?card=${cards.next.number}$`)
+    );
+    await expect(page.locator('.modal-card-number')).toHaveText(
+      `#${String(cards.next.number).padStart(3, '0')}`
+    );
+
+    await page.locator('.modal').press('Escape');
+    await expect(page.locator('.modal')).toHaveCount(0);
+    await expect(page).toHaveURL(new RegExp(`/boards/${board.name}/graph$`));
+    await expect(page.locator('.graph-body')).toBeVisible();
+
+    await expectAlive(page);
+    expect(panics).toEqual([]);
+  });
+
   test('a link added elsewhere appears in the graph without a reload', async ({
     page,
     request,
@@ -316,6 +352,39 @@ test.describe('board link graph', () => {
     const box = await node(page, cards.shipped.number).boundingBox();
     expect(box!.x).toBeGreaterThanOrEqual(header!.x);
     expect(box!.x + box!.width).toBeLessThanOrEqual(header!.x + header!.width);
+
+    await expectAlive(page);
+    expect(panics).toEqual([]);
+  });
+
+  test('nodes follow their columns when the window is resized', async ({ page, request }) => {
+    // Columns are `flex: 1`, so their widths follow the window; the graph
+    // re-measures the headers (a ResizeObserver on the header row) and lays
+    // the nodes out again under them.
+    await page.setViewportSize({ width: 1400, height: 800 });
+    const { board, cards } = await linkedBoard(request, 'graph-resize');
+    const panics = watchForPanics(page);
+    await gotoGraph(page, board.name);
+    await expect(page.locator('.graph-node')).toHaveCount(5);
+
+    const doneHeader = page
+      .locator('.column-view')
+      .filter({ has: page.locator('.column-name', { hasText: /^Done$/i }) });
+    /** Is the Done card horizontally inside the Done header right now? */
+    const underItsHeader = async () => {
+      const header = await doneHeader.boundingBox();
+      const box = await node(page, cards.shipped.number).boundingBox();
+      return box!.x >= header!.x && box!.x + box!.width <= header!.x + header!.width;
+    };
+    expect(await underItsHeader()).toBe(true);
+    const before = await node(page, cards.shipped.number).boundingBox();
+
+    await page.setViewportSize({ width: 1800, height: 800 });
+
+    // The header has moved right; the node must follow it.
+    await expect.poll(underItsHeader).toBe(true);
+    const after = await node(page, cards.shipped.number).boundingBox();
+    expect(after!.x).toBeGreaterThan(before!.x + 100);
 
     await expectAlive(page);
     expect(panics).toEqual([]);

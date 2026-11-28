@@ -41,7 +41,8 @@
 //!    the component laid out again, a bounded number of times: a node blocking
 //!    a line between two cards of its own column is *nudged* to the left of
 //!    its row (lines between centred nodes run down the middle), and anything
-//!    else pushes the link's successor down a rank so the line tilts past the
+//!    else lengthens that one link by a rank — its successor must then sit a
+//!    rank further below its predecessor — so the line tilts past the
 //!    blocker. What the bound cannot clear is drawn as it is — crossings are
 //!    minimised, not guaranteed away.
 //! 6. **Placing components.** Components go down the page in the order of
@@ -198,7 +199,7 @@ pub fn slots_per_row(width: f64, p: &Params) -> usize {
 /// component gets. Each round costs one full component layout; the bound is
 /// what keeps a pathological component from spinning.
 const MAX_ROUNDS: usize = 12;
-/// How many times one card may be pushed down a rank to clear a line.
+/// How many times one link may be lengthened by a rank to clear its line.
 const MAX_BUMPS: u8 = 3;
 /// How many barycentre ordering sweeps each layout round runs.
 const SWEEPS: usize = 4;
@@ -477,8 +478,9 @@ fn layout_component(
     let text: Vec<usize> = members.iter().map(|&g| cards[g].text).collect();
 
     // Local edges with their rank weight: 1 inside a column (must read
-    // down), 0 across columns (may run level).
-    let local_edges: Vec<(usize, usize, usize)> = edges
+    // down), 0 across columns (may run level). `mut` because a conflict round
+    // may lengthen a link (raise its weight) to tilt its line past a card.
+    let mut local_edges: Vec<(usize, usize, usize)> = edges
         .iter()
         .map(|e| {
             let (u, v) = (local[&e.from], local[&e.to]);
@@ -493,15 +495,15 @@ fn layout_component(
         neighbours[v].push(u);
     }
 
-    // What the conflict rounds have learned so far.
-    let mut min_rank = vec![0usize; n];
-    let mut bumps = vec![0u8; n];
+    // What the conflict rounds have learned so far: how often each link
+    // (by its index in `local_edges`) has been lengthened, and which cards
+    // have been nudged aside.
+    let mut bumps = vec![0u8; local_edges.len()];
     let mut nudged = vec![false; n];
 
     let mut arrangement = arrange(
         &local_edges,
         &neighbours,
-        &min_rank,
         &nudged,
         &col,
         &text,
@@ -515,18 +517,34 @@ fn layout_component(
             break;
         }
         let mut changed = false;
-        // A card pushed down once per round is enough: every conflict it is
-        // the successor of was measured against the same old rank.
-        let mut bumped_this_round: HashSet<usize> = HashSet::new();
         for (u, v, blocker) in conflicts {
             let vertical_in_blockers_column = col[u] == col[blocker] && col[v] == col[blocker];
             if vertical_in_blockers_column && !nudged[blocker] && arrangement.has_free_slot[blocker]
             {
                 nudged[blocker] = true;
                 changed = true;
-            } else if bumps[v] < MAX_BUMPS && bumped_this_round.insert(v) {
-                min_rank[v] = arrangement.rank[v] + 1;
-                bumps[v] += 1;
+                continue;
+            }
+            // Lengthen the link itself: its weight becomes the gap it spans
+            // now plus one, so its successor must sit at least one rank
+            // further below its predecessor than it does.
+            //
+            // This is recorded on the *link*, not as a floor on the
+            // successor's rank. A floor does not survive `rank_nodes`: the
+            // pull-down lifts the successor's predecessors down beside it and
+            // the normalisation then shifts the whole component back up to
+            // rank 0 — the same picture again. A weight is a constraint
+            // *between* the two cards, which both of those steps keep.
+            //
+            // The links were de-duplicated in `layout`, so `(u, v)` names
+            // exactly one of them.
+            let Some(e) = local_edges.iter().position(|&(a, b, _)| a == u && b == v) else {
+                continue;
+            };
+            if bumps[e] < MAX_BUMPS {
+                let gap = arrangement.rank[v].saturating_sub(arrangement.rank[u]) + 1;
+                local_edges[e].2 = local_edges[e].2.max(gap);
+                bumps[e] += 1;
                 changed = true;
             }
         }
@@ -536,7 +554,6 @@ fn layout_component(
         arrangement = arrange(
             &local_edges,
             &neighbours,
-            &min_rank,
             &nudged,
             &col,
             &text,
@@ -588,7 +605,6 @@ fn find_conflicts(
 fn arrange(
     edges: &[(usize, usize, usize)],
     neighbours: &[Vec<usize>],
-    min_rank: &[usize],
     nudged: &[bool],
     col: &[usize],
     text: &[usize],
@@ -597,7 +613,7 @@ fn arrange(
     p: &Params,
 ) -> Arrangement {
     let n = col.len();
-    let rank = rank_nodes(n, edges, min_rank);
+    let rank = rank_nodes(n, edges);
 
     // Group by (rank, column). Each group starts in text-mode order; a
     // `BTreeMap` iterates groups in rank order, which `position` relies on.
@@ -714,11 +730,13 @@ fn position(
 /// Step 3: rank every node of a component.
 ///
 /// `edges` are `(predecessor, successor, weight)`; the result satisfies
-/// `rank[successor] >= rank[predecessor] + weight` and `rank >= min_rank` for
-/// every node, provided the links form no cycle (the server refuses cycles;
-/// rows written before it did are still laid out, just without the
-/// guarantee).
-fn rank_nodes(n: usize, edges: &[(usize, usize, usize)], min_rank: &[usize]) -> Vec<usize> {
+/// `rank[successor] >= rank[predecessor] + weight` for every link, and the
+/// lowest rank is 0, provided the links form no cycle (the server refuses
+/// cycles; rows written before it did are still laid out, just without the
+/// guarantee). Every constraint is *relative* — between two cards — which is
+/// why the conflict rounds lengthen links rather than set a floor on a rank:
+/// the pull-down and the normalisation below keep every gap but move ranks.
+fn rank_nodes(n: usize, edges: &[(usize, usize, usize)]) -> Vec<usize> {
     let mut out: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     let mut indegree = vec![0usize; n];
     for &(u, v, w) in edges {
@@ -748,7 +766,7 @@ fn rank_nodes(n: usize, edges: &[(usize, usize, usize)], min_rank: &[usize]) -> 
 
     // Longest path: walking in topological order, every predecessor's rank
     // is final before its successors are visited.
-    let mut rank = min_rank.to_vec();
+    let mut rank = vec![0usize; n];
     for &u in &order {
         for &(v, w) in &out[u] {
             rank[v] = rank[v].max(rank[u] + w);

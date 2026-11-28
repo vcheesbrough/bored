@@ -295,6 +295,50 @@ fn a_line_skipping_a_column_tilts_past_the_card_in_between() {
     assert_no_line_through_a_node(&layout);
 }
 
+/// Todo | Doing | Done, one card each, 250px columns.
+fn three_columns_t_m_d() -> [ColumnInput; 3] {
+    [
+        column(0.0, 250.0, &["t"]),
+        column(250.0, 250.0, &["m"]),
+        column(500.0, 250.0, &["d"]),
+    ]
+}
+
+#[test]
+fn a_skipping_line_into_a_card_the_middle_card_also_leads_to_tilts_clear() {
+    // d (Done) and m (Doing) both lead into t (Todo). Level, the line d → t
+    // would lie on top of m → t and read as d → m → t. Every predecessor of
+    // t is in another column, so pushing t down must survive the pull-down
+    // that lifts m and d after it: t and m drop to row 1, d stays on row 0,
+    // and d's line tilts past m. Hand-worked: rows at y = 10 and 80; lone
+    // nodes centred at L + 75.
+    let layout = layout(
+        &three_columns_t_m_d(),
+        &[link("m", "t"), link("d", "t")],
+        &params(),
+    );
+    assert_eq!(at(&layout, "d"), (575.0, 10.0));
+    assert_eq!(at(&layout, "m"), (325.0, 80.0));
+    assert_eq!(at(&layout, "t"), (75.0, 80.0));
+    assert_no_line_through_a_node(&layout);
+}
+
+#[test]
+fn a_transitive_link_across_columns_tilts_clear_of_the_chain() {
+    // The e2e fixture's Done → Doing → Todo chain plus the transitive
+    // Done → Todo link. Level, d → t would hide m → t and invent a d → m → t
+    // reading. Hand-worked as above: d on row 0, m and t level on row 1.
+    let layout = layout(
+        &three_columns_t_m_d(),
+        &[link("d", "m"), link("m", "t"), link("d", "t")],
+        &params(),
+    );
+    assert_eq!(at(&layout, "d"), (575.0, 10.0));
+    assert_eq!(at(&layout, "m"), (325.0, 80.0));
+    assert_eq!(at(&layout, "t"), (75.0, 80.0));
+    assert_no_line_through_a_node(&layout);
+}
+
 #[test]
 fn a_transitive_link_in_one_column_nudges_the_middle_card_aside() {
     // a → b → c and a → c: centred, a's line to c would run through b.
