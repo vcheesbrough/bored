@@ -1,6 +1,7 @@
 mod api;
 pub(crate) mod audit_edit_session;
 mod caret;
+mod collapsed;
 mod columns;
 mod components;
 mod connection;

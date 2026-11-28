@@ -8,7 +8,7 @@
 //! reaches for. This module remembers the picks instead.
 //!
 //! The picks live in `localStorage`, keyed per board, exactly like the
-//! collapsed-column state in [`crate::components::column`]. They are therefore
+//! collapsed-column state in [`crate::collapsed`]. They are therefore
 //! per-browser: a different device, or a cleared store, simply falls back to
 //! the recency ordering the callers apply underneath the pick ranks.
 //!

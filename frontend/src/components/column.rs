@@ -1,7 +1,6 @@
-use std::collections::HashSet;
-
 use leptos::prelude::*;
 
+use crate::collapsed::CollapsedColumns;
 use crate::components::card::{CardItem, ExpandedCardId};
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
 use crate::links::BoardLinkIndex;
@@ -12,42 +11,6 @@ use crate::snapshot::SnapshotGate;
 /// look up their own current position within the column at drop time.
 #[derive(Clone, Copy)]
 pub struct ColumnCards(pub RwSignal<Vec<RwSignal<shared::Card>>>);
-
-const COLLAPSED_COLUMNS_STORAGE_PREFIX: &str = "bored:collapsed-columns:";
-
-fn collapsed_columns_storage_key(board_id: &str) -> String {
-    format!("{COLLAPSED_COLUMNS_STORAGE_PREFIX}{board_id}")
-}
-
-fn load_collapsed_columns(board_id: &str) -> HashSet<String> {
-    let key = collapsed_columns_storage_key(board_id);
-    window()
-        .local_storage()
-        .ok()
-        .flatten()
-        .and_then(|storage| storage.get_item(&key).ok().flatten())
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default()
-}
-
-fn persist_column_collapsed(board_id: &str, column_id: &str, collapsed: bool) {
-    let Ok(Some(storage)) = window().local_storage() else {
-        return;
-    };
-    let key = collapsed_columns_storage_key(board_id);
-    let mut collapsed_columns = load_collapsed_columns(board_id);
-    if collapsed {
-        collapsed_columns.insert(column_id.to_owned());
-    } else {
-        collapsed_columns.remove(column_id);
-    }
-
-    if collapsed_columns.is_empty() {
-        let _ = storage.remove_item(&key);
-    } else if let Ok(value) = serde_json::to_string(&collapsed_columns) {
-        let _ = storage.set_item(&key, &value);
-    }
-}
 
 #[component]
 pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<String>) -> AnyView {
@@ -111,8 +74,35 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     // ── Static column metadata ─────────────────────────────────────────────
     let initial = column.get_untracked();
     let col_id = initial.id.clone();
-    let board_id = initial.board_id.clone();
-    let is_collapsed = RwSignal::new(load_collapsed_columns(&board_id).contains(&col_id));
+    // ── Collapse state, from the board (card #649) ─────────────────────────
+    // `BoardView` owns which columns are collapsed, so that code outside this
+    // column (the link graph, #303) can see it too. This column only *derives*
+    // its own flag from that board-level set, and its buttons write the set.
+    let collapsed_columns =
+        use_context::<CollapsedColumns>().expect("CollapsedColumns context missing");
+    // A `Memo` rather than `Signal::derive`: a memo caches its answer and only
+    // notifies its readers when that answer *changes*. Collapsing one column
+    // writes the board-wide set, which wakes every column's memo — but only the
+    // memo of the column that actually changed passes the change on, so the
+    // other columns' class bindings below do not re-run. `col_id_memo` is a
+    // clone owned by the closure, because a memo's closure must be `'static`
+    // and cannot borrow `col_id` from this function's stack.
+    //
+    // The memo lives in the reactive arena and is disposed with this
+    // component, so every read below is `try_get` with a fallback — reading a
+    // disposed memo during unmount would panic and wedge the tab. The closure
+    // reads the set with `try_with` for the same reason.
+    let col_id_memo = col_id.clone();
+    let is_collapsed = Memo::new(move |_| {
+        collapsed_columns
+            .ids
+            .try_with(|ids| ids.contains(&col_id_memo))
+            .unwrap_or(false)
+    });
+    // The one read helper the view uses, so the fallback is written once.
+    // `Memo` is `Copy`, so this closure is `Copy` too and can be handed to
+    // several attributes without cloning.
+    let collapsed_now = move || is_collapsed.try_get().unwrap_or(false);
     let col_id_fetch = col_id.clone();
     let col_id_sse = col_id.clone();
     let col_id_card_drop = col_id.clone();
@@ -124,8 +114,6 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     let col_id_expand = col_id.clone();
     let col_id_attr = col_id.clone();
     let col_id_collapsed_dragstart = col_id.clone();
-    let board_id_collapse = board_id.clone();
-    let board_id_expand = board_id.clone();
     let col_id_collapsed_drop = col_id.clone();
     let col_id_sort = col_id.clone();
 
@@ -461,15 +449,15 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
     view! {
         <div
             class="column-view"
-            class:column-collapsed=move || is_collapsed.get()
+            class:column-collapsed=collapsed_now
             data-column-id=col_id_attr
-            data-collapsed=move || is_collapsed.get().to_string()
+            data-collapsed=move || collapsed_now().to_string()
             on:dragover=on_col_dragover
             on:drop=on_col_drop
         >
             <div
                 class="column-expanded-content"
-                class:is-hidden=move || is_collapsed.get()
+                class:is-hidden=collapsed_now
             >
                 <div class="column-header">
                     <span
@@ -509,8 +497,9 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                         title="Collapse column"
                         aria-label="Collapse column"
                         on:click=move |_| {
-                            persist_column_collapsed(&board_id_collapse, &col_id_collapse, true);
-                            is_collapsed.set(true);
+                            // Writes the board-level set (and storage); the
+                            // memo above picks the change up.
+                            collapsed_columns.set_collapsed(&col_id_collapse, true);
                         }
                     >"─"</button>
                     <button
@@ -660,7 +649,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
 
             <div
                 class="collapsed-column-drop-target"
-                class:is-hidden=move || !is_collapsed.get()
+                class:is-hidden=move || !collapsed_now()
                 class:drag-over=move || {
                     card_list_drag_over.get()
                         && matches!(drag_payload.get(), DragPayload::Card { .. })
@@ -694,8 +683,7 @@ pub fn ColumnView(column: RwSignal<shared::Column>, on_column_drop: Callback<Str
                     title="Expand column"
                     aria-label="Expand column"
                     on:click=move |_| {
-                        persist_column_collapsed(&board_id_expand, &col_id_expand, false);
-                        is_collapsed.set(false);
+                        collapsed_columns.set_collapsed(&col_id_expand, false);
                     }
                 >"🗖"</button>
             </div>

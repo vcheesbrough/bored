@@ -1,5 +1,30 @@
-import { expect, test } from '@playwright/test';
-import { apiCreateBoard, apiCreateCard, apiCreateColumn, gotoBoardView } from './helpers';
+import { expect, test, type Page } from '@playwright/test';
+import {
+  apiCreateBoard,
+  apiCreateCard,
+  apiCreateColumn,
+  apiDeleteColumn,
+  gotoBoardView,
+  openChooser,
+} from './helpers';
+
+/** The collapsed-column ids stored for `boardId`, sorted; `null` when unset. */
+async function storedCollapsed(page: Page, boardId: string): Promise<string[] | null> {
+  return page.evaluate(id => {
+    const stored = localStorage.getItem(`bored:collapsed-columns:${id}`);
+    return stored ? (JSON.parse(stored) as string[]).sort() : null;
+  }, boardId);
+}
+
+/** Collect panics and disposed-signal errors, which wedge the WASM tab silently. */
+function watchForPanics(page: Page): string[] {
+  const panics: string[] = [];
+  page.on('console', msg => {
+    if (/panic|already been disposed/i.test(msg.text())) panics.push(msg.text());
+  });
+  page.on('pageerror', err => panics.push(String(err)));
+  return panics;
+}
 
 test.describe('Iteration 33 - minimise columns', () => {
   test('expanded columns can be dragged one position to the right', async ({ page, request }) => {
@@ -166,5 +191,101 @@ test.describe('Iteration 33 - minimise columns', () => {
       'false'
     );
     await expect(page.locator(`[data-column-id="${otherColumn.id}"] .add-card-btn`)).toBeVisible();
+  });
+
+  // Card #649: collapse state lives in a board-level context. `BoardView` is
+  // reused across `/boards/:slug`, so switching boards in-app (the chooser, not
+  // a full page load) must load the set of the board being shown — neither
+  // keeping the previous board's set nor losing this one's. Both boards have a
+  // collapsed column, so a set loaded only once per page (the bug a reused
+  // component invites) shows up on the first switch.
+  test('a collapsed column stays collapsed after reload and after switching boards in-app', async ({
+    page,
+    request,
+  }) => {
+    const panics = watchForPanics(page);
+    const boardA = await apiCreateBoard(request, `collapse-ctx-a-${Date.now()}`);
+    const folded = await apiCreateColumn(request, boardA.name, 'Folded', 0);
+    const open = await apiCreateColumn(request, boardA.name, 'Open', 1);
+    const boardB = await apiCreateBoard(request, `collapse-ctx-b-${Date.now()}`);
+    const otherFolded = await apiCreateColumn(request, boardB.name, 'Other folded', 0);
+    const otherOpen = await apiCreateColumn(request, boardB.name, 'Other open', 1);
+    const foldedColumn = page.locator(`[data-column-id="${folded.id}"]`);
+    const openColumn = page.locator(`[data-column-id="${open.id}"]`);
+    const otherFoldedColumn = page.locator(`[data-column-id="${otherFolded.id}"]`);
+    const otherOpenColumn = page.locator(`[data-column-id="${otherOpen.id}"]`);
+
+    // Board B gets a collapsed column of its own first.
+    await gotoBoardView(page, boardB.name);
+    await otherFoldedColumn.getByRole('button', { name: 'Collapse column' }).click();
+    await expect(otherFoldedColumn).toHaveAttribute('data-collapsed', 'true');
+    await expect.poll(() => storedCollapsed(page, boardB.id)).toEqual([otherFolded.id]);
+
+    // Then board A, by a full page load.
+    await gotoBoardView(page, boardA.name);
+    await foldedColumn.getByRole('button', { name: 'Collapse column' }).click();
+    await expect(foldedColumn).toHaveAttribute('data-collapsed', 'true');
+    await expect(openColumn).toHaveAttribute('data-collapsed', 'false');
+    // Same key and format as before the lift, so existing users keep theirs.
+    await expect.poll(() => storedCollapsed(page, boardA.id)).toEqual([folded.id]);
+
+    await page.reload();
+    await expect(foldedColumn).toHaveAttribute('data-collapsed', 'true');
+    await expect(openColumn).toHaveAttribute('data-collapsed', 'false');
+
+    // In-app switch to B: B's own set, and nothing of A's.
+    await openChooser(page);
+    await page.locator('.chooser-board-row').filter({ hasText: boardB.name }).click();
+    await expect(page).toHaveURL(new RegExp(`/boards/${boardB.name}$`));
+    await expect(otherFoldedColumn).toHaveAttribute('data-collapsed', 'true');
+    await expect(otherFoldedColumn.locator('.add-card-btn')).not.toBeVisible();
+    await expect(otherOpenColumn).toHaveAttribute('data-collapsed', 'false');
+    await expect(otherOpenColumn.locator('.add-card-btn')).toBeVisible();
+
+    // And back to A, still in-app: A's set is loaded again.
+    await openChooser(page);
+    await page.locator('.chooser-board-row').filter({ hasText: boardA.name }).click();
+    await expect(page).toHaveURL(new RegExp(`/boards/${boardA.name}$`));
+    await expect(foldedColumn).toHaveAttribute('data-collapsed', 'true');
+    await expect(foldedColumn.locator('.add-card-btn')).not.toBeVisible();
+    await expect(openColumn).toHaveAttribute('data-collapsed', 'false');
+
+    // Liveness: the board still reacts after all that — expanding works, the
+    // emptied set removes A's key rather than storing `[]`, and the write went
+    // to A's key only.
+    await foldedColumn.getByRole('button', { name: 'Expand column' }).click();
+    await expect(foldedColumn).toHaveAttribute('data-collapsed', 'false');
+    await expect(foldedColumn.locator('.add-card-btn')).toBeVisible();
+    await expect.poll(() => storedCollapsed(page, boardA.id)).toBeNull();
+    expect(await storedCollapsed(page, boardB.id)).toEqual([otherFolded.id]);
+    expect(panics).toEqual([]);
+  });
+
+  test('deleting a collapsed column drops it from the stored set', async ({ page, request }) => {
+    const panics = watchForPanics(page);
+    const board = await apiCreateBoard(request, `collapse-ctx-delete-${Date.now()}`);
+    const doomed = await apiCreateColumn(request, board.name, 'Doomed', 0);
+    const kept = await apiCreateColumn(request, board.name, 'Kept', 1);
+    await gotoBoardView(page, board.name);
+
+    const doomedColumn = page.locator(`[data-column-id="${doomed.id}"]`);
+    const keptColumn = page.locator(`[data-column-id="${kept.id}"]`);
+    await doomedColumn.getByRole('button', { name: 'Collapse column' }).click();
+    await keptColumn.getByRole('button', { name: 'Collapse column' }).click();
+    await expect
+      .poll(() => storedCollapsed(page, board.id))
+      .toEqual([doomed.id, kept.id].sort());
+
+    // Deleted elsewhere: this tab hears it over SSE (`ColumnDeleted`).
+    await apiDeleteColumn(request, doomed.id);
+    await expect(doomedColumn).toHaveCount(0);
+    await expect.poll(() => storedCollapsed(page, board.id)).toEqual([kept.id]);
+
+    // Liveness: the surviving column is still collapsed and still responds.
+    await expect(keptColumn).toHaveAttribute('data-collapsed', 'true');
+    await keptColumn.getByRole('button', { name: 'Expand column' }).click();
+    await expect(keptColumn).toHaveAttribute('data-collapsed', 'false');
+    await expect.poll(() => storedCollapsed(page, board.id)).toBeNull();
+    expect(panics).toEqual([]);
   });
 });
