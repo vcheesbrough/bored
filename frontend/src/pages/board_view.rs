@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::prelude::*;
 
+use crate::collapsed::CollapsedColumns;
 use crate::components::board_chooser::BoardChooser;
 use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
@@ -219,6 +220,15 @@ pub fn BoardView() -> AnyView {
     let recent = RecentPicks::new(board_ulid);
     Effect::new(move |_| recent.load());
     provide_context(recent);
+    // Which columns are collapsed (card #649), lifted out of `ColumnView` so
+    // that the rest of the board can observe it. Same lifecycle as `recent`:
+    // keyed by the board ULID and reloaded from `localStorage` whenever the
+    // ULID changes — `BoardView` is reused across `/boards/:slug`, so a
+    // load-once-on-mount would keep the first board's set. `load` reads the
+    // ULID tracked, which is what subscribes this effect to it.
+    let collapsed_columns = CollapsedColumns::new(board_ulid);
+    Effect::new(move |_| collapsed_columns.load());
+    provide_context(collapsed_columns);
     // The current board load's span (card #416), for the columns' own card
     // fetches to be parented to. A `StoredValue` rather than a signal: nothing
     // should re-run because a trace id changed.

@@ -10,6 +10,7 @@
 
 use leptos::prelude::*;
 
+use crate::collapsed::CollapsedColumns;
 use crate::links::BoardLinkIndex;
 use crate::search::BoardCardIndex;
 
@@ -124,10 +125,11 @@ pub fn remove(owner: &Owner, columns: RwSignal<Vec<RwSignal<shared::Column>>>, c
     // `owner.with` runs the closure with `owner` as the current reactive
     // owner, so `use_context` searches the board's contexts. Each lookup is an
     // `Option`: `None` when that context was never provided.
-    let (card_index, link_index) = owner.with(|| {
+    let (card_index, link_index, collapsed) = owner.with(|| {
         (
             use_context::<BoardCardIndex>(),
             use_context::<BoardLinkIndex>(),
+            use_context::<CollapsedColumns>(),
         )
     });
     // A let-chain: the body runs only when both lookups found something.
@@ -140,6 +142,15 @@ pub fn remove(owner: &Owner, columns: RwSignal<Vec<RwSignal<shared::Column>>>, c
         // re-reading a still-borrowed signal aborts the tab.
         let card_ids = card_index.card_ids_in_column_untracked(column_id);
         link_index.remove_touching_any(&card_ids);
+    }
+    // A deleted column can never be shown again, so its id comes out of the
+    // collapsed set too (card #649) — otherwise the stored set would grow with
+    // dead ids forever. Before the retain for the same reason as the link
+    // prune: the write then reaches a column component that is still alive,
+    // never one mid-unmount. `forget` is `try_*` throughout and writes nothing
+    // when the column was not collapsed.
+    if let Some(collapsed) = collapsed {
+        collapsed.forget(column_id);
     }
     // `get_untracked` inside the retain: this is a write, and must not
     // subscribe whatever effect happens to be running to every column.
@@ -256,6 +267,7 @@ mod tests {
     // values are written out literally rather than computed.
 
     use super::remove;
+    use crate::collapsed::CollapsedColumns;
     use crate::links::BoardLinkIndex;
     use crate::search::BoardCardIndex;
     use leptos::prelude::*;
@@ -336,6 +348,13 @@ mod tests {
             };
             provide_context(card_index);
             provide_context(link_index);
+            // Both columns start collapsed. No board id, so `forget` stays in
+            // memory and never reaches `window()`, which the host lacks.
+            let collapsed = CollapsedColumns::new(RwSignal::new(String::new()));
+            collapsed
+                .ids
+                .set(["doomed", "kept"].into_iter().map(str::to_string).collect());
+            provide_context(collapsed);
             (columns, card_index, link_index)
         })
     }
@@ -377,6 +396,18 @@ mod tests {
         remove(&owner, columns, "doomed");
         assert_eq!(column_ids(columns), ["kept"]);
         assert_eq!(link_ids(links), ["z-w"]);
+    }
+
+    #[test]
+    fn removing_a_column_drops_it_from_the_collapsed_set() {
+        // Card #649: a deleted column's id must not linger in the stored set.
+        let owner = Owner::new();
+        let (columns, _, _) = board(&owner, Vec::new());
+        remove(&owner, columns, "doomed");
+        let collapsed = owner.with(expect_context::<CollapsedColumns>);
+        let mut left: Vec<String> = collapsed.ids.get_untracked().into_iter().collect();
+        left.sort();
+        assert_eq!(left, ["kept"]);
     }
 
     #[test]
