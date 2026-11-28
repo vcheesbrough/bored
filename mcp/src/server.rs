@@ -443,6 +443,12 @@ async fn require_ok(resp: reqwest::Response) -> Result<reqwest::Response, McpErr
 /// rather than sent to be rejected or truncated.
 const MAX_AGENT_IMAGE_BYTES: usize = 3_750_000;
 
+/// The largest SVG `get_image` returns. An SVG comes back as *text*, and
+/// clients cap a tool's text output far below the raster limit (Claude Code
+/// at roughly 25k tokens); 60 KB of XML is roughly 15–20k tokens, so the
+/// size error, not a truncated document, is what an agent sees beyond it.
+const MAX_AGENT_SVG_BYTES: usize = 60_000;
+
 /// The raster types an agent receives as MCP image content. SVG is text and
 /// comes back as its source instead.
 const RASTER_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -481,15 +487,21 @@ fn is_uuid(id: &str) -> bool {
 /// The tool result for a fetched image: image content for a raster type, the
 /// source text for an SVG.
 fn image_result(content_type: &str, bytes: &[u8]) -> Result<CallToolResult, McpError> {
-    if bytes.len() > MAX_AGENT_IMAGE_BYTES {
+    let is_svg = content_type == "image/svg+xml";
+    let cap = if is_svg {
+        MAX_AGENT_SVG_BYTES
+    } else {
+        MAX_AGENT_IMAGE_BYTES
+    };
+    if bytes.len() > cap {
         return Err(mcp_err(format!(
-            "image is {} bytes, over the {MAX_AGENT_IMAGE_BYTES} an agent can be sent; \
+            "image is {} bytes, over the {cap} an agent can be sent; \
              open it in the bored web UI instead",
             bytes.len()
         )));
     }
     let summary = Content::text(format!("{content_type}, {} bytes", bytes.len()));
-    if content_type == "image/svg+xml" {
+    if is_svg {
         // An SVG is XML: its source is what an agent can read.
         let source = String::from_utf8_lossy(bytes).into_owned();
         return Ok(CallToolResult::success(vec![
@@ -502,7 +514,6 @@ fn image_result(content_type: &str, bytes: &[u8]) -> Result<CallToolResult, McpE
             "unexpected image content type {content_type:?}"
         )));
     }
-    use base64::Engine as _;
     let data = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(CallToolResult::success(vec![
         summary,
@@ -991,7 +1002,6 @@ impl BoredMcp {
         &self,
         Parameters(UploadImageParams { data_base64 }): Parameters<UploadImageParams>,
     ) -> Result<CallToolResult, McpError> {
-        use base64::Engine as _;
         // Line breaks are common in pasted base64; anything else invalid is
         // refused here, before a request is made.
         let cleaned: String = data_base64.split_whitespace().collect();
@@ -1150,6 +1160,9 @@ mod tests {
     const PNG_ID: &str = "0b6f9a4e-3f51-4a8e-9b7e-2f1d6c5a4b3c";
     const SVG_ID: &str = "11111111-2222-4333-8444-555555555555";
     const BIG_ID: &str = "99999999-8888-4777-8666-555555555555";
+    const AT_CAP_ID: &str = "99999999-8888-4777-8666-444444444444";
+    const BIG_SVG_ID: &str = "11111111-2222-4333-8444-666666666666";
+    const HTML_ID: &str = "33333333-4444-4555-8666-777777777777";
     const NEW_ID: &str = "abcdef01-2345-4678-89ab-cdef01234567";
     const CARD_ID: &str = "01kpkmm9ytysndxgzv586svckv";
     /// Any bytes will do for a PNG here: the stand-in serves them as such.
@@ -1179,6 +1192,18 @@ mod tests {
                 vec![0u8; MAX_AGENT_IMAGE_BYTES + 1],
             )
                 .into_response(),
+            AT_CAP_ID => (
+                [(header::CONTENT_TYPE, "image/png")],
+                vec![0u8; MAX_AGENT_IMAGE_BYTES],
+            )
+                .into_response(),
+            BIG_SVG_ID => (
+                [(header::CONTENT_TYPE, "image/svg+xml")],
+                format!("<svg>{}</svg>", " ".repeat(MAX_AGENT_SVG_BYTES)),
+            )
+                .into_response(),
+            // Never served by bored; stands in for anything unexpected.
+            HTML_ID => ([(header::CONTENT_TYPE, "text/html")], "<html></html>").into_response(),
             _ => StatusCode::NOT_FOUND.into_response(),
         }
     }
@@ -1348,6 +1373,49 @@ mod tests {
             .expect_err("too large");
         // 3 750 001 bytes: the stand-in's one byte over the cap.
         assert!(error.message.contains("3750001 bytes"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn an_image_exactly_at_the_agent_cap_is_sent() {
+        let (mcp, _) = stand_in().await;
+        let result = mcp
+            .get_image(Parameters(GetImageParams {
+                image: AT_CAP_ID.to_string(),
+            }))
+            .await
+            .expect("at the cap");
+        // 3 750 000, the cap itself, written out.
+        assert_eq!(text_of(&result.content[0]), "image/png, 3750000 bytes");
+    }
+
+    #[tokio::test]
+    async fn an_svg_has_its_own_smaller_cap_because_it_returns_as_text() {
+        let (mcp, _) = stand_in().await;
+        let error = mcp
+            .get_image(Parameters(GetImageParams {
+                image: BIG_SVG_ID.to_string(),
+            }))
+            .await
+            .expect_err("too large as text");
+        // `<svg>` + 60 000 spaces + `</svg>`: 60 011 bytes, over 60 000.
+        assert!(error.message.contains("60011 bytes"), "{}", error.message);
+        assert!(
+            error.message.contains("over the 60000"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_content_type_is_refused() {
+        let (mcp, _) = stand_in().await;
+        let error = mcp
+            .get_image(Parameters(GetImageParams {
+                image: HTML_ID.to_string(),
+            }))
+            .await
+            .expect_err("not an image type");
+        assert!(error.message.contains("text/html"), "{}", error.message);
     }
 
     #[tokio::test]
