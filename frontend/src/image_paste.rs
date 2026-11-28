@@ -14,13 +14,13 @@
 //! and the upload's answer later swaps *that exact text* for the real
 //! markdown, wherever it has moved to by then.
 //!
-//! The placeholder is a *link*, not an image: if it is ever left behind (the
-//! tab closed mid-upload after the body was saved), it renders as harmless
-//! text, where an `![…](#…)` image would make every viewer's browser request
-//! the page itself as an image. It is also not saved when it is inserted,
-//! only shown; it reaches the server only if the editor saves for its own
-//! reasons (more typing, closing), which is exactly when the server-side
-//! fallback below needs it there. On failure the placeholder is
+//! The placeholder is saved as soon as it is inserted, so the server-side
+//! fallback below always finds it, however the editor goes away: a close
+//! that flushes, but also browser Back or an inline card that unmounts
+//! without saving. It is a *link*, not an image, so if it is ever left behind
+//! (the tab closed mid-upload) it renders as harmless text, where an
+//! `![…](#…)` image would make every viewer's browser request the page
+//! itself as an image. On failure the placeholder is
 //! removed. Each paste gets its own token, so two uploads in flight each find
 //! their own placeholder.
 //!
@@ -128,9 +128,8 @@ pub struct Editor<R, W, E> {
     /// The body as the editor currently holds it, or `None` when the editor
     /// is gone or now shows a different card.
     pub read: R,
-    /// Put a new body into the editor, and save it when the flag is `true`.
-    /// Returns `false` when the editor is gone, so the swap must go to the
-    /// server instead.
+    /// Put a new body into the editor *and save it*. Returns `false` when the
+    /// editor is gone, so the swap must go to the server instead.
     pub write: W,
     /// Show (`Some`) or clear (`None`) the upload error next to the editor.
     pub report: E,
@@ -144,7 +143,7 @@ pub fn handle_paste<R, W, E>(
     editor: Editor<R, W, E>,
 ) where
     R: Fn() -> Option<String> + Clone + 'static,
-    W: Fn(String, bool) -> bool + Clone + 'static,
+    W: Fn(String) -> bool + Clone + 'static,
     E: Fn(Option<&'static str>) + Clone + 'static,
 {
     let Some(file) = clipboard_image(event) else {
@@ -184,8 +183,8 @@ pub fn handle_paste<R, W, E>(
     // unchanged value does not move the caret.
     textarea.set_value(&with_placeholder);
     let _ = textarea.set_selection_range(caret, caret);
-    // Shown, not saved: see the module docs.
-    (editor.write)(with_placeholder, false);
+    // Saved at once: see the module docs.
+    (editor.write)(with_placeholder);
 
     // `spawn_local` runs the upload on the browser's event loop; the paste
     // handler returns now.
@@ -203,7 +202,7 @@ async fn finish_upload<R, W, E>(
     outcome: Result<shared::UploadedImage, crate::api::ApiError>,
 ) where
     R: Fn() -> Option<String>,
-    W: Fn(String, bool) -> bool,
+    W: Fn(String) -> bool,
     E: Fn(Option<&'static str>),
 {
     // What to do to the body, as text in → `Some(text out)`, or `None` when
@@ -223,7 +222,7 @@ async fn finish_upload<R, W, E>(
         match replace_placeholder(&current, token, &replacement) {
             // The placeholder is in the editor: swap it there, and save.
             Some(updated) => {
-                if (editor.write)(updated, true) {
+                if (editor.write)(updated) {
                     return;
                 }
             }

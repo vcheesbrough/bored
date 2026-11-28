@@ -257,15 +257,13 @@ pub fn CardModal(
                         .then(|| body.try_get_untracked())
                         .flatten()
                 },
-                write: move |new_body: String, save: bool| {
+                write: move |new_body: String| {
                     if open_card_id().as_ref() != Some(&save_id)
                         || body.try_set(new_body.clone()).is_some()
                     {
                         return false;
                     }
-                    if save {
-                        do_save(save_id.clone(), new_body);
-                    }
+                    do_save(save_id.clone(), new_body);
                     true
                 },
                 // The modal outlives the card it shows: a late failure for a

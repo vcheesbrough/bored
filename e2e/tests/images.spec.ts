@@ -321,12 +321,15 @@ test.describe('Pasted images (card #67)', () => {
     const textarea = await openModalEditor(page);
     await textarea.press('End');
     await pasteFile(textarea, { base64: PNG_1X1_BASE64, name: 'x.png', type: 'image/png' });
-    // Close mid-upload: the modal flushes the body, placeholder and all.
-    await page.locator('[title="Restore to board"]').click();
-    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
+    // The placeholder is saved as soon as it is inserted, while the editor is
+    // still open, so the fallback finds it however the editor goes away
+    // (browser Back and an unmounting card do not flush).
     await expect
       .poll(async () => (await apiGetCard(request, card.id)).body)
       .toContain('Uploading image');
+    // Close mid-upload.
+    await page.locator('[title="Restore to board"]').click();
+    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
 
     // Now let the upload finish: the swap is made on the stored card.
     release();
@@ -368,6 +371,42 @@ test.describe('Pasted images (card #67)', () => {
     await page.locator('[title="Maximise"]').first().click();
     await expect(page.locator('.modal-backdrop')).toBeVisible();
     await expect(page.locator('.modal-body-rendered')).toContainText('Second');
+    await expect(page.locator('.image-upload-error')).toHaveCount(0);
+  });
+
+  test('a failure that arrives after switching cards does not show on the new card', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `images-switch-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(request, col.id, 'Other');
+    await apiCreateCard(request, col.id, 'Pasted into');
+    await gotoBoardView(page, board.name);
+
+    // Hold the upload, then refuse it once another card is open.
+    let release: () => void = () => {};
+    const held = new Promise<void>(resolve => (release = resolve));
+    let refused = false;
+    await page.route('**/api/images', async route => {
+      await held;
+      await route.fulfill({ status: 415 });
+      refused = true;
+    });
+
+    const textarea = await openModalEditor(page);
+    await textarea.press('End');
+    await pasteFile(textarea, { base64: PNG_1X1_BASE64, name: 'x.png', type: 'image/png' });
+    await page.locator('[title="Restore to board"]').click();
+    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
+    await page.locator('.card-item').nth(1).click();
+    await page.locator('[title="Maximise"]').first().click();
+    await expect(page.locator('.modal-body-rendered')).toContainText('Other');
+
+    release();
+    await expect.poll(() => refused).toBe(true);
+    // Let the client handle the refusal before checking nothing appeared.
+    await page.waitForTimeout(500);
     await expect(page.locator('.image-upload-error')).toHaveCount(0);
   });
 
