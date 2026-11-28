@@ -968,7 +968,7 @@ impl BoredMcp {
     // ── Images (card #644) ──────────────────────────────────────────────────────
 
     #[tool(
-        description = "View an image from a card body. Card bodies reference images as `![image](/api/images/{id})`; pass that URL, the bare id, or the whole markdown line. PNG, JPEG, GIF and WebP come back as image content; an SVG comes back as its XML source. Images over 3.75 MB are refused with their size."
+        description = "View an image from a card body. Card bodies reference images as `![image](/api/images/{id})`; pass that URL, the bare id, or the whole markdown line. PNG, JPEG, GIF and WebP come back as image content; an SVG comes back as its XML source. Raster images over 3.75 MB, and SVGs over 60 KB, are refused with their size."
     )]
     async fn get_image(
         &self,
