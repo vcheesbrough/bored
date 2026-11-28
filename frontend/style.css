@@ -795,12 +795,28 @@ button.btn-danger:hover { background: var(--danger); color: #fff; }
   min-height: 0;
 }
 
-.card-list::-webkit-scrollbar { width: 4px; }
-.card-list::-webkit-scrollbar-track { background: transparent; }
-.card-list::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
+/* The board's thin scrollbar: a column's card list in text mode, and in
+   graph mode (card #303) the graph body — which scrolls both ways, hence the
+   height — and the header row above it. The header row never shows a
+   scrollbar, but it reserves the same gutter as the body
+   (`scrollbar-gutter: stable`), so it must be styled the same for the two
+   gutters, and so the headers and the columns below them, to match. */
+.card-list::-webkit-scrollbar,
+.graph-body::-webkit-scrollbar,
+.board-view.graph-mode .columns-row::-webkit-scrollbar { width: 4px; height: 4px; }
+.card-list::-webkit-scrollbar-track,
+.graph-body::-webkit-scrollbar-track,
+.board-view.graph-mode .columns-row::-webkit-scrollbar-track { background: transparent; }
+.card-list::-webkit-scrollbar-thumb,
+.graph-body::-webkit-scrollbar-thumb,
+.board-view.graph-mode .columns-row::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
+.card-list::-webkit-scrollbar-corner,
+.graph-body::-webkit-scrollbar-corner { background: transparent; }
 
 /* Firefox */
-.card-list { scrollbar-color: var(--surface-3) transparent; }
+.card-list,
+.graph-body,
+.board-view.graph-mode .columns-row { scrollbar-color: var(--surface-3) transparent; }
 
 .column-view:last-child { border-right: none; }
 
@@ -2197,4 +2213,344 @@ mark.search-hit {
 .panic-banner-reload:hover,
 .panic-banner-reload:focus-visible {
   background: rgba(255, 255, 255, 0.15);
+}
+
+/* ── Board link graph (card #303) ────────────────── */
+
+/* The navbar switch between text and graph mode: one button holding the
+   graph icon and a track-and-thumb switch. `aria-checked` is the state. */
+.graph-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.graph-toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.graph-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.graph-toggle-icon line {
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.graph-toggle-icon circle {
+  fill: currentColor;
+}
+
+.graph-switch {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  flex-shrink: 0;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.graph-switch-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.graph-toggle[aria-checked="true"] {
+  color: var(--text);
+}
+
+.graph-toggle[aria-checked="true"] .graph-switch {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.graph-toggle[aria-checked="true"] .graph-switch-thumb {
+  background: #fff;
+  transform: translateX(14px);
+}
+
+/* Graph mode. The page itself no longer scrolls: the header row stays put
+   and the graph body below it is the one scroll container, with its
+   vertical scrollbar on the right, under the headers. */
+/* No `.page` gap either: the graph body butts straight onto the headers, so
+   the column stripes run on from them unbroken. */
+.board-view.graph-mode {
+  overflow: hidden;
+  gap: 0;
+}
+
+/* The header row: only the column headers show. It scrolls sideways only
+   when the graph body does (mirrored in `graph::view`), so its overflow is
+   hidden. Both it and the body reserve the vertical scrollbar's gutter, so
+   each header is exactly as wide as its column in the graph below.
+   `position: relative` makes it the offset parent the headers are measured
+   against. */
+.board-view.graph-mode .columns-row {
+  flex: 0 0 auto;
+  position: relative;
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+.board-view.graph-mode .column-view {
+  min-height: auto;
+}
+
+/* The graph is read-only: no card lists (they stay mounted, hidden), no
+   add-card, no sort, no dragging columns about. */
+.board-view.graph-mode .card-list,
+.board-view.graph-mode .column-sort-notice,
+.board-view.graph-mode .add-card-btn,
+.board-view.graph-mode .column-sort-links-btn,
+.board-view.graph-mode .column-grip,
+.board-view.graph-mode .collapsed-column-grip,
+.board-view.graph-mode .collapsed-column-name,
+.board-view.graph-mode .collapsed-card-count {
+  display: none;
+}
+
+/* A collapsed column's header is just its expand button; the column's name
+   runs down its strip in the graph body instead (`.graph-band-name`). */
+.board-view.graph-mode .collapsed-column-drop-target {
+  justify-content: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.board-view.graph-mode .column-expand-btn {
+  border-top: none;
+}
+
+.graph-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  background: var(--bg);
+}
+
+.graph-canvas {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+/* One stripe per column, behind everything, so the columns read as columns
+   all the way down. */
+.graph-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.graph-band-collapsed {
+  background: var(--bg);
+}
+
+.graph-band-name {
+  display: block;
+  margin: 10px auto;
+  writing-mode: vertical-rl;
+  color: var(--yellow);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.graph-edges {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.graph-edge {
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+}
+
+.graph-arrowhead {
+  fill: var(--text-muted);
+}
+
+/* A link's reason: a small round "i" badge at the middle of its line. The
+   reason itself is in a tooltip, shown on hover and on keyboard focus. */
+.graph-edge-reason {
+  position: absolute;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border: 1px solid var(--text-muted);
+  border-radius: 50%;
+  color: var(--text);
+  cursor: help;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.graph-edge-reason-glyph {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 12px;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Raised while open, so its tooltip draws over every other badge. */
+.graph-edge-reason:hover,
+.graph-edge-reason:focus {
+  z-index: 4;
+  background: var(--surface-3);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.graph-edge-reason:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Opens above the badge, centred, by default; `graph::view`'s
+   `tooltip_placement` adds the classes below for a badge near the canvas's
+   top or sides, so the tooltip stays inside the scrolling graph body. The
+   whole reason (up to 200 characters) wraps; nothing is cut off. */
+.graph-edge-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 260px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 16px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* Hoverable (WCAG 2.1 SC 1.4.13): the pointer can move onto the tooltip
+     to read it — it is inside the badge, so hovering it keeps the badge's
+     `:hover` — and the default text cursor says it is text. */
+  pointer-events: auto;
+  cursor: text;
+}
+
+/* An invisible strip over the 6px gap between badge and tooltip, so the
+   pointer crossing it never leaves the badge's hover. */
+.graph-edge-tooltip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 8px;
+}
+
+.graph-tip-below .graph-edge-tooltip::before {
+  top: auto;
+  bottom: 100%;
+}
+
+.graph-edge-reason:hover .graph-edge-tooltip,
+.graph-edge-reason:focus .graph-edge-tooltip {
+  display: block;
+}
+
+/* Escape dismisses an open tooltip (WCAG 2.1 SC 1.4.13, "dismissible")
+   until a badge is entered or focused again — see `graph::view`. */
+.graph-tips-dismissed .graph-edge-reason .graph-edge-tooltip {
+  display: none;
+}
+
+.graph-tip-below .graph-edge-tooltip {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+.graph-tip-start .graph-edge-tooltip {
+  left: -6px;
+  transform: none;
+}
+
+.graph-tip-end .graph-edge-tooltip {
+  left: auto;
+  right: -6px;
+  transform: none;
+}
+
+/* A card: `#N` top right, then its title, clamped to two lines. */
+.graph-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.graph-node:hover,
+.graph-node:focus-visible {
+  background: var(--surface-3);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.graph-node-number {
+  align-self: flex-end;
+  color: var(--yellow);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.graph-node-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
 }

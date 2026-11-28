@@ -6,6 +6,7 @@ mod columns;
 mod components;
 mod connection;
 mod events;
+mod graph;
 mod image_paste;
 mod links;
 mod pages;
@@ -17,7 +18,7 @@ mod telemetry;
 
 use leptos::prelude::*;
 use leptos_router::{
-    components::{Route, Router, Routes},
+    components::{ParentRoute, Route, Router, Routes},
     path,
 };
 use pages::{board_view::BoardView, home::Home};
@@ -69,7 +70,16 @@ fn App() -> impl IntoView {
         <Router>
             <Routes fallback=|| view! { <p class="page loading-text">"Not found"</p> }>
                 <Route path=path!("/") view=Home />
-                <Route path=path!("/boards/:slug") view=BoardView />
+                // The board page has two modes (card #303), and they are child
+                // routes of one parent so that `BoardView` — which owns the
+                // board's columns, cards, links and event stream — stays
+                // mounted when the user flips between them: no refetch, no
+                // stream reconnect. `BoardView` reads the mode from the path
+                // (`crate::graph::BoardMode`); the children render nothing.
+                <ParentRoute path=path!("/boards/:slug") view=BoardView>
+                    <Route path=path!("") view=|| () />
+                    <Route path=path!("graph") view=|| () />
+                </ParentRoute>
             </Routes>
         </Router>
     }

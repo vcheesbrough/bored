@@ -24,6 +24,7 @@ use leptos::prelude::*;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
+use crate::graph::{BoardMode, BoardModeContext};
 use crate::links::BoardLinkIndex;
 use crate::recent::RecentPicks;
 use crate::search::{BoardCardIndex, BoardSearchQuery, query_matches_number};
@@ -144,13 +145,17 @@ fn foreign_board(current_slug: &str, card_board_slug: &str) -> Option<String> {
 /// Where clicking a linked card goes: that card opened over *its own* board,
 /// which for a card on another board means leaving this one. The full slug is
 /// used here, never the truncated [`foreign_board`] label.
-fn card_url(current_slug: &str, card_board_slug: &str, number: u32) -> String {
+///
+/// `mode` is the board page's current mode (card #303): a chip clicked in a
+/// card opened from the graph opens its card over the graph too, rather than
+/// dropping the user back into text mode.
+fn card_url(current_slug: &str, card_board_slug: &str, number: u32, mode: BoardMode) -> String {
     let board = if card_board_slug.is_empty() {
         current_slug
     } else {
         card_board_slug
     };
-    format!("/boards/{board}?card={number}")
+    mode.card_path(board, number)
 }
 
 /// The card number the picker should look up on the server for `typed`, if
@@ -387,10 +392,14 @@ fn LinkChip(link: shared::CardLink, side: Side, error: RwSignal<Option<String>>)
         }
     });
 
-    // The card opens on its own board, whichever board that is.
-    let url = card_url(&current_slug, &other_board_slug, other_number);
+    // The card opens on its own board, whichever board that is, in the mode
+    // the page is in now — read at click time, since the modal can outlive a
+    // mode change.
+    let mode = use_context::<BoardModeContext>();
     let open_card = move |e: leptos::ev::MouseEvent| {
         e.stop_propagation();
+        let mode = mode.map(BoardModeContext::now).unwrap_or(BoardMode::Text);
+        let url = card_url(&current_slug, &other_board_slug, other_number, mode);
         navigate.with_value(|nav| nav(&url, NavigateOptions::default()));
     };
 
@@ -1232,24 +1241,50 @@ mod tests {
 
     #[test]
     fn a_same_board_card_opens_on_this_board() {
-        assert_eq!(card_url("work", "work", 12), "/boards/work?card=12");
+        assert_eq!(
+            card_url("work", "work", 12, BoardMode::Text),
+            "/boards/work?card=12"
+        );
     }
 
     #[test]
     fn a_card_on_another_board_opens_on_its_own_board() {
-        assert_eq!(card_url("work", "home", 12), "/boards/home?card=12");
+        assert_eq!(
+            card_url("work", "home", 12, BoardMode::Text),
+            "/boards/home?card=12"
+        );
     }
 
     /// The URL takes the full slug even when the label had to be elided.
     #[test]
     fn a_long_board_name_is_not_elided_in_the_url() {
         let long = "a-really-long-board-name-for-testing";
-        assert_eq!(card_url("work", long, 3), format!("/boards/{long}?card=3"));
+        assert_eq!(
+            card_url("work", long, 3, BoardMode::Text),
+            format!("/boards/{long}?card=3")
+        );
     }
 
     #[test]
     fn a_pre_544_link_opens_on_this_board() {
-        assert_eq!(card_url("work", "", 12), "/boards/work?card=12");
+        assert_eq!(
+            card_url("work", "", 12, BoardMode::Text),
+            "/boards/work?card=12"
+        );
+    }
+
+    /// A chip clicked in a card opened from the graph (card #303) keeps the
+    /// graph behind the next card, on this board or another.
+    #[test]
+    fn a_chip_in_graph_mode_opens_its_card_over_the_graph() {
+        assert_eq!(
+            card_url("work", "work", 12, BoardMode::Graph),
+            "/boards/work/graph?card=12"
+        );
+        assert_eq!(
+            card_url("work", "home", 12, BoardMode::Graph),
+            "/boards/home/graph?card=12"
+        );
     }
 
     #[test]

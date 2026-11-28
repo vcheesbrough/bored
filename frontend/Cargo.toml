@@ -65,4 +65,9 @@ web-sys = { version = "0.3", features = [
     "VisibilityState",
     "Document",
     "Window",
+    # The board link graph (card #303) — see `graph::view`: it measures where
+    # the browser put each column header (`HtmlElement::offset_left`) and
+    # re-measures when the header row resizes.
+    "HtmlElement",
+    "ResizeObserver",
 ] }
