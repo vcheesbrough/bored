@@ -60,7 +60,9 @@ Run the **`ci-watch`** skill (baseline §4). Skill parameters:
     `GITHUB_TOKEN` first, per **Getting `GITHUB_TOKEN`** below. The wrapper starts the throwaway Postgres the
     backend tests need and exports `DATABASE_URL` for the `database_url` secret (card #471); without it the build
     fails at the test step.
-  - `TEST_IMAGE=bored:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright`
+  - `TEST_IMAGE=bored:ci-local docker compose -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright --no-attach migrate`
+    (`--no-attach migrate`: the one-shot `migrate` service exits 0 by design, and an attached exit ends an
+    `--abort-on-container-exit` run on the CI's compose v2.33 — card #640)
 
 The [`.claude/watch-woodpecker.js`](.claude/watch-woodpecker.js) PostToolUse
 hook automates the polling (set `WOODPECKER_TOKEN` for authenticated logs).
@@ -386,6 +388,34 @@ README § Client telemetry. Tests: `frontend/src/telemetry/**/tests`,
 - **New REST calls go through `api::send`**, which opens the `http.client`
   span and sends `traceparent`. Polled requests (the heartbeat) are not traced.
 - **No client metrics**: the ingest's `ALLOWED_METRIC_NAMES` stays empty.
+
+---
+
+## Migrations (the `migrations` skill)
+
+The machine-global **`migrations`** skill is the contract; bored adopted it in
+card #640. How it runs: README § Migrations.
+
+| Item | Value |
+| --- | --- |
+| **Command** | `bored-backend migrate` (`backend/src/migrate.rs`), service `migrate` in `deploy/docker-compose.yml` and `e2e/docker-compose.test.yml` |
+| **Steps** | one: `schema`, the embedded `backend/migrations/` (root span `migrate schema`). A backfill or external setup a release needs is added as a later step, never to the server |
+| **Server** | verifies at startup (`migrate::verify`, from `db::connect`) and refuses a pending, changed or failed migration; it never applies one |
+| **Deploy order** | `scripts/deploy-app.sh`: Postgres + `migrate`, `compose wait migrate`, then `up --no-deps bored`. Do not fold `migrate` back into one `up`: compose would stop the running backend before a failing `migrate` |
+| **Credentials** | the same as the server's: the sovereign-config access URL as the secret file `SOVEREIGN_CONFIG_ACCESS_URL_FILE`, reading `/bored/<env>/server/database/*`. Never a credential in `environment:` (e2e's fixed test password is the one exception) |
+| **Login** | one login, `bored` (the schema owner), for both — the split is card #642 |
+
+- **Every migration works with the release before it** (expand, then contract
+  in a later release) and is never edited once applied.
+- **Tests may apply migrations directly** (`db_support::connect_test`, via
+  `migrate::migrator()`); the server never may. Keep the tests in
+  `backend/src/migrate/tests.rs` — refusal, idempotency, rollback tolerance —
+  green.
+- **A test that reaches the migrate step's failure log runs under
+  `capture_logs_async`.** With exactly one scoped subscriber alive,
+  tracing-core caches a callsite's interest from whichever thread registers
+  it first, so an uncaptured run can switch that line off for a capturing test
+  running alongside.
 
 ---
 

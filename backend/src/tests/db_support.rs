@@ -2,9 +2,27 @@
 //! tree so the "every database call is traced" scan (which covers product
 //! code) does not read it.
 
-use crate::db::{Db, MIGRATOR, pool_options, quiet, with_session_limits};
+use crate::config::DatabaseConfig;
+use crate::db::{Db, pool_options, quiet, with_session_limits};
+use crate::migrate::migrator;
 
 /// A fresh, fully migrated database of its own for one test.
+///
+/// Tests may apply migrations directly (the `migrations` skill allows it);
+/// only the server is barred from it. This uses the same [`migrator`] the
+/// `migrate` step runs, so tests see the schema production does.
+pub(crate) async fn connect_test() -> Result<Db, sqlx::Error> {
+    let (pool, _) = empty_test_database().await?;
+    migrator().run(&pool).await?;
+    // As `connect` does, so the pool gauge has something to report in tests.
+    crate::observability::metrics::watch_pool(pool.clone());
+    Ok(pool)
+}
+
+/// A fresh database of its own for one test, with **nothing** applied — what
+/// a deploy that skipped `migrate` would hand the server (card #640) — and
+/// the `database` config group that names it, for tests that go through the
+/// production connect path (`db::connect`, `migrate::run`).
 ///
 /// Tests run in parallel, so each gets a new database
 /// (`bored_test_<ulid>`) created on the server `DATABASE_URL` names, rather
@@ -15,7 +33,7 @@ use crate::db::{Db, MIGRATOR, pool_options, quiet, with_session_limits};
 /// A missing `DATABASE_URL` is a panic with instructions rather than a skip:
 /// nearly every backend test needs the database, so silently skipping them
 /// would turn the suite green by testing nothing.
-pub(crate) async fn connect_test() -> Result<Db, sqlx::Error> {
+pub(crate) async fn empty_test_database() -> Result<(Db, DatabaseConfig), sqlx::Error> {
     use sqlx::{ConnectOptions as _, Connection as _};
 
     let url = std::env::var("DATABASE_URL").expect(
@@ -36,11 +54,22 @@ pub(crate) async fn connect_test() -> Result<Db, sqlx::Error> {
         .await?;
     connection.close().await?;
 
+    // The same server and login, as the `database` config group would name
+    // them, so a test can hand it to the production connect path.
+    let parsed = url::Url::parse(&url).expect("DATABASE_URL is a URL");
+    let config = DatabaseConfig {
+        host: parsed
+            .host_str()
+            .expect("DATABASE_URL names a host")
+            .to_string(),
+        port: parsed.port().unwrap_or(5432),
+        name: name.clone(),
+        user: parsed.username().to_string(),
+        password: parsed.password().unwrap_or_default().to_string(),
+    };
+
     // Three connections per test: enough for the concurrency tests, and small
     // enough that a parallel suite stays well under the server's limit.
     let pool = pool_options(3).connect_lazy_with(admin.database(&name));
-    MIGRATOR.run(&pool).await?;
-    // As `connect` does, so the pool gauge has something to report in tests.
-    crate::observability::metrics::watch_pool(pool.clone());
-    Ok(pool)
+    Ok((pool, config))
 }

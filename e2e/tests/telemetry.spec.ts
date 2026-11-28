@@ -690,3 +690,22 @@ test.describe('client telemetry', () => {
     await expect(page.locator('.card-item', { hasText: 'Telemetry card' })).toBeVisible();
   });
 });
+
+test.describe('migrate step telemetry', () => {
+  // The stack's `migrate` service (card #640) ran once, before the backend
+  // started, against this run's empty database: its `schema` step must have
+  // reached the collector as a root span of the `bored` service, saying how
+  // many migrations it applied, with no error.
+  test('the migrate step exports its schema step as a root span', async () => {
+    const step = await waitFor(
+      () => readReceiver().spans.find((s) => s.name === 'migrate schema' && service(s.resource) === 'bored'),
+      'the migrate schema span',
+    );
+    expect(step.parentSpanId ?? '').toBe('');
+    expect(attr(step.attributes, 'bored.migrate.step')).toBe('schema');
+    // OTLP JSON carries int64 as a string. A fresh database: every migration
+    // was pending, so at least one was applied.
+    expect(Number(attr(step.attributes, 'bored.migrate.applied'))).toBeGreaterThan(0);
+    expect(attr(step.attributes, 'error.type')).toBeUndefined();
+  });
+});
