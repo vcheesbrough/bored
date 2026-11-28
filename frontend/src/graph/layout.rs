@@ -43,8 +43,15 @@
 //!    its row (lines between centred nodes run down the middle), and anything
 //!    else lengthens that one link by a rank — its successor must then sit a
 //!    rank further below its predecessor — so the line tilts past the
-//!    blocker. What the bound cannot clear is drawn as it is — crossings are
-//!    minimised, not guaranteed away.
+//!    blocker.
+//!    Then a **geometric search** polishes the component against a cost that
+//!    is what the user sees — lines through cards, crossings, lines pointing
+//!    up between columns, rows used, and total line length — by moving cards
+//!    between the rows and slots of their own column (greedy descent, plus
+//!    for small components a few seeded runs of simulated annealing and an
+//!    exhaustive re-slotting of each column). Every search is bounded and
+//!    seeded, so the same board always gives the same picture. Crossings
+//!    are minimised, not guaranteed away.
 //! 6. **Placing components.** Components go down the page in the order of
 //!    their earliest card (text-mode index, then column). A component claims
 //!    every column from its leftmost to its rightmost card and starts below
@@ -447,7 +454,6 @@ struct LocalLayout {
 
 /// One arrangement of a component: everything a layout round produces.
 struct Arrangement {
-    rows: usize,
     /// Per local node: its rank (logical row before wrapping).
     rank: Vec<usize>,
     /// Per local node: its row within the component.
@@ -563,12 +569,638 @@ fn layout_component(
         );
     }
 
+    // Step 5b: polish the arrangement against what the user actually sees.
+    let mut row = arrangement.row;
+    let mut x = arrangement.x;
+    refine(&col, &local_edges, columns, slots, p, &mut row, &mut x);
+    let rows = row.iter().copied().max().map_or(0, |r| r + 1);
+
     LocalLayout {
-        rows: arrangement.rows,
-        placements: (0..n)
-            .map(|l| (members[l], arrangement.row[l], arrangement.x[l]))
-            .collect(),
+        rows,
+        placements: (0..n).map(|l| (members[l], row[l], x[l])).collect(),
     }
+}
+
+// ── Step 5b: geometric local search ─────────────────────────────────────
+//
+// Ranking and barycentre ordering work on an abstract picture — ranks and
+// slot order — and cannot see what the drawn lines will do. A chain with
+// transitive links (122 → 121 → 120 → 119 plus 122 → 119) or a card fed from
+// two columns away is exactly where that shows: lines through cards, and
+// crossings a person can see how to avoid. So, once a component is placed,
+// it is polished against a cost that *is* the picture:
+//
+//   cost = W_THROUGH × (lines passing through a card)
+//        + W_CROSS   × (pairs of lines that cross)
+//        + W_UP      × (links between columns that point up the page)
+//        + W_ROW     × (rows the component spans)
+//        + total line length in px
+//
+// The search moves one card at a time — to another row and/or slot of its
+// own column, or by swapping places with another card of its column — and
+// keeps a move only if it strictly lowers the cost. A same-column link must
+// still read downward after every move (a hard rule, never traded off).
+// Every candidate is tried in a fixed order and the number of candidates
+// tried is capped, so the result is deterministic and the time bounded.
+
+/// A line through a card is the worst thing the picture can show: it reads
+/// as a link that is not there and hides one that is.
+const W_THROUGH: f64 = 100_000.0;
+/// A crossing costs as much as 1000px of extra line,
+/// so a card will travel a long way to uncross two lines.
+const W_CROSS: f64 = 10_000.0;
+/// A link between columns that points up the page reads against the flow.
+const W_UP: f64 = 300.0;
+/// Each row the component spans: keeps the picture compact, so a card is
+/// not parked in an empty row that a slightly longer line would avoid.
+const W_ROW: f64 = 60.0;
+/// How many rows above and below its current row a card may be tried in.
+const MOVE_ROWS: usize = 2;
+/// The greedy phase's budget, in segment tests (each candidate move costs
+/// about a card's links × (cards + links) of them): what keeps a big
+/// component's search to a few milliseconds. Fixed, so deterministic.
+const GREEDY_WORK: usize = 2_000_000;
+/// The most full passes over the component's cards.
+const MAX_PASSES: usize = 12;
+/// Components up to this many cards also get the annealing phase.
+const ANNEAL_MAX_NODES: usize = 40;
+/// The annealing phase's budget, in segment tests (roughly: each step costs
+/// a card's links × (cards + links) of them). Fixed, so its time is bounded
+/// and its result the same on every run.
+const ANNEAL_WORK: usize = 100_000;
+/// Annealing steps, whatever the work estimate says.
+const ANNEAL_MIN_STEPS: usize = 500;
+const ANNEAL_MAX_STEPS: usize = 40_000;
+/// Annealing temperature, in cost units: at the start a move that costs a
+/// crossing is often taken; by the end only improvements are.
+const ANNEAL_T_START: f64 = 3_000.0;
+const ANNEAL_T_END: f64 = 5.0;
+/// The most slot assignments [`slot_columns`] tries for one column.
+const MAX_SLOT_COMBOS: usize = 4_096;
+/// The most annealing runs (each with its own seed) a component gets.
+const ANNEAL_MAX_RUNS: u64 = 6;
+
+/// The x positions a node can take in a column with `k` slots per row: the
+/// slots of a centred row of every length from 1 to `k` (for `k = 2`: left,
+/// centre and right), plus hard against either side of the column (half a
+/// gap in) when that is noticeably further out than the outermost slot. The
+/// side positions are what let a one-slot column still offset a card from a
+/// line running down its middle. Sorted, duplicates removed.
+fn candidate_xs(column: &ColumnInput, k: usize, p: &Params) -> Vec<f64> {
+    let mut xs: Vec<f64> = (1..=k)
+        .flat_map(|count| (0..count).map(move |slot| (count, slot)))
+        .map(|(count, slot)| slot_x(column, count, slot, p))
+        .collect();
+    let leftmost = slot_x(column, k, 0, p);
+    let rightmost = slot_x(column, k, k - 1, p);
+    let hard_left = column.left + p.h_gap / 2.0;
+    let hard_right = column.left + column.width - p.h_gap / 2.0 - p.node_w;
+    // Only when the column is wide enough to hold a node there at all.
+    if hard_right >= hard_left {
+        if leftmost - hard_left > p.h_gap {
+            xs.push(hard_left);
+        }
+        if hard_right - rightmost > p.h_gap {
+            xs.push(hard_right);
+        }
+    }
+    xs.sort_by(f64::total_cmp);
+    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    xs
+}
+
+/// Do segments `a1–a2` and `b1–b2` cross at a single interior point? Two
+/// segments that merely touch, or overlap along a line, do not count (the
+/// "through a card" term catches lines lying on top of each other, since
+/// such lines run through a card at one end).
+fn segments_cross(a1: (f64, f64), a2: (f64, f64), b1: (f64, f64), b2: (f64, f64)) -> bool {
+    // The sign of a cross product says which side of a line a point is on.
+    let side = |p: (f64, f64), q: (f64, f64), r: (f64, f64)| {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    };
+    let eps = 1e-9;
+    let d1 = side(b1, b2, a1);
+    let d2 = side(b1, b2, a2);
+    let d3 = side(a1, a2, b1);
+    let d4 = side(a1, a2, b2);
+    d1 * d2 < -eps && d3 * d4 < -eps
+}
+
+/// The current geometry of one component during the search.
+struct Search<'a> {
+    col: &'a [usize],
+    edges: &'a [(usize, usize, usize)],
+    p: &'a Params,
+    row: Vec<usize>,
+    x: Vec<f64>,
+}
+
+impl Search<'_> {
+    fn rect(&self, l: usize) -> Rect {
+        Rect {
+            x: self.x[l],
+            y: row_y(self.row[l], self.p),
+            w: self.p.node_w,
+            h: self.p.node_h,
+        }
+    }
+
+    /// The drawn segment of edge `e`.
+    fn segment(&self, e: usize) -> ((f64, f64), (f64, f64)) {
+        let (u, v, _) = self.edges[e];
+        clipped_segment(&self.rect(u), &self.rect(v))
+    }
+
+    /// What edge `e`'s line costs for passing through card `l` (not one of
+    /// its ends): nothing if it misses, else [`W_THROUGH`].
+    fn through_cost(&self, e: usize, l: usize) -> f64 {
+        let (u, v, _) = self.edges[e];
+        if l == u || l == v {
+            return 0.0;
+        }
+        let (a, b) = self.segment(e);
+        if segment_hits_rect(a, b, &self.rect(l).inflate(CLEARANCE)) {
+            W_THROUGH
+        } else {
+            0.0
+        }
+    }
+
+    /// Do edges `e` and `f` cross? Edges sharing a card meet at it, which
+    /// is not a crossing.
+    fn cross(&self, e: usize, f: usize) -> bool {
+        let (u1, v1, _) = self.edges[e];
+        let (u2, v2, _) = self.edges[f];
+        if u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2 {
+            return false;
+        }
+        let (a1, a2) = self.segment(e);
+        let (b1, b2) = self.segment(f);
+        segments_cross(a1, a2, b1, b2)
+    }
+
+    /// Edge `e`'s own cost: its length, an upward penalty, and every card
+    /// its line runs through.
+    fn edge_cost(&self, e: usize) -> f64 {
+        let (u, v, _) = self.edges[e];
+        let (a, b) = self.segment(e);
+        let mut cost = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if self.col[u] != self.col[v] && self.row[v] < self.row[u] {
+            cost += W_UP;
+        }
+        cost + (0..self.row.len())
+            .map(|l| self.through_cost(e, l))
+            .sum::<f64>()
+    }
+
+    /// The part of the total cost that moving the cards in `moved` can
+    /// change: the edges touching them (whole), the other edges' lines
+    /// through them, and every crossing involving a touching edge.
+    fn local_cost(&self, moved: &[usize]) -> f64 {
+        let touches = |e: usize| {
+            let (u, v, _) = self.edges[e];
+            moved.contains(&u) || moved.contains(&v)
+        };
+        // The row count can change with any move, so it is always part of
+        // the changeable cost.
+        let mut cost = self.rows_cost();
+        for e in 0..self.edges.len() {
+            if touches(e) {
+                cost += self.edge_cost(e);
+                for f in 0..self.edges.len() {
+                    // Each crossing between two touching edges once.
+                    if f != e && (!touches(f) || f > e) && self.cross(e, f) {
+                        cost += W_CROSS;
+                    }
+                }
+            } else {
+                cost += moved.iter().map(|&l| self.through_cost(e, l)).sum::<f64>();
+            }
+        }
+        cost
+    }
+
+    /// [`W_ROW`] for every row from the top of the component (row 0) to its
+    /// lowest card.
+    fn rows_cost(&self) -> f64 {
+        let rows = self.row.iter().copied().max().map_or(0, |r| r + 1);
+        W_ROW * rows as f64
+    }
+
+    /// `(lines through cards, crossings)` in the current picture.
+    fn faults(&self) -> (usize, usize) {
+        let m = self.edges.len();
+        let through = (0..m)
+            .map(|e| {
+                (0..self.row.len())
+                    .filter(|&l| self.through_cost(e, l) > 0.0)
+                    .count()
+            })
+            .sum();
+        let crossings = (0..m)
+            .map(|e| (e + 1..m).filter(|&f| self.cross(e, f)).count())
+            .sum();
+        (through, crossings)
+    }
+
+    /// The whole picture's cost.
+    fn total_cost(&self) -> f64 {
+        let mut cost = self.rows_cost();
+        for e in 0..self.edges.len() {
+            cost += self.edge_cost(e);
+            for f in e + 1..self.edges.len() {
+                if self.cross(e, f) {
+                    cost += W_CROSS;
+                }
+            }
+        }
+        cost
+    }
+
+    /// Would card `l` at `(row, x)` overlap another card of its column
+    /// (other than those in `ignore`, which are moving too)?
+    fn overlaps(&self, l: usize, row: usize, x: f64, ignore: &[usize]) -> bool {
+        let min_gap = self.p.node_w + self.p.h_gap - 1e-6;
+        (0..self.row.len()).any(|o| {
+            o != l
+                && !ignore.contains(&o)
+                && self.col[o] == self.col[l]
+                && self.row[o] == row
+                && (self.x[o] - x).abs() < min_gap
+        })
+    }
+
+    /// Does every same-column link touching `l` still read downward?
+    fn order_holds(&self, l: usize) -> bool {
+        self.edges.iter().all(|&(u, v, _)| {
+            !(u == l || v == l) || self.col[u] != self.col[v] || self.row[v] > self.row[u]
+        })
+    }
+}
+
+/// Step 5b for one component: polish `row` and `x` in place. See above.
+fn refine(
+    col: &[usize],
+    edges: &[(usize, usize, usize)],
+    columns: &[ColumnInput],
+    slots: &[usize],
+    p: &Params,
+    row: &mut Vec<usize>,
+    x: &mut Vec<f64>,
+) {
+    let n = col.len();
+    if edges.is_empty() || n < 2 {
+        return;
+    }
+    // Each column's candidate x positions, computed once.
+    let xs: HashMap<usize, Vec<f64>> = col
+        .iter()
+        .map(|&c| (c, candidate_xs(&columns[c], slots[c], p)))
+        .collect();
+    // `std::mem::take` moves the vectors into the search (leaving empty ones
+    // behind) so it can own and mutate them; they are moved back at the end.
+    let mut s = Search {
+        col,
+        edges,
+        p,
+        row: std::mem::take(row),
+        x: std::mem::take(x),
+    };
+
+    // How many candidate moves the greedy phase may evaluate in all.
+    let degree = (2 * edges.len()).div_ceil(n).max(1);
+    let max_evals = (GREEDY_WORK / (degree * (n + edges.len())).max(1)).max(100);
+
+    // Greedy first: cheap, and on most components all that is needed.
+    let mut evals = 0usize;
+    greedy(&mut s, &xs, &mut evals, max_evals);
+    // Then, for a component small enough to afford it, anneal: greedy stops
+    // at the first arrangement no single move improves, and chains of
+    // transitive links routinely need two or three cards moved together.
+    // Runs from the greedy result, each with its own fixed seed; the
+    // cheapest outcome wins. One run can settle in a different valley from
+    // another. Effort follows need: another run is made only while the best
+    // picture so far still has a line through a card or a crossing, up to
+    // [`ANNEAL_MAX_RUNS`] — so a clean component costs one run and a hard
+    // one gets more.
+    if n <= ANNEAL_MAX_NODES {
+        let (start_row, start_x) = (s.row.clone(), s.x.clone());
+        let mut best = (s.total_cost(), start_row.clone(), start_x.clone());
+        for run in 0..ANNEAL_MAX_RUNS {
+            if run > 0 {
+                let (best_row, best_x) = (s.row.clone(), s.x.clone());
+                s.row.clone_from(&best.1);
+                s.x.clone_from(&best.2);
+                let clean = s.faults() == (0, 0);
+                s.row = best_row;
+                s.x = best_x;
+                if clean {
+                    break;
+                }
+            }
+            s.row.clone_from(&start_row);
+            s.x.clone_from(&start_x);
+            anneal(&mut s, &xs, run);
+            let mut run_evals = 0;
+            greedy(&mut s, &xs, &mut run_evals, max_evals);
+            slot_columns(&mut s, &xs);
+            greedy(&mut s, &xs, &mut run_evals, max_evals);
+            let cost = s.total_cost();
+            if cost < best.0 - 1e-6 {
+                best = (cost, s.row.clone(), s.x.clone());
+            }
+        }
+        s.row = best.1;
+        s.x = best.2;
+    }
+
+    // Shift the component up so its first card is on row 0. Moving every
+    // card the same distance changes no line's shape, so this is always
+    // safe — and no single move in the search can do it, which is how
+    // empty rows at the top survive it. Empty rows further down are left
+    // alone: closing one changes the slope of every line across it, and the
+    // search (which pays per row) kept it because closing it costs more.
+    let top = s.row.iter().copied().min().unwrap_or(0);
+    for r in &mut s.row {
+        *r -= top;
+    }
+    *row = s.row;
+    *x = s.x;
+}
+
+/// Greedy descent: for each card in turn, make the single relocation or
+/// swap that lowers the cost most, until a full pass improves nothing (or
+/// the shared evaluation budget runs out).
+fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_evals: usize) {
+    let n = s.row.len();
+    'passes: for _ in 0..MAX_PASSES {
+        let mut improved = false;
+        for l in 0..n {
+            // The best move found for this card: (gain, kind).
+            let mut best: Option<(f64, Move)> = None;
+            let before = s.local_cost(&[l]);
+            let (home_row, home_x) = (s.row[l], s.x[l]);
+            let max_row = s.row.iter().copied().max().unwrap_or(0) + 1;
+            // Every row of a small component; nearby rows of a big one.
+            let reach = if n <= ANNEAL_MAX_NODES {
+                max_row
+            } else {
+                MOVE_ROWS
+            };
+
+            // Relocations within its own column.
+            for r in home_row.saturating_sub(reach)..=(home_row + reach).min(max_row) {
+                for &cx in &xs[&s.col[l]] {
+                    if r == home_row && (cx - home_x).abs() < 1e-6 {
+                        continue;
+                    }
+                    if s.overlaps(l, r, cx, &[]) {
+                        continue;
+                    }
+                    *evals += 1;
+                    if *evals > max_evals {
+                        break 'passes;
+                    }
+                    s.row[l] = r;
+                    s.x[l] = cx;
+                    if s.order_holds(l) {
+                        let gain = before - s.local_cost(&[l]);
+                        if gain > 1e-6 && best.is_none_or(|(g, _)| gain > g) {
+                            best = Some((gain, Move::To(r, cx)));
+                        }
+                    }
+                    s.row[l] = home_row;
+                    s.x[l] = home_x;
+                }
+            }
+
+            // Swaps with another card of its column.
+            for o in 0..n {
+                if o == l || s.col[o] != s.col[l] {
+                    continue;
+                }
+                *evals += 1;
+                if *evals > max_evals {
+                    break 'passes;
+                }
+                let pair_before = s.local_cost(&[l, o]);
+                swap(s, l, o);
+                let fits = !s.overlaps(l, s.row[l], s.x[l], &[o])
+                    && !s.overlaps(o, s.row[o], s.x[o], &[l])
+                    && s.order_holds(l)
+                    && s.order_holds(o);
+                if fits {
+                    let gain = pair_before - s.local_cost(&[l, o]);
+                    if gain > 1e-6 && best.is_none_or(|(g, _)| gain > g) {
+                        best = Some((gain, Move::Swap(o)));
+                    }
+                }
+                swap(s, l, o);
+            }
+
+            match best {
+                Some((_, Move::To(r, cx))) => {
+                    s.row[l] = r;
+                    s.x[l] = cx;
+                    improved = true;
+                }
+                Some((_, Move::Swap(o))) => {
+                    swap(s, l, o);
+                    improved = true;
+                }
+                None => {}
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+/// For each column of the component, try every way of putting its cards in
+/// that column's x positions — rows unchanged — and keep the cheapest
+/// (if it beats what is there). A chain with transitive links
+/// (122 → 121 → 120 → 119 plus 122 → 119 and 121 → 119) needs its cards
+/// zig-zagged across the column so every line has a clear corridor, which
+/// means moving several cards at once — a move neither [`greedy`] nor
+/// [`anneal`] makes. Skipped for a column with more combinations than
+/// [`MAX_SLOT_COMBOS`].
+fn slot_columns(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
+    let n = s.row.len();
+    let mut columns: Vec<usize> = s.col.to_vec();
+    columns.sort_unstable();
+    columns.dedup();
+    for c in columns {
+        let cards: Vec<usize> = (0..n).filter(|&l| s.col[l] == c).collect();
+        let options = &xs[&c];
+        // `checked_pow` guards the count itself against overflow.
+        let combos = u32::try_from(cards.len())
+            .ok()
+            .and_then(|k| options.len().checked_pow(k));
+        let Some(combos) = combos.filter(|&k| k <= MAX_SLOT_COMBOS) else {
+            continue;
+        };
+        let original: Vec<f64> = cards.iter().map(|&l| s.x[l]).collect();
+        let mut best = (s.total_cost(), original.clone());
+        for combo in 0..combos {
+            // Read `combo` as a number in base `options.len()`: digit i is
+            // the option for card i.
+            let mut rest = combo;
+            for &l in &cards {
+                s.x[l] = options[rest % options.len()];
+                rest /= options.len();
+            }
+            let fits = cards.iter().all(|&l| !s.overlaps(l, s.row[l], s.x[l], &[]));
+            if fits {
+                let cost = s.total_cost();
+                if cost < best.0 - 1e-6 {
+                    best = (cost, cards.iter().map(|&l| s.x[l]).collect());
+                }
+            }
+        }
+        for (&l, &x) in cards.iter().zip(&best.1) {
+            s.x[l] = x;
+        }
+    }
+}
+
+/// A tiny deterministic pseudo-random generator (a 64-bit linear
+/// congruential generator with Knuth's MMIX constants). The search must give
+/// the same picture on every run and every machine, so it never touches a
+/// real source of randomness — the "random" moves are a fixed sequence.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+
+    /// A number in `0..n` (`n > 0`).
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    /// A number in `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next() % 1_000_000) as f64 / 1_000_000.0
+    }
+}
+
+/// Simulated annealing over the same moves as [`greedy`]: a random card is
+/// relocated or swapped, and the move is kept if it lowers the cost — or,
+/// with a probability that shrinks as the "temperature" falls, even if it
+/// raises it. Taking the occasional worse move is what lets the search climb
+/// out of an arrangement no single move improves. The best arrangement seen
+/// is what the search ends with.
+fn anneal(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, run: u64) {
+    let n = s.row.len();
+    let e = s.edges.len();
+    let mut rng = Lcg(0x5eed_6a7a + n as u64 * 31 + e as u64 + run * 7919);
+    // Roughly what one step costs, to turn the work budget into steps.
+    let degree = (2 * e).div_ceil(n).max(1);
+    let steps = (ANNEAL_WORK / (degree * (n + e)).max(1)).clamp(ANNEAL_MIN_STEPS, ANNEAL_MAX_STEPS);
+    // Each step multiplies the temperature by `cool`, so it falls
+    // geometrically from the start value to the end value.
+    let cool = (ANNEAL_T_END / ANNEAL_T_START).powf(1.0 / steps as f64);
+    let mut temperature = ANNEAL_T_START;
+
+    // The best starts as where the search begins, so annealing can never
+    // hand back something worse.
+    let mut cost = s.total_cost();
+    let (mut best_cost, mut best_row, mut best_x) = (cost, s.row.clone(), s.x.clone());
+
+    for _ in 0..steps {
+        temperature *= cool;
+        let l = rng.below(n);
+        let (home_row, home_x) = (s.row[l], s.x[l]);
+        let max_row = s.row.iter().copied().max().unwrap_or(0) + 1;
+
+        // Propose: a relocation (three times in four) or a swap.
+        let partner = if rng.below(4) == 0 {
+            let same: Vec<usize> = (0..n).filter(|&o| o != l && s.col[o] == s.col[l]).collect();
+            if same.is_empty() {
+                None
+            } else {
+                Some(same[rng.below(same.len())])
+            }
+        } else {
+            None
+        };
+        let delta = match partner {
+            Some(o) => {
+                let before = s.local_cost(&[l, o]);
+                swap(s, l, o);
+                let fits = !s.overlaps(l, s.row[l], s.x[l], &[o])
+                    && !s.overlaps(o, s.row[o], s.x[o], &[l])
+                    && s.order_holds(l)
+                    && s.order_holds(o);
+                if !fits {
+                    swap(s, l, o);
+                    continue;
+                }
+                s.local_cost(&[l, o]) - before
+            }
+            None => {
+                let column_xs = &xs[&s.col[l]];
+                let r = rng.below(max_row + 1);
+                let cx = column_xs[rng.below(column_xs.len())];
+                if (r == home_row && (cx - home_x).abs() < 1e-6) || s.overlaps(l, r, cx, &[]) {
+                    continue;
+                }
+                let before = s.local_cost(&[l]);
+                s.row[l] = r;
+                s.x[l] = cx;
+                if !s.order_holds(l) {
+                    s.row[l] = home_row;
+                    s.x[l] = home_x;
+                    continue;
+                }
+                s.local_cost(&[l]) - before
+            }
+        };
+
+        // Metropolis rule: always keep an improvement; keep a worsening
+        // with probability e^(−delta / temperature).
+        let keep = delta < 0.0 || rng.unit() < (-delta / temperature).exp();
+        if keep {
+            cost += delta;
+            if cost < best_cost - 1e-6 {
+                best_cost = cost;
+                best_row.clone_from(&s.row);
+                best_x.clone_from(&s.x);
+            }
+        } else {
+            match partner {
+                Some(o) => swap(s, l, o),
+                None => {
+                    s.row[l] = home_row;
+                    s.x[l] = home_x;
+                }
+            }
+        }
+    }
+
+    s.row = best_row;
+    s.x = best_x;
+}
+
+/// A candidate move in [`refine`].
+#[derive(Clone, Copy)]
+enum Move {
+    /// To this row and x in its own column.
+    To(usize, f64),
+    /// Trade places with this card.
+    Swap(usize),
+}
+
+/// Exchange two cards' places (row and x).
+fn swap(s: &mut Search, a: usize, b: usize) {
+    s.row.swap(a, b);
+    s.x.swap(a, b);
 }
 
 /// Every `(predecessor, successor, blocker)` where the line from predecessor
@@ -649,7 +1281,6 @@ fn arrange(
     }
 
     Arrangement {
-        rows: placement.rows,
         rank,
         row: placement.row,
         x: placement.x,
@@ -659,7 +1290,6 @@ fn arrange(
 
 /// The geometric half of an arrangement.
 struct Placement {
-    rows: usize,
     row: Vec<usize>,
     x: Vec<f64>,
     has_free_slot: Vec<bool>,
@@ -720,7 +1350,6 @@ fn position(
         }
     }
     Placement {
-        rows: total,
         row,
         x,
         has_free_slot,

@@ -35,7 +35,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 
 use super::BoardMode;
-use super::layout::{ColumnInput, LinkInput, Params, layout};
+use super::layout::{ColumnInput, Layout, LinkInput, Params, layout};
 use crate::collapsed::CollapsedColumns;
 use crate::links::BoardLinkIndex;
 use crate::search::BoardCardIndex;
@@ -87,8 +87,63 @@ struct EdgeView {
     x2: i32,
     y2: i32,
     reason: Option<String>,
+    /// The middle of the line, where a reason's badge is centred.
     label_x: i32,
     label_y: i32,
+    /// Which way the reason's tooltip opens — see [`tooltip_placement`].
+    tip_align: TipAlign,
+    tip_below: bool,
+}
+
+/// How a reason tooltip lines up with its badge, horizontally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TipAlign {
+    /// Starts at the badge and runs right — for a badge near the left edge.
+    Start,
+    /// Centred over the badge — the usual case.
+    Center,
+    /// Ends at the badge and runs left — for a badge near the right edge.
+    End,
+}
+
+impl TipAlign {
+    /// The CSS class that applies this alignment (`style.css`).
+    fn class(self) -> &'static str {
+        match self {
+            TipAlign::Start => "graph-tip-start",
+            TipAlign::Center => "graph-tip-center",
+            TipAlign::End => "graph-tip-end",
+        }
+    }
+}
+
+/// The widest a reason tooltip gets (`.graph-edge-tooltip`'s `max-width` in
+/// `style.css`), plus a little room to spare at the canvas edge.
+const TIP_MAX_WIDTH: i32 = 260;
+const TIP_EDGE_MARGIN: i32 = 8;
+/// Room a tooltip needs above its badge: the longest reason (200 characters)
+/// wraps to about five lines at the tooltip's width, ~90px with padding, plus
+/// the gap to the badge.
+const TIP_ROOM_ABOVE: i32 = 110;
+
+/// Which way a reason tooltip for a badge at `(x, y)` should open so that it
+/// stays inside a canvas `canvas_width` wide — and so inside the graph body,
+/// which scrolls over exactly that canvas and would otherwise clip it (or
+/// grow a scrollbar for it).
+///
+/// It opens above the badge, centred, unless that would cross the canvas's
+/// top or a side; then it flips below, or lines up with the badge from the
+/// side it has room on. Returns `(alignment, opens_below)`.
+fn tooltip_placement(x: i32, y: i32, canvas_width: i32) -> (TipAlign, bool) {
+    let half = TIP_MAX_WIDTH / 2 + TIP_EDGE_MARGIN;
+    let align = if x < half {
+        TipAlign::Start
+    } else if x > canvas_width - half {
+        TipAlign::End
+    } else {
+        TipAlign::Center
+    };
+    (align, y < TIP_ROOM_ABOVE)
 }
 
 /// Everything the view draws, recomputed as one value. `PartialEq` lets the
@@ -102,6 +157,10 @@ struct GraphModel {
     nodes: Vec<NodeView>,
     edges: Vec<EdgeView>,
 }
+
+/// A layout together with the column and link inputs it was computed from —
+/// see `layout_cache` in [`GraphView`].
+type CachedLayout = (Vec<ColumnInput>, Vec<LinkInput>, Layout);
 
 /// A CSS pixel length.
 fn px(value: i32) -> String {
@@ -258,6 +317,15 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
     // A `Memo`: it re-runs whenever any signal it reads changes, and only
     // notifies the view when the resulting model is different. Every read is
     // tracked on purpose — that is what makes the graph live.
+    // The last layout and the inputs it was computed from. The layout runs a
+    // bounded search (tens of milliseconds on a tangled board), and most
+    // changes the memo below sees — a card's body edited, a reason reworded
+    // — leave every position where it was. So the memo re-runs the layout
+    // only when its inputs differ from last time and otherwise reuses this.
+    // A `StoredValue` rather than a signal: nothing should re-run because
+    // the cache changed.
+    let layout_cache: StoredValue<Option<CachedLayout>> = StoredValue::new(None);
+
     let model = Memo::new(move |_| {
         let measured = measured.get();
         let collapsed = collapsed_columns.ids.get();
@@ -331,7 +399,22 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
             })
             .collect();
 
-        let laid_out = layout(&inputs, &link_inputs, &Params::default());
+        let cached = layout_cache
+            .try_with_value(|cache| {
+                cache
+                    .as_ref()
+                    .filter(|(i, l, _)| *i == inputs && *l == link_inputs)
+                    .map(|(_, _, laid_out)| laid_out.clone())
+            })
+            .flatten();
+        let laid_out = match cached {
+            Some(laid_out) => laid_out,
+            None => {
+                let laid_out = layout(&inputs, &link_inputs, &Params::default());
+                layout_cache.try_set_value(Some((inputs, link_inputs, laid_out.clone())));
+                laid_out
+            }
+        };
 
         let nodes = laid_out
             .nodes
@@ -351,6 +434,9 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
             })
             .collect();
 
+        // Needed before the edges: a tooltip's placement depends on it.
+        let width = bands.iter().map(|b| b.left + b.width).max().unwrap_or(0);
+
         let edges = laid_out
             .edges
             .iter()
@@ -358,6 +444,18 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
                 let link = links.iter().find(|l| l.id == edge.link_id)?;
                 let from_number = card_info.get(&edge.predecessor)?.0;
                 let to_number = card_info.get(&edge.successor)?.0;
+                // A blank reason is no reason.
+                let reason = link
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .map(str::to_string);
+                let (label_x, label_y) = (
+                    edge.label_at.0.round() as i32,
+                    edge.label_at.1.round() as i32,
+                );
+                let (tip_align, tip_below) = tooltip_placement(label_x, label_y, width);
                 Some(EdgeView {
                     link_id: edge.link_id.clone(),
                     from_number,
@@ -366,20 +464,15 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
                     y1: edge.from.1.round() as i32,
                     x2: edge.to.0.round() as i32,
                     y2: edge.to.1.round() as i32,
-                    // A blank reason is no reason.
-                    reason: link
-                        .reason
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|r| !r.is_empty())
-                        .map(str::to_string),
-                    label_x: edge.label_at.0.round() as i32,
-                    label_y: edge.label_at.1.round() as i32,
+                    reason,
+                    label_x,
+                    label_y,
+                    tip_align,
+                    tip_below,
                 })
             })
             .collect();
 
-        let width = bands.iter().map(|b| b.left + b.width).max().unwrap_or(0);
         GraphModel {
             width,
             height: laid_out.height.ceil() as i32,
@@ -477,36 +570,6 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
                         }
                     />
                 </svg>
-                // Reason labels: HTML rather than SVG text, so they can wrap
-                // in a halo background and elide with CSS. Centred on the
-                // middle of their line by the CSS transform.
-                <For
-                    each=move || {
-                        model
-                            .try_with(|m| {
-                                m.edges.iter().filter(|e| e.reason.is_some()).cloned().collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
-                    }
-                    key=|edge| edge.clone()
-                    children=|edge| {
-                        // Two owned copies: one for the tooltip (the label may
-                        // be elided by CSS), one for the text.
-                        let reason = edge.reason.clone().unwrap_or_default();
-                        let tooltip = reason.clone();
-                        view! {
-                            <div
-                                class="graph-edge-label"
-                                data-link-id=edge.link_id.clone()
-                                title=tooltip
-                                style:left=px(edge.label_x)
-                                style:top=px(edge.label_y)
-                            >
-                                {reason}
-                            </div>
-                        }
-                    }
-                />
                 <For
                     each=move || model.try_with(|m| m.nodes.clone()).unwrap_or_default()
                     key=|node| node.clone()
@@ -532,8 +595,87 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
                         }
                     }
                 />
+                // Reasons: a small "i" badge at the middle of each line that
+                // has one, after the nodes so it (and its tooltip) draws on
+                // top. The reason itself is in a tooltip shown on hover *and*
+                // on keyboard focus — the badge is focusable for exactly that
+                // — and it is also the badge's accessible description
+                // (`aria-describedby`), so a screen reader announces it on
+                // focus. The tooltip is a child of the badge, so CSS alone can
+                // show it (`:hover`, `:focus`); its side and direction come
+                // from `tooltip_placement`.
+                <For
+                    each=move || {
+                        model
+                            .try_with(|m| {
+                                m.edges.iter().filter(|e| e.reason.is_some()).cloned().collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    }
+                    key=|edge| edge.clone()
+                    children=|edge| {
+                        let reason = edge.reason.clone().unwrap_or_default();
+                        // Link ids are ULIDs — letters and digits — so they
+                        // make a valid, page-unique element id.
+                        let tip_id = format!("graph-reason-{}", edge.link_id);
+                        // Two owned copies: the badge points at the tooltip
+                        // by id, and the tooltip carries it.
+                        let described_by = tip_id.clone();
+                        let class = format!(
+                            "graph-edge-reason {}{}",
+                            edge.tip_align.class(),
+                            if edge.tip_below { " graph-tip-below" } else { "" }
+                        );
+                        view! {
+                            <span
+                                class=class
+                                role="img"
+                                tabindex="0"
+                                aria-label="Link reason"
+                                aria-describedby=described_by
+                                data-link-id=edge.link_id.clone()
+                                style:left=px(edge.label_x)
+                                style:top=px(edge.label_y)
+                            >
+                                <span class="graph-edge-reason-glyph" aria-hidden="true">"i"</span>
+                                <span class="graph-edge-tooltip" role="tooltip" id=tip_id>
+                                    {reason}
+                                </span>
+                            </span>
+                        }
+                    }
+                />
             </div>
         </div>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TipAlign, tooltip_placement};
+
+    // A 1000px canvas. The tooltip is up to 260px wide, so a centred one
+    // needs 130px either side of its badge, plus an 8px margin: 138px.
+
+    #[test]
+    fn a_tooltip_in_open_space_opens_above_centred() {
+        assert_eq!(tooltip_placement(500, 300, 1000), (TipAlign::Center, false));
+    }
+
+    #[test]
+    fn a_tooltip_near_a_side_lines_up_from_the_side_with_room() {
+        assert_eq!(tooltip_placement(137, 300, 1000), (TipAlign::Start, false));
+        assert_eq!(tooltip_placement(138, 300, 1000), (TipAlign::Center, false));
+        assert_eq!(tooltip_placement(862, 300, 1000), (TipAlign::Center, false));
+        assert_eq!(tooltip_placement(863, 300, 1000), (TipAlign::End, false));
+    }
+
+    #[test]
+    fn a_tooltip_near_the_top_opens_below() {
+        assert_eq!(tooltip_placement(500, 109, 1000), (TipAlign::Center, true));
+        assert_eq!(tooltip_placement(500, 110, 1000), (TipAlign::Center, false));
+        // A corner flips both ways.
+        assert_eq!(tooltip_placement(20, 40, 1000), (TipAlign::Start, true));
+    }
 }

@@ -199,8 +199,11 @@ fn a_component_starts_below_anything_in_the_columns_it_spans() {
     let layout = layout(&columns, &[link("d1", "t2")], &params());
     assert_eq!(at(&layout, "t1"), (75.0, 10.0));
     assert_eq!(at(&layout, "m1"), (325.0, 10.0));
-    assert_eq!(at(&layout, "t2"), (75.0, 80.0));
-    assert_eq!(at(&layout, "d1"), (575.0, 80.0));
+    // Each end of the one link takes the slot nearest the other — t2 the
+    // right slot of its column (L + 135), d1 the left (L + 15) — which is
+    // the shortest level line.
+    assert_eq!(at(&layout, "t2"), (135.0, 80.0));
+    assert_eq!(at(&layout, "d1"), (515.0, 80.0));
     assert_no_line_through_a_node(&layout);
 }
 
@@ -224,11 +227,13 @@ fn two_components_never_share_rows_over_overlapping_columns() {
         a_bottom <= b_top || b_bottom <= a_top,
         "components share rows"
     );
-    // And concretely: a's chain first, level on row 0; b's on row 1.
-    assert_eq!(at(&layout, "a1"), (75.0, 10.0));
-    assert_eq!(at(&layout, "a2"), (325.0, 10.0));
-    assert_eq!(at(&layout, "b1"), (75.0, 80.0));
-    assert_eq!(at(&layout, "b2"), (325.0, 80.0));
+    // And concretely: a's chain first, level on row 0; b's on row 1. Each
+    // link's ends sit in the facing slots (L + 135 and L + 15), the
+    // shortest level line.
+    assert_eq!(at(&layout, "a1"), (135.0, 10.0));
+    assert_eq!(at(&layout, "a2"), (265.0, 10.0));
+    assert_eq!(at(&layout, "b1"), (135.0, 80.0));
+    assert_eq!(at(&layout, "b2"), (265.0, 80.0));
 }
 
 #[test]
@@ -268,10 +273,13 @@ fn nodes_in_a_row_are_ordered_towards_their_neighbours() {
         link("q", "s"),
     ];
     let layout = layout(&columns, &links, &params());
-    assert_eq!(at(&layout, "l"), (75.0, 10.0));
+    // l and r take the slots facing the middle column (L + 135, L + 15);
+    // s sits centred below p and q — its two lines then total ~79px of
+    // drawn line against ~90px under either of them.
+    assert_eq!(at(&layout, "l"), (135.0, 10.0));
     assert_eq!(at(&layout, "p"), (265.0, 10.0));
     assert_eq!(at(&layout, "q"), (385.0, 10.0));
-    assert_eq!(at(&layout, "r"), (575.0, 10.0));
+    assert_eq!(at(&layout, "r"), (515.0, 10.0));
     assert_eq!(at(&layout, "s"), (325.0, 80.0));
     assert_no_line_through_a_node(&layout);
 }
@@ -280,18 +288,20 @@ fn nodes_in_a_row_are_ordered_towards_their_neighbours() {
 
 #[test]
 fn a_line_skipping_a_column_tilts_past_the_card_in_between() {
-    // d → t skips the middle column, where d's other successor m sits on
-    // the same row. Level, the line would run straight through m; t drops a
-    // row instead.
+    // d → t skips the middle column, where d's other successor m would sit
+    // on the same row. Level, the line would run straight through m; so m
+    // drops a row instead, into the slot nearest d (L + 135), and d → t runs
+    // level and short between the facing slots (L + 135, L + 15) over an
+    // empty middle row.
     let columns = [
         column(0.0, 250.0, &["t"]),
         column(250.0, 250.0, &["m"]),
         column(500.0, 250.0, &["d"]),
     ];
     let layout = layout(&columns, &[link("d", "m"), link("d", "t")], &params());
-    assert_eq!(at(&layout, "d"), (575.0, 10.0));
-    assert_eq!(at(&layout, "m"), (325.0, 10.0));
-    assert_eq!(at(&layout, "t"), (75.0, 80.0));
+    assert_eq!(at(&layout, "d"), (515.0, 10.0));
+    assert_eq!(at(&layout, "m"), (385.0, 80.0));
+    assert_eq!(at(&layout, "t"), (135.0, 10.0));
     assert_no_line_through_a_node(&layout);
 }
 
@@ -307,19 +317,19 @@ fn three_columns_t_m_d() -> [ColumnInput; 3] {
 #[test]
 fn a_skipping_line_into_a_card_the_middle_card_also_leads_to_tilts_clear() {
     // d (Done) and m (Doing) both lead into t (Todo). Level, the line d → t
-    // would lie on top of m → t and read as d → m → t. Every predecessor of
-    // t is in another column, so pushing t down must survive the pull-down
-    // that lifts m and d after it: t and m drop to row 1, d stays on row 0,
-    // and d's line tilts past m. Hand-worked: rows at y = 10 and 80; lone
-    // nodes centred at L + 75.
+    // would lie on top of m → t and read as d → m → t. Instead m moves up a
+    // row, so d → t runs level over an empty middle row and m → t comes
+    // down into t from above. Hand-worked: rows at y = 10 and 80; every card
+    // in the slot nearest the cards it links to — t right (L + 135), m left
+    // (L + 15), d left (L + 15).
     let layout = layout(
         &three_columns_t_m_d(),
         &[link("m", "t"), link("d", "t")],
         &params(),
     );
-    assert_eq!(at(&layout, "d"), (575.0, 10.0));
-    assert_eq!(at(&layout, "m"), (325.0, 80.0));
-    assert_eq!(at(&layout, "t"), (75.0, 80.0));
+    assert_eq!(at(&layout, "d"), (515.0, 80.0));
+    assert_eq!(at(&layout, "m"), (265.0, 10.0));
+    assert_eq!(at(&layout, "t"), (135.0, 80.0));
     assert_no_line_through_a_node(&layout);
 }
 
@@ -327,15 +337,18 @@ fn a_skipping_line_into_a_card_the_middle_card_also_leads_to_tilts_clear() {
 fn a_transitive_link_across_columns_tilts_clear_of_the_chain() {
     // The e2e fixture's Done → Doing → Todo chain plus the transitive
     // Done → Todo link. Level, d → t would hide m → t and invent a d → m → t
-    // reading. Hand-worked as above: d on row 0, m and t level on row 1.
+    // reading. Hand-worked: d on row 0, m and t level on row 1; t right
+    // (L + 135) and d left (L + 15), facing each other. m centred (L + 75):
+    // in its left slot d → t would cut through it, and centred its two lines
+    // total ~186px of drawn line against ~213px in its right slot.
     let layout = layout(
         &three_columns_t_m_d(),
         &[link("d", "m"), link("m", "t"), link("d", "t")],
         &params(),
     );
-    assert_eq!(at(&layout, "d"), (575.0, 10.0));
+    assert_eq!(at(&layout, "d"), (515.0, 10.0));
     assert_eq!(at(&layout, "m"), (325.0, 80.0));
-    assert_eq!(at(&layout, "t"), (75.0, 80.0));
+    assert_eq!(at(&layout, "t"), (135.0, 80.0));
     assert_no_line_through_a_node(&layout);
 }
 
@@ -397,6 +410,129 @@ fn the_sketch_board_has_no_overlaps_and_no_line_through_a_node() {
     }
     // done1 → ip runs level: nothing pushes ip down past done1.
     assert_eq!(at(&layout, "done1").1, at(&layout, "ip").1);
+}
+
+// ── The user's board (card #303 review) ─────────────────────────────────
+
+/// Do two segments cross at a point inside both? Solved directly: the two
+/// lines `a + t(b − a)` and `c + u(d − c)` meet where a 2×2 linear system
+/// says (Cramer's rule); they cross if both `t` and `u` lie strictly inside
+/// (0, 1). Parallel segments never count. A different method from the
+/// engine's orientation test, on purpose.
+fn crosses(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+    let (r, s) = ((b.0 - a.0, b.1 - a.1), (d.0 - c.0, d.1 - c.1));
+    let denominator = r.0 * s.1 - r.1 * s.0;
+    if denominator.abs() < 1e-12 {
+        return false;
+    }
+    let (qx, qy) = (c.0 - a.0, c.1 - a.1);
+    let t = (qx * s.1 - qy * s.0) / denominator;
+    let u = (qx * r.1 - qy * r.0) / denominator;
+    let inside = |v: f64| v > 1e-9 && v < 1.0 - 1e-9;
+    inside(t) && inside(u)
+}
+
+/// Every pair of drawn lines that share no card and cross.
+fn crossing_pairs(layout: &Layout) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (i, e) in layout.edges.iter().enumerate() {
+        for f in &layout.edges[i + 1..] {
+            let ends = [&e.predecessor, &e.successor];
+            if ends.contains(&&f.predecessor) || ends.contains(&&f.successor) {
+                continue;
+            }
+            if crosses(e.from, e.to, f.from, f.to) {
+                pairs.push((e.link_id.clone(), f.link_id.clone()));
+            }
+        }
+    }
+    pairs
+}
+
+/// The dev board `manual-testing`, where the user could see avoidable
+/// crossings and lines through cards: three columns (cards in text-mode
+/// order, card numbers as ids) of `width` px.
+fn manual_testing_board(width: f64) -> Layout {
+    let cards: [&[&str]; 3] = [
+        &["135", "120", "130", "122", "121", "119", "11", "10"],
+        &["131", "118", "13"],
+        &["132", "15"],
+    ];
+    let columns: Vec<ColumnInput> = cards
+        .iter()
+        .enumerate()
+        .map(|(i, ids)| column(i as f64 * width, width, ids))
+        .collect();
+    let links = [
+        link("11", "10"),
+        link("13", "11"),
+        link("15", "11"),
+        link("15", "135"),
+        link("118", "11"),
+        link("118", "122"),
+        link("120", "119"),
+        link("121", "119"),
+        link("121", "120"),
+        link("122", "119"),
+        link("122", "121"),
+    ];
+    layout(&columns, &links, &Params::default())
+}
+
+#[test]
+fn the_manual_testing_board_has_no_line_through_a_card_at_any_width() {
+    // 474px: three columns at a 1440px window; 420px: a narrower window;
+    // 370px: the minimum column width; 330px: narrower still, one slot per
+    // row.
+    for width in [474.0, 420.0, 370.0, 330.0] {
+        let layout = manual_testing_board(width);
+        assert_eq!(layout.nodes.len(), 13, "at {width}px");
+        assert_eq!(layout.edges.len(), 11, "at {width}px");
+        assert_no_overlaps(&layout);
+        assert_no_line_through_a_node(&layout);
+
+        let crossings = crossing_pairs(&layout);
+        // The user's two named links cross nothing.
+        for named in ["15->135", "11->10"] {
+            assert!(
+                !crossings.iter().any(|(a, b)| a == named || b == named),
+                "{named} crosses a line at {width}px: {crossings:?}"
+            );
+        }
+        // Inside a column, every link reads downward.
+        for edge in &layout.edges {
+            let (from, to) = (
+                node(&layout, &edge.predecessor),
+                node(&layout, &edge.successor),
+            );
+            if from.column == to.column {
+                assert!(to.rect.y > from.rect.y, "{} reads upward", edge.link_id);
+            }
+        }
+        // At 1440px (474px columns) the board had four crossings before card
+        // #303's review. The search now reaches none there, nor at the
+        // minimum column width; at 330px (one slot per row) one is left,
+        // inside the 122 → 121 → 120 → 119 chain.
+        let allowed = if width == 330.0 { 1 } else { 0 };
+        assert!(crossings.len() <= allowed, "at {width}px: {crossings:?}");
+
+        // Compact: at most one empty row between the top and the last card.
+        // (The search keeps a gap only where closing it would cost more —
+        // put a line through a card, say; at 420px and 330px it keeps one.)
+        // Rows are worked out from the default sizes: the first at y = 20,
+        // then one every 58 + 44 = 102px.
+        let mut rows: Vec<usize> = layout
+            .nodes
+            .iter()
+            .map(|n| ((n.rect.y - 20.0) / 102.0).round() as usize)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let span = rows.last().map_or(0, |last| last + 1);
+        assert!(span - rows.len() <= 1, "at {width}px, rows {rows:?}");
+        // And the board starts at the top: something is on the first row.
+        assert_eq!(rows.first(), Some(&0), "at {width}px");
+    }
 }
 
 // ── Collapsed columns and empty boards ──────────────────────────────────

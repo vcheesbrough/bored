@@ -1,4 +1,4 @@
-import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import { test, expect, Page, APIRequestContext, Locator } from '@playwright/test';
 import {
   apiCreateBoard,
   apiCreateCard,
@@ -16,8 +16,8 @@ import {
 // keeps the board mounted, and the graph follows the board's live state.
 //
 // Nodes are `.graph-node[data-card-number]`; lines are
-// `.graph-edge[data-from][data-to]` (card numbers); reason labels are
-// `.graph-edge-label[data-link-id]`.
+// `.graph-edge[data-from][data-to]` (card numbers); a link's reason is an
+// "i" badge, `.graph-edge-reason[data-link-id]`, holding a tooltip.
 //
 // `apiCreateCard` inserts at the top of its column, so cards are created in
 // reverse of the order a column should read.
@@ -56,6 +56,16 @@ async function expectAlive(page: Page) {
   await expect(search).toHaveValue('alive');
   await search.press('Escape');
   await expect(search).toHaveValue('');
+}
+
+/** `locator` lies wholly inside the graph body's visible area. */
+async function expectInsideGraphBody(locator: Locator) {
+  const body = (await locator.page().locator('.graph-body').boundingBox())!;
+  const box = (await locator.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(body.x);
+  expect(box.y).toBeGreaterThanOrEqual(body.y);
+  expect(box.x + box.width).toBeLessThanOrEqual(body.x + body.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(body.y + body.height);
 }
 
 /** Todo / Doing / Done with a few linked cards, as most tests here need. */
@@ -390,15 +400,73 @@ test.describe('board link graph', () => {
     expect(panics).toEqual([]);
   });
 
-  test('a link reason is shown on its edge', async ({ page, request }) => {
-    const { board, links } = await linkedBoard(request, 'graph-reason');
+  test('a link with a reason gets an "i" badge whose tooltip shows the whole reason', async ({
+    page,
+    request,
+  }) => {
+    const { board, cards, links } = await linkedBoard(request, 'graph-reason');
+    // A second reasoned link, with the longest reason the server takes (200
+    // characters), so the tooltip must wrap rather than cut it short.
+    const long = `${'A long reason that has to wrap across several lines. '.repeat(4)}`.slice(0, 200);
+    expect(long).toHaveLength(200);
+    const longLink = await apiCreateLink(request, cards.loose.id, 'successor', cards.later.id, long);
+    const panics = watchForPanics(page);
     await gotoGraph(page, board.name);
+    await expect(page.locator('.graph-edge')).toHaveCount(4);
 
-    const label = page.locator(`.graph-edge-label[data-link-id="${links.nextToLater.id}"]`);
-    await expect(label).toHaveText('needs the API first');
-    // Only the link with a reason has a label.
-    await expect(page.locator('.graph-edge-label')).toHaveCount(1);
+    // A badge for each link with a reason, and none for the two without.
+    const badges = page.locator('.graph-edge-reason');
+    await expect(badges).toHaveCount(2);
+    for (const reasonless of [links.shippedToActive, links.activeToNext]) {
+      await expect(
+        page.locator(`.graph-edge-reason[data-link-id="${reasonless.id}"]`)
+      ).toHaveCount(0);
+    }
+    // The old on-line text label is gone.
+    await expect(page.locator('.graph-edge-label')).toHaveCount(0);
+
+    const badge = page.locator(`.graph-edge-reason[data-link-id="${links.nextToLater.id}"]`);
+    const tooltip = badge.locator('[role="tooltip"]');
+    await expect(badge).toHaveText(/^i/);
+    await expect(tooltip).toBeHidden();
+    // The badge is described by its tooltip.
+    const tipId = await tooltip.getAttribute('id');
+    await expect(badge).toHaveAttribute('aria-describedby', tipId!);
+
+    // Hover shows the reason; moving away hides it again.
+    await badge.hover();
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toHaveText('needs the API first');
+    await page.mouse.move(0, 0);
+    await expect(tooltip).toBeHidden();
+
+    // Keyboard focus shows it too: tab from the search box until the badge
+    // has focus.
+    await page.locator('.navbar-search-input').focus();
+    let focused = false;
+    for (let i = 0; i < 40 && !focused; i++) {
+      await page.keyboard.press('Tab');
+      focused = await badge.evaluate((el) => el === document.activeElement);
+    }
+    expect(focused).toBe(true);
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toHaveText('needs the API first');
+
+    await expectInsideGraphBody(tooltip);
+
+    // The long reason is shown whole, and inside the graph body — not
+    // clipped by its scrolling.
+    const longBadge = page.locator(`.graph-edge-reason[data-link-id="${longLink.id}"]`);
+    const longTip = longBadge.locator('[role="tooltip"]');
+    await longBadge.hover();
+    await expect(longTip).toBeVisible();
+    await expect(longTip).toHaveText(long);
+    await expectInsideGraphBody(longTip);
+    // Wrapped onto several lines rather than run out sideways.
+    expect((await longTip.boundingBox())!.height).toBeGreaterThan(40);
+
     await expectAlive(page);
+    expect(panics).toEqual([]);
   });
 
   test('collapsing a column hides its nodes and their edges', async ({ page, request }) => {
