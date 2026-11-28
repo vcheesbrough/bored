@@ -2463,12 +2463,38 @@ mark.search-hit {
   text-align: left;
   white-space: normal;
   overflow-wrap: anywhere;
-  pointer-events: none;
+  /* Hoverable (WCAG 2.1 SC 1.4.13): the pointer can move onto the tooltip
+     to read it — it is inside the badge, so hovering it keeps the badge's
+     `:hover` — and the default text cursor says it is text. */
+  pointer-events: auto;
+  cursor: text;
+}
+
+/* An invisible strip over the 6px gap between badge and tooltip, so the
+   pointer crossing it never leaves the badge's hover. */
+.graph-edge-tooltip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 8px;
+}
+
+.graph-tip-below .graph-edge-tooltip::before {
+  top: auto;
+  bottom: 100%;
 }
 
 .graph-edge-reason:hover .graph-edge-tooltip,
 .graph-edge-reason:focus .graph-edge-tooltip {
   display: block;
+}
+
+/* Escape dismisses an open tooltip (WCAG 2.1 SC 1.4.13, "dismissible")
+   until a badge is entered or focused again — see `graph::view`. */
+.graph-tips-dismissed .graph-edge-reason .graph-edge-tooltip {
+  display: none;
 }
 
 .graph-tip-below .graph-edge-tooltip {

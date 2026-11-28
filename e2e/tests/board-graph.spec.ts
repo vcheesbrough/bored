@@ -454,6 +454,36 @@ test.describe('board link graph', () => {
 
     await expectInsideGraphBody(tooltip);
 
+    // Each badge is named after its own link, so a screen reader says which
+    // link a reason belongs to.
+    await expect(badge).toHaveAccessibleName(
+      `Reason for the link from #${cards.next.number} to #${cards.later.number}`
+    );
+    await expect(
+      page.locator(`.graph-edge-reason[data-link-id="${longLink.id}"]`)
+    ).toHaveAccessibleName(
+      `Reason for the link from #${cards.loose.number} to #${cards.later.number}`
+    );
+
+    // Tab reaches the badge straight after its link's later card (in
+    // reading order the Todo column lists `next` above `later`), not after
+    // every card on the board.
+    await page.keyboard.press('Shift+Tab');
+    await expect(node(page, cards.later.number)).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(badge).toBeFocused();
+
+    // Escape dismisses the tooltip without moving focus off the badge…
+    await expect(tooltip).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(tooltip).toBeHidden();
+    await expect(badge).toBeFocused();
+    // …and so it reopens on the next visit.
+    await page.locator('.navbar-search-input').focus();
+    await badge.focus();
+    await expect(tooltip).toBeVisible();
+    await page.locator('.navbar-search-input').focus();
+
     // The long reason is shown whole, and inside the graph body — not
     // clipped by its scrolling.
     const longBadge = page.locator(`.graph-edge-reason[data-link-id="${longLink.id}"]`);
@@ -464,6 +494,17 @@ test.describe('board link graph', () => {
     await expectInsideGraphBody(longTip);
     // Wrapped onto several lines rather than run out sideways.
     expect((await longTip.boundingBox())!.height).toBeGreaterThan(40);
+
+    // The pointer can move from the badge onto the tooltip to read it, and
+    // it stays open (WCAG 1.4.13, hoverable)…
+    const tipBox = (await longTip.boundingBox())!;
+    await page.mouse.move(tipBox.x + tipBox.width / 2, tipBox.y + tipBox.height / 2, {
+      steps: 8,
+    });
+    await expect(longTip).toBeVisible();
+    // …and Escape dismisses it with the pointer still on it.
+    await page.keyboard.press('Escape');
+    await expect(longTip).toBeHidden();
 
     await expectAlive(page);
     expect(panics).toEqual([]);

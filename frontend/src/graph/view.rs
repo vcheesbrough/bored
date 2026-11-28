@@ -29,7 +29,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use leptos::leptos_dom::helpers::request_animation_frame;
+use leptos::leptos_dom::helpers::{request_animation_frame, window_event_listener};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
@@ -154,13 +154,112 @@ struct GraphModel {
     width: i32,
     height: i32,
     bands: Vec<Band>,
-    nodes: Vec<NodeView>,
+    /// The nodes and the reason badges, in keyboard (tab) order — see
+    /// [`tab_order`].
+    items: Vec<Focusable>,
     edges: Vec<EdgeView>,
 }
 
-/// A layout together with the column and link inputs it was computed from —
-/// see `layout_cache` in [`GraphView`].
-type CachedLayout = (Vec<ColumnInput>, Vec<LinkInput>, Layout);
+/// Something in the graph a keyboard can reach: a card's node, or a link's
+/// reason badge.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Focusable {
+    Node(NodeView),
+    Reason(EdgeView),
+}
+
+/// The nodes and reason badges in the order Tab should visit them: the
+/// nodes in reading order (column by column, top to bottom as text mode
+/// lists them), each reason badge straight after the later of its link's two
+/// cards — so a keyboard user meets a reason having just passed the cards it
+/// explains, not in a block after every card on the board. A badge whose
+/// cards are not drawn (cannot happen: the layout draws only links between
+/// drawn cards) would go at the end.
+fn tab_order(nodes: &[NodeView], edges: &[EdgeView]) -> Vec<Focusable> {
+    let index_of = |number: u32| nodes.iter().position(|n| n.number == number);
+    // For each node, the badges that follow it, in link order.
+    let mut after: Vec<Vec<&EdgeView>> = vec![Vec::new(); nodes.len()];
+    let mut orphans = Vec::new();
+    for edge in edges.iter().filter(|e| e.reason.is_some()) {
+        match (index_of(edge.from_number), index_of(edge.to_number)) {
+            (Some(a), Some(b)) => after[a.max(b)].push(edge),
+            _ => orphans.push(edge),
+        }
+    }
+    let mut items = Vec::new();
+    for (node, badges) in nodes.iter().zip(after) {
+        items.push(Focusable::Node(node.clone()));
+        items.extend(badges.into_iter().map(|e| Focusable::Reason(e.clone())));
+    }
+    items.extend(orphans.into_iter().map(|e| Focusable::Reason(e.clone())));
+    items
+}
+
+/// The last layout and the inputs it was computed from.
+///
+/// The layout runs a search bounded by a work budget (up to ~10 ms natively
+/// for a tangled component, perhaps twice that in the browser — see
+/// `layout::COMPONENT_WORK`), and most changes the graph's memo sees leave
+/// every position where it was: a card's body edited, a reason reworded, a
+/// card renumbered. The layout's inputs hold only geometry, card ids and
+/// link ends — never text — so those changes produce equal inputs, and the
+/// cache hands back the previous layout without searching again.
+#[derive(Default)]
+struct LayoutCache {
+    last: Option<(Vec<ColumnInput>, Vec<LinkInput>, Layout)>,
+}
+
+impl LayoutCache {
+    /// The layout for these inputs: the cached one if they equal the last
+    /// inputs (`true` — a hit), else `compute`'s, which is then cached
+    /// (`false`).
+    fn layout_for(
+        &mut self,
+        columns: Vec<ColumnInput>,
+        links: Vec<LinkInput>,
+        compute: impl FnOnce(&[ColumnInput], &[LinkInput]) -> Layout,
+    ) -> (Layout, bool) {
+        if let Some((c, l, laid_out)) = &self.last
+            && *c == columns
+            && *l == links
+        {
+            return (laid_out.clone(), true);
+        }
+        let laid_out = compute(&columns, &links);
+        self.last = Some((columns, links, laid_out.clone()));
+        (laid_out, false)
+    }
+}
+
+/// One column's layout input: where it is, whether it is collapsed, and its
+/// cards' ids in text-mode order. Card text is deliberately not part of it
+/// (see [`LayoutCache`]).
+fn column_input(left: f64, width: f64, collapsed: bool, cards: &[shared::Card]) -> ColumnInput {
+    ColumnInput {
+        left,
+        width,
+        collapsed,
+        cards: cards.iter().map(|card| card.id.clone()).collect(),
+    }
+}
+
+/// The layout's view of the board's links: ids and ends only, not reasons.
+fn link_inputs(links: &[shared::CardLink]) -> Vec<LinkInput> {
+    links
+        .iter()
+        .map(|link| LinkInput {
+            id: link.id.clone(),
+            predecessor: link.predecessor_id.clone(),
+            successor: link.successor_id.clone(),
+        })
+        .collect()
+}
+
+/// How long the header row must stop resizing before the graph re-measures
+/// it, in ms. A window drag fires the `ResizeObserver` every frame, and
+/// laying the graph out on every one would spend the search's budget sixty
+/// times a second; meanwhile the previous layout stays on screen.
+const RESIZE_SETTLE_MS: u32 = 100;
 
 /// A CSS pixel length.
 fn px(value: i32) -> String {
@@ -249,7 +348,31 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
     // the closure is dropped, and nothing can call into freed memory. The
     // browser passes the callback `(entries, observer)`; it needs neither, and
     // JS ignores extra arguments to a function that takes none.
-    let on_resize = Closure::<dyn Fn()>::new(measure);
+    //
+    // The very first callback (observing fires one at once) measures
+    // straight away, so the graph appears without a delay. After that each
+    // callback only (re)starts a [`RESIZE_SETTLE_MS`] timer, and the
+    // measurement runs when it fires: a drag re-lays the graph out once, at
+    // its end. `pending` holds the timer; a `gloo_timers` `Timeout` cancels
+    // itself when dropped, so replacing it cancels the previous one, and
+    // dropping the closure at cleanup (which drops `pending` with it) cancels
+    // any still waiting. `Rc<RefCell<…>>`: shared by every call of the
+    // closure, mutable through a shared reference, single-threaded.
+    let pending: std::rc::Rc<std::cell::RefCell<Option<gloo_timers::callback::Timeout>>> =
+        std::rc::Rc::default();
+    let on_resize = Closure::<dyn Fn()>::new(move || {
+        let first = measured
+            .try_with_untracked(|m| m.columns.is_empty())
+            .unwrap_or(false);
+        if first {
+            measure();
+            return;
+        }
+        let timeout = gloo_timers::callback::Timeout::new(RESIZE_SETTLE_MS, measure);
+        if let Ok(mut slot) = pending.try_borrow_mut() {
+            *slot = Some(timeout);
+        }
+    });
     match web_sys::ResizeObserver::new(on_resize.as_ref().unchecked_ref()) {
         Ok(observer) => {
             // The header row's element exists by the time effects run; the
@@ -316,15 +439,11 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
     //
     // A `Memo`: it re-runs whenever any signal it reads changes, and only
     // notifies the view when the resulting model is different. Every read is
-    // tracked on purpose — that is what makes the graph live.
-    // The last layout and the inputs it was computed from. The layout runs a
-    // bounded search (tens of milliseconds on a tangled board), and most
-    // changes the memo below sees — a card's body edited, a reason reworded
-    // — leave every position where it was. So the memo re-runs the layout
-    // only when its inputs differ from last time and otherwise reuses this.
-    // A `StoredValue` rather than a signal: nothing should re-run because
-    // the cache changed.
-    let layout_cache: StoredValue<Option<CachedLayout>> = StoredValue::new(None);
+    // tracked on purpose — that is what makes the graph live. The layout
+    // itself is reused while its inputs are unchanged (see [`LayoutCache`]);
+    // a `StoredValue` rather than a signal, since nothing should re-run
+    // because the cache changed.
+    let layout_cache: StoredValue<LayoutCache> = StoredValue::new(LayoutCache::default());
 
     let model = Memo::new(move |_| {
         let measured = measured.get();
@@ -382,41 +501,22 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
                 width: width.round() as i32,
                 collapsed: is_collapsed,
             });
-            inputs.push(ColumnInput {
-                left: *left,
-                width: *width,
-                collapsed: is_collapsed,
-                cards: cards.into_iter().map(|card| card.id).collect(),
-            });
+            inputs.push(column_input(*left, *width, is_collapsed, &cards));
         }
 
-        let link_inputs: Vec<LinkInput> = links
-            .iter()
-            .map(|link| LinkInput {
-                id: link.id.clone(),
-                predecessor: link.predecessor_id.clone(),
-                successor: link.successor_id.clone(),
-            })
-            .collect();
-
-        let cached = layout_cache
-            .try_with_value(|cache| {
+        // `try_update_value` (the view may be unmounting) runs the closure on
+        // the stored cache, which needs `&mut` to remember a new layout.
+        let laid_out = layout_cache
+            .try_update_value(|cache| {
                 cache
-                    .as_ref()
-                    .filter(|(i, l, _)| *i == inputs && *l == link_inputs)
-                    .map(|(_, _, laid_out)| laid_out.clone())
+                    .layout_for(inputs, link_inputs(&links), |columns, links| {
+                        layout(columns, links, &Params::default())
+                    })
+                    .0
             })
-            .flatten();
-        let laid_out = match cached {
-            Some(laid_out) => laid_out,
-            None => {
-                let laid_out = layout(&inputs, &link_inputs, &Params::default());
-                layout_cache.try_set_value(Some((inputs, link_inputs, laid_out.clone())));
-                laid_out
-            }
-        };
+            .unwrap_or_default();
 
-        let nodes = laid_out
+        let nodes: Vec<NodeView> = laid_out
             .nodes
             .iter()
             .filter_map(|node| {
@@ -437,7 +537,7 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
         // Needed before the edges: a tooltip's placement depends on it.
         let width = bands.iter().map(|b| b.left + b.width).max().unwrap_or(0);
 
-        let edges = laid_out
+        let edges: Vec<EdgeView> = laid_out
             .edges
             .iter()
             .filter_map(|edge| {
@@ -477,7 +577,7 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
             width,
             height: laid_out.height.ceil() as i32,
             bands,
-            nodes,
+            items: tab_order(&nodes, &edges),
             edges,
         }
     });
@@ -489,6 +589,29 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
     // during the unmount — reading a disposed memo then would panic and wedge
     // the tab. `try_with` also borrows the model, so each binding clones only
     // the field it draws.
+
+    // Escape hides an open reason tooltip without moving focus or the
+    // pointer (WCAG 2.1 SC 1.4.13, "dismissible"). One flag for the whole
+    // graph: Escape sets it and CSS hides every tooltip; entering or focusing
+    // a badge clears it, so the next one opens as usual. A window listener,
+    // because Escape must work while the pointer merely hovers a badge, when
+    // the key goes to whatever has focus; it is removed on cleanup.
+    let tips_dismissed = RwSignal::new(false);
+    let escape_listener = StoredValue::new(Some(window_event_listener(
+        leptos::ev::keydown,
+        move |ev| {
+            if ev.key() == "Escape" {
+                let _ = tips_dismissed.try_set(true);
+            }
+        },
+    )));
+    on_cleanup(move || {
+        escape_listener.update_value(|listener| {
+            if let Some(listener) = listener.take() {
+                listener.remove();
+            }
+        });
+    });
 
     // The graph body scrolls both ways; the header row above it does not
     // scroll by itself (its overflow is hidden), so mirror the body's
@@ -503,6 +626,7 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
         <div class="graph-body" node_ref=body_ref on:scroll=sync_scroll>
             <div
                 class="graph-canvas"
+                class:graph-tips-dismissed=move || tips_dismissed.try_get().unwrap_or(false)
                 style:width=move || px(model.try_with(|m| m.width).unwrap_or(0))
                 style:height=move || px(model.try_with(|m| m.height).unwrap_or(0))
             >
@@ -570,79 +694,17 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
                         }
                     />
                 </svg>
+                // The nodes and the reason badges, in one list so the DOM —
+                // and therefore Tab — visits each badge straight after its
+                // link's cards (see `tab_order`). Badges still draw above
+                // nodes: their CSS `z-index` puts them there whatever the
+                // DOM order.
                 <For
-                    each=move || model.try_with(|m| m.nodes.clone()).unwrap_or_default()
-                    key=|node| node.clone()
-                    children=|node| {
-                        let label = format!("#{} {}", node.number, node.title);
-                        view! {
-                            // A plain link: the router turns the click into
-                            // an in-app navigation to `?card=N`, which opens
-                            // the card's modal over the graph.
-                            <a
-                                class="graph-node"
-                                href=node.href.clone()
-                                data-card-number=node.number
-                                title=label
-                                style:left=px(node.x)
-                                style:top=px(node.y)
-                                style:width=px(node.w)
-                                style:height=px(node.h)
-                            >
-                                <span class="graph-node-number">{format!("#{}", node.number)}</span>
-                                <span class="graph-node-title">{node.title.clone()}</span>
-                            </a>
-                        }
-                    }
-                />
-                // Reasons: a small "i" badge at the middle of each line that
-                // has one, after the nodes so it (and its tooltip) draws on
-                // top. The reason itself is in a tooltip shown on hover *and*
-                // on keyboard focus — the badge is focusable for exactly that
-                // — and it is also the badge's accessible description
-                // (`aria-describedby`), so a screen reader announces it on
-                // focus. The tooltip is a child of the badge, so CSS alone can
-                // show it (`:hover`, `:focus`); its side and direction come
-                // from `tooltip_placement`.
-                <For
-                    each=move || {
-                        model
-                            .try_with(|m| {
-                                m.edges.iter().filter(|e| e.reason.is_some()).cloned().collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
-                    }
-                    key=|edge| edge.clone()
-                    children=|edge| {
-                        let reason = edge.reason.clone().unwrap_or_default();
-                        // Link ids are ULIDs — letters and digits — so they
-                        // make a valid, page-unique element id.
-                        let tip_id = format!("graph-reason-{}", edge.link_id);
-                        // Two owned copies: the badge points at the tooltip
-                        // by id, and the tooltip carries it.
-                        let described_by = tip_id.clone();
-                        let class = format!(
-                            "graph-edge-reason {}{}",
-                            edge.tip_align.class(),
-                            if edge.tip_below { " graph-tip-below" } else { "" }
-                        );
-                        view! {
-                            <span
-                                class=class
-                                role="img"
-                                tabindex="0"
-                                aria-label="Link reason"
-                                aria-describedby=described_by
-                                data-link-id=edge.link_id.clone()
-                                style:left=px(edge.label_x)
-                                style:top=px(edge.label_y)
-                            >
-                                <span class="graph-edge-reason-glyph" aria-hidden="true">"i"</span>
-                                <span class="graph-edge-tooltip" role="tooltip" id=tip_id>
-                                    {reason}
-                                </span>
-                            </span>
-                        }
+                    each=move || model.try_with(|m| m.items.clone()).unwrap_or_default()
+                    key=|item| item.clone()
+                    children=move |item| match item {
+                        Focusable::Node(node) => graph_node(node),
+                        Focusable::Reason(edge) => reason_badge(edge, tips_dismissed),
                     }
                 />
             </div>
@@ -651,10 +713,96 @@ pub fn GraphView(header_row: NodeRef<leptos::html::Div>, board_slug: RwSignal<St
     .into_any()
 }
 
+/// One card's node: a plain link, which the router turns into an in-app
+/// navigation to `?card=N` — opening the card's modal over the graph.
+fn graph_node(node: NodeView) -> AnyView {
+    let label = format!("#{} {}", node.number, node.title);
+    view! {
+        <a
+            class="graph-node"
+            href=node.href.clone()
+            data-card-number=node.number
+            title=label
+            style:left=px(node.x)
+            style:top=px(node.y)
+            style:width=px(node.w)
+            style:height=px(node.h)
+        >
+            <span class="graph-node-number">{format!("#{}", node.number)}</span>
+            <span class="graph-node-title">{node.title.clone()}</span>
+        </a>
+    }
+    .into_any()
+}
+
+/// A link's reason: a small "i" badge at the middle of its line.
+///
+/// The reason itself is in a tooltip shown on hover *and* on keyboard focus
+/// — the badge is focusable for exactly that. The tooltip is a child of the
+/// badge, so CSS alone can show it (`:hover`, `:focus`), and moving the
+/// pointer from the badge onto the tooltip keeps it open (`style.css`
+/// bridges the gap between them). Its side and direction come from
+/// [`tooltip_placement`].
+///
+/// For a screen reader the badge is named after its link ("Reason for the
+/// link from #118 to #11" — each badge's name is different) and described
+/// by the tooltip, so focusing it announces which link and why.
+fn reason_badge(edge: EdgeView, tips_dismissed: RwSignal<bool>) -> AnyView {
+    let reason = edge.reason.clone().unwrap_or_default();
+    // Link ids are ULIDs — letters and digits — so they make a valid,
+    // page-unique element id. Two owned copies: the badge points at the
+    // tooltip by id, and the tooltip carries it.
+    let tip_id = format!("graph-reason-{}", edge.link_id);
+    let described_by = tip_id.clone();
+    let name = format!(
+        "Reason for the link from #{} to #{}",
+        edge.from_number, edge.to_number
+    );
+    let class = format!(
+        "graph-edge-reason {}{}",
+        edge.tip_align.class(),
+        if edge.tip_below {
+            " graph-tip-below"
+        } else {
+            ""
+        }
+    );
+    // Entering or focusing a badge undoes an earlier Escape.
+    let reopen = move || {
+        let _ = tips_dismissed.try_set(false);
+    };
+    view! {
+        <span
+            class=class
+            role="img"
+            tabindex="0"
+            aria-label=name
+            aria-describedby=described_by
+            data-link-id=edge.link_id.clone()
+            style:left=px(edge.label_x)
+            style:top=px(edge.label_y)
+            on:mouseenter=move |_| reopen()
+            on:focus=move |_| reopen()
+        >
+            <span class="graph-edge-reason-glyph" aria-hidden="true">"i"</span>
+            <span class="graph-edge-tooltip" role="tooltip" id=tip_id>
+                {reason}
+            </span>
+        </span>
+    }
+    .into_any()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TipAlign, tooltip_placement};
+    use super::{
+        EdgeView, Focusable, LayoutCache, NodeView, TipAlign, column_input, link_inputs, tab_order,
+        tooltip_placement,
+    };
+    use crate::graph::layout::{ColumnInput, Layout, LinkInput};
 
+    // ── Reason tooltip placement ───────────────────────────────────────────
+    //
     // A 1000px canvas. The tooltip is up to 260px wide, so a centred one
     // needs 130px either side of its badge, plus an 8px margin: 138px.
 
@@ -677,5 +825,152 @@ mod tests {
         assert_eq!(tooltip_placement(500, 110, 1000), (TipAlign::Center, false));
         // A corner flips both ways.
         assert_eq!(tooltip_placement(20, 40, 1000), (TipAlign::Start, true));
+    }
+
+    // ── The layout cache ───────────────────────────────────────────────────
+
+    fn card(id: &str, number: u32, body: &str) -> shared::Card {
+        shared::Card {
+            id: id.to_string(),
+            column_id: "col".to_string(),
+            body: body.to_string(),
+            position: 0,
+            number,
+            tags: Vec::new(),
+            last_edited_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn card_link(id: &str, from: &str, to: &str, reason: Option<&str>) -> shared::CardLink {
+        shared::CardLink {
+            id: id.to_string(),
+            predecessor_id: from.to_string(),
+            successor_id: to.to_string(),
+            predecessor_number: 0,
+            successor_number: 0,
+            predecessor_board_slug: String::new(),
+            successor_board_slug: String::new(),
+            reason: reason.map(str::to_string),
+            last_edited_by: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// Lay out through `cache` and report whether it hit. The stand-in
+    /// layout records that it ran by returning a non-default height.
+    fn through(cache: &mut LayoutCache, columns: Vec<ColumnInput>, links: Vec<LinkInput>) -> bool {
+        let mut ran = false;
+        let (_, hit) = cache.layout_for(columns, links, |_, _| {
+            ran = true;
+            Layout {
+                height: 1.0,
+                ..Layout::default()
+            }
+        });
+        assert_eq!(hit, !ran, "a hit must not run the layout, a miss must");
+        hit
+    }
+
+    #[test]
+    fn editing_a_cards_text_or_a_reason_reuses_the_layout() {
+        let mut cache = LayoutCache::default();
+        let before = [card("a", 1, "# First"), card("b", 2, "# Second")];
+        let links = [card_link("l", "a", "b", Some("why"))];
+        assert!(!through(
+            &mut cache,
+            vec![column_input(0.0, 474.0, false, &before)],
+            link_inputs(&links),
+        ));
+        // The same cards with new bodies and a new number, the same link
+        // with a new reason: nothing the layout reads has changed.
+        let after = [card("a", 7, "# First, renamed"), card("b", 2, "Rewritten")];
+        let reworded = [card_link("l", "a", "b", Some("a better reason"))];
+        assert!(through(
+            &mut cache,
+            vec![column_input(0.0, 474.0, false, &after)],
+            link_inputs(&reworded),
+        ));
+    }
+
+    #[test]
+    fn a_new_link_a_new_width_or_a_collapse_lays_out_again() {
+        let mut cache = LayoutCache::default();
+        let cards = [card("a", 1, "A"), card("b", 2, "B")];
+        let column =
+            |width: f64, collapsed: bool| vec![column_input(0.0, width, collapsed, &cards)];
+        assert!(!through(&mut cache, column(474.0, false), Vec::new()));
+        // A link appears.
+        let linked = link_inputs(&[card_link("l", "a", "b", None)]);
+        assert!(!through(&mut cache, column(474.0, false), linked.clone()));
+        // The window is resized.
+        assert!(!through(&mut cache, column(500.0, false), linked.clone()));
+        // The column is collapsed.
+        assert!(!through(&mut cache, column(500.0, true), linked.clone()));
+        // And nothing changes: a hit again.
+        assert!(through(&mut cache, column(500.0, true), linked));
+    }
+
+    // ── Keyboard order ─────────────────────────────────────────────────────
+
+    fn node_view(number: u32) -> NodeView {
+        NodeView {
+            card_id: format!("c{number}"),
+            number,
+            title: String::new(),
+            href: String::new(),
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }
+    }
+
+    fn edge_view(from: u32, to: u32, reason: Option<&str>) -> EdgeView {
+        EdgeView {
+            link_id: format!("{from}->{to}"),
+            from_number: from,
+            to_number: to,
+            x1: 0,
+            y1: 0,
+            x2: 0,
+            y2: 0,
+            reason: reason.map(str::to_string),
+            label_x: 0,
+            label_y: 0,
+            tip_align: TipAlign::Center,
+            tip_below: false,
+        }
+    }
+
+    /// Short names for an order, to compare against: `#N` for a node,
+    /// `from->to` for a badge.
+    fn names(items: &[Focusable]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                Focusable::Node(n) => format!("#{}", n.number),
+                Focusable::Reason(e) => e.link_id.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_reason_badge_follows_the_later_of_its_links_cards() {
+        // Nodes in reading order #1, #2, #3. 3 → 1 has a reason: its later
+        // card in that order is #3, so its badge comes after #3. 1 → 2 has
+        // one too: after #2. 2 → 3 has none: no badge at all.
+        let nodes = [node_view(1), node_view(2), node_view(3)];
+        let edges = [
+            edge_view(3, 1, Some("why")),
+            edge_view(1, 2, Some("because")),
+            edge_view(2, 3, None),
+        ];
+        assert_eq!(
+            names(&tab_order(&nodes, &edges)),
+            ["#1", "#2", "1->2", "#3", "3->1"]
+        );
     }
 }

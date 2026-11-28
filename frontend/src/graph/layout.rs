@@ -234,6 +234,18 @@ struct Edge {
 
 /// Lay the graph out. See the module docs for the steps.
 pub fn layout(columns: &[ColumnInput], links: &[LinkInput], p: &Params) -> Layout {
+    layout_counting_work(columns, links, p).0
+}
+
+/// [`layout`], also returning the work units its search spent (bounded by
+/// [`LAYOUT_WORK`]) — for the tests that hold the search to its budget.
+pub fn layout_counting_work(
+    columns: &[ColumnInput],
+    links: &[LinkInput],
+    p: &Params,
+) -> (Layout, u64) {
+    // Work units every component's search has spent so far.
+    let mut work = 0u64;
     // ── Step 1: visible cards and the links between them ────────────────
     //
     // Cards are numbered in column order, then text-mode order, and that
@@ -260,7 +272,7 @@ pub fn layout(columns: &[ColumnInput], links: &[LinkInput], p: &Params) -> Layou
         }
     }
     if cards.is_empty() {
-        return Layout::default();
+        return (Layout::default(), 0);
     }
 
     let slots: Vec<usize> = columns.iter().map(|c| slots_per_row(c.width, p)).collect();
@@ -350,7 +362,11 @@ pub fn layout(columns: &[ColumnInput], links: &[LinkInput], p: &Params) -> Layou
             .filter(|(_, edge_root)| *edge_root == root)
             .map(|(edge, _)| *edge)
             .collect();
-        let local = layout_component(members, &member_edges, &cards, columns, &slots, p);
+        // This component's search budget: its own cap, or what the board
+        // has left if that is less.
+        let budget = COMPONENT_WORK.min(LAYOUT_WORK.saturating_sub(work));
+        let local = layout_component(members, &member_edges, &cards, columns, &slots, p, budget);
+        work += local.work;
 
         // The component claims every column between its outermost cards, so
         // it starts below the lowest thing in any of them.
@@ -423,11 +439,14 @@ pub fn layout(columns: &[ColumnInput], links: &[LinkInput], p: &Params) -> Layou
         p.pad_top + rows as f64 * (p.node_h + p.row_gap) - p.row_gap + p.pad_bottom
     };
 
-    Layout {
-        nodes,
-        edges: edge_lines,
-        height,
-    }
+    (
+        Layout {
+            nodes,
+            edges: edge_lines,
+            height,
+        },
+        work,
+    )
 }
 
 /// Top of row `row`.
@@ -450,6 +469,8 @@ struct LocalLayout {
     rows: usize,
     /// `(card, row, x)` for every member.
     placements: Vec<(usize, usize, f64)>,
+    /// Work units the component's search spent.
+    work: u64,
 }
 
 /// One arrangement of a component: everything a layout round produces.
@@ -477,6 +498,7 @@ fn layout_component(
     columns: &[ColumnInput],
     slots: &[usize],
     p: &Params,
+    budget: u64,
 ) -> LocalLayout {
     let n = members.len();
     let local: HashMap<usize, usize> = members.iter().enumerate().map(|(l, &g)| (g, l)).collect();
@@ -517,7 +539,17 @@ fn layout_component(
         slots,
         p,
     );
+    // These rounds count against the component's budget too: each one tests
+    // every line against every card (and arranges the component again), and
+    // on a huge component they would otherwise run unbounded. They may use
+    // a quarter of it; the search below gets the rest.
+    let round_work = (local_edges.len() * n) as u64 * 2 + 1;
+    let mut rounds_work = 0u64;
     for _ in 0..MAX_ROUNDS {
+        if rounds_work + round_work > budget / 4 {
+            break;
+        }
+        rounds_work += round_work;
         let conflicts = find_conflicts(&arrangement, &local_edges, p);
         if conflicts.is_empty() {
             break;
@@ -572,12 +604,23 @@ fn layout_component(
     // Step 5b: polish the arrangement against what the user actually sees.
     let mut row = arrangement.row;
     let mut x = arrangement.x;
-    refine(&col, &local_edges, columns, slots, p, &mut row, &mut x);
+    let work = rounds_work
+        + refine(
+            &col,
+            &local_edges,
+            columns,
+            slots,
+            p,
+            budget - rounds_work,
+            &mut row,
+            &mut x,
+        );
     let rows = row.iter().copied().max().map_or(0, |r| r + 1);
 
     LocalLayout {
         rows,
         placements: (0..n).map(|l| (members[l], row[l], x[l])).collect(),
+        work,
     }
 }
 
@@ -614,29 +657,54 @@ const W_UP: f64 = 300.0;
 /// Each row the component spans: keeps the picture compact, so a card is
 /// not parked in an empty row that a slightly longer line would avoid.
 const W_ROW: f64 = 60.0;
-/// How many rows above and below its current row a card may be tried in.
+/// How many rows above and below its current row a card of a big
+/// component may be tried in (a small one's cards may try every row).
 const MOVE_ROWS: usize = 2;
-/// The greedy phase's budget, in segment tests (each candidate move costs
-/// about a card's links × (cards + links) of them): what keeps a big
-/// component's search to a few milliseconds. Fixed, so deterministic.
-const GREEDY_WORK: usize = 2_000_000;
-/// The most full passes over the component's cards.
+/// Components up to this many cards let a card try every row.
+const FULL_REACH_MAX_NODES: usize = 40;
+/// The most full passes over the component's cards in one greedy descent.
 const MAX_PASSES: usize = 12;
-/// Components up to this many cards also get the annealing phase.
-const ANNEAL_MAX_NODES: usize = 40;
-/// The annealing phase's budget, in segment tests (roughly: each step costs
-/// a card's links × (cards + links) of them). Fixed, so its time is bounded
-/// and its result the same on every run.
-const ANNEAL_WORK: usize = 100_000;
-/// Annealing steps, whatever the work estimate says.
-const ANNEAL_MIN_STEPS: usize = 500;
-const ANNEAL_MAX_STEPS: usize = 40_000;
+
+/// The search's budget, in *work units*: one unit is one geometric test — a
+/// line against a card, or two lines against each other — and the scans
+/// that check a move is allowed count a unit per handful of cards or links
+/// they look at (see [`Search::spend`]). Every phase draws on one counter
+/// per component, checked before every candidate, so the search stops at
+/// the budget whatever the board looks like, and stops at the same place on
+/// every run (it counts work, not time).
+///
+/// Measured natively (release build, card #303 review) at 30–40 units per
+/// microsecond: a dense 40-card, 60-link component spends its whole budget
+/// in about 10–11 ms, and a 200-card board lays out in about 3 ms (one
+/// giant component, so whole-picture phases are skipped — see
+/// [`WHOLE_PICTURES`]). WebAssembly in a browser is perhaps twice as slow.
+/// The tests hold the search to these budgets in units, not time, so they
+/// are deterministic.
+pub const COMPONENT_WORK: u64 = 400_000;
+/// The budget for every component on the board together — at most about
+/// 40–50 ms natively. A board of many tangled components gives the later
+/// ones less (they still get their initial placement, which never has
+/// overlapping cards).
+pub const LAYOUT_WORK: u64 = 1_500_000;
+/// How a component's budget is shared out, in percent: the first greedy
+/// descent, the first repair, then the annealing runs together; whatever
+/// is left goes to the final repair, re-slotting and descent.
+const GREEDY_PERCENT: u64 = 20;
+const REPAIR_PERCENT: u64 = 20;
+const ANNEAL_PERCENT: u64 = 35;
 /// Annealing temperature, in cost units: at the start a move that costs a
 /// crossing is often taken; by the end only improvements are.
 const ANNEAL_T_START: f64 = 3_000.0;
 const ANNEAL_T_END: f64 = 5.0;
-/// The most slot assignments [`slot_columns`] tries for one column.
+/// The most slot assignments [`slot_columns`] tries for one column (it also
+/// stops at the budget).
 const MAX_SLOT_COMBOS: usize = 4_096;
+/// The whole-picture phases run only when this many whole-picture scores
+/// fit in the component's budget.
+const WHOLE_PICTURES: u64 = 20;
+/// How many moves that leave the number of lines through cards unchanged
+/// [`repair`] may take in a row.
+const REPAIR_SIDEWAYS: usize = 3;
 /// The most annealing runs (each with its own seed) a component gets.
 const ANNEAL_MAX_RUNS: u64 = 6;
 
@@ -693,9 +761,26 @@ struct Search<'a> {
     p: &'a Params,
     row: Vec<usize>,
     x: Vec<f64>,
+    /// Work units spent so far. A `Cell` because the cost functions take
+    /// `&self` (they only read the picture) but must still count what they
+    /// do; `Cell` gives that one counter interior mutability, and `u64`
+    /// is `Copy`, so `get`/`set` need no borrow.
+    work: std::cell::Cell<u64>,
+    /// Where the current phase must stop ([`Self::exhausted`]).
+    limit: u64,
 }
 
 impl Search<'_> {
+    /// Count `units` of work.
+    fn spend(&self, units: u64) {
+        self.work.set(self.work.get() + units);
+    }
+
+    /// Has the current phase used up its budget?
+    fn exhausted(&self) -> bool {
+        self.work.get() >= self.limit
+    }
+
     fn rect(&self, l: usize) -> Rect {
         Rect {
             x: self.x[l],
@@ -718,6 +803,7 @@ impl Search<'_> {
         if l == u || l == v {
             return 0.0;
         }
+        self.spend(1);
         let (a, b) = self.segment(e);
         if segment_hits_rect(a, b, &self.rect(l).inflate(CLEARANCE)) {
             W_THROUGH
@@ -734,6 +820,7 @@ impl Search<'_> {
         if u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2 {
             return false;
         }
+        self.spend(1);
         let (a1, a2) = self.segment(e);
         let (b1, b2) = self.segment(f);
         segments_cross(a1, a2, b1, b2)
@@ -820,6 +907,8 @@ impl Search<'_> {
     /// Would card `l` at `(row, x)` overlap another card of its column
     /// (other than those in `ignore`, which are moving too)?
     fn overlaps(&self, l: usize, row: usize, x: f64, ignore: &[usize]) -> bool {
+        // A scan of every card: cheap comparisons, a unit per eight.
+        self.spend(1 + self.row.len() as u64 / 8);
         let min_gap = self.p.node_w + self.p.h_gap - 1e-6;
         (0..self.row.len()).any(|o| {
             o != l
@@ -830,27 +919,54 @@ impl Search<'_> {
         })
     }
 
+    /// Every `(link, card)` where the link's line passes through the card.
+    fn lines_through_cards(&self) -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for e in 0..self.edges.len() {
+            for l in 0..self.row.len() {
+                if self.through_cost(e, l) > 0.0 {
+                    found.push((e, l));
+                }
+            }
+        }
+        found
+    }
+
+    /// Open an empty row at `r`: every card on row `r` or below moves down
+    /// one. Relative order is kept, so no same-column link turns upward.
+    fn insert_row(&mut self, r: usize) {
+        for row in &mut self.row {
+            if *row >= r {
+                *row += 1;
+            }
+        }
+    }
+
     /// Does every same-column link touching `l` still read downward?
     fn order_holds(&self, l: usize) -> bool {
+        self.spend(1 + self.edges.len() as u64 / 8);
         self.edges.iter().all(|&(u, v, _)| {
             !(u == l || v == l) || self.col[u] != self.col[v] || self.row[v] > self.row[u]
         })
     }
 }
 
-/// Step 5b for one component: polish `row` and `x` in place. See above.
+/// Step 5b for one component: polish `row` and `x` in place (see above),
+/// spending at most `budget` work units. Returns the units spent.
+#[allow(clippy::too_many_arguments)]
 fn refine(
     col: &[usize],
     edges: &[(usize, usize, usize)],
     columns: &[ColumnInput],
     slots: &[usize],
     p: &Params,
+    budget: u64,
     row: &mut Vec<usize>,
     x: &mut Vec<f64>,
-) {
+) -> u64 {
     let n = col.len();
-    if edges.is_empty() || n < 2 {
-        return;
+    if edges.is_empty() || n < 2 || budget == 0 {
+        return 0;
     }
     // Each column's candidate x positions, computed once.
     let xs: HashMap<usize, Vec<f64>> = col
@@ -865,73 +981,108 @@ fn refine(
         p,
         row: std::mem::take(row),
         x: std::mem::take(x),
+        work: std::cell::Cell::new(0),
+        limit: budget * GREEDY_PERCENT / 100,
     };
 
-    // How many candidate moves the greedy phase may evaluate in all.
-    let degree = (2 * edges.len()).div_ceil(n).max(1);
-    let max_evals = (GREEDY_WORK / (degree * (n + edges.len())).max(1)).max(100);
+    // Greedy first, on a share of the budget: cheap, and on most components
+    // all that is needed. Then targeted repair of any line still running
+    // through a card, before the broader (and costlier) annealing.
+    greedy(&mut s, &xs);
 
-    // Greedy first: cheap, and on most components all that is needed.
-    let mut evals = 0usize;
-    greedy(&mut s, &xs, &mut evals, max_evals);
-    // Then, for a component small enough to afford it, anneal: greedy stops
-    // at the first arrangement no single move improves, and chains of
-    // transitive links routinely need two or three cards moved together.
-    // Runs from the greedy result, each with its own fixed seed; the
-    // cheapest outcome wins. One run can settle in a different valley from
-    // another. Effort follows need: another run is made only while the best
-    // picture so far still has a line through a card or a crossing, up to
-    // [`ANNEAL_MAX_RUNS`] — so a clean component costs one run and a hard
-    // one gets more.
-    if n <= ANNEAL_MAX_NODES {
-        let (start_row, start_x) = (s.row.clone(), s.x.clone());
-        let mut best = (s.total_cost(), start_row.clone(), start_x.clone());
-        for run in 0..ANNEAL_MAX_RUNS {
-            if run > 0 {
-                let (best_row, best_x) = (s.row.clone(), s.x.clone());
-                s.row.clone_from(&best.1);
-                s.x.clone_from(&best.2);
-                let clean = s.faults() == (0, 0);
-                s.row = best_row;
-                s.x = best_x;
-                if clean {
-                    break;
-                }
-            }
-            s.row.clone_from(&start_row);
-            s.x.clone_from(&start_x);
-            anneal(&mut s, &xs, run);
-            let mut run_evals = 0;
-            greedy(&mut s, &xs, &mut run_evals, max_evals);
-            slot_columns(&mut s, &xs);
-            greedy(&mut s, &xs, &mut run_evals, max_evals);
-            let cost = s.total_cost();
-            if cost < best.0 - 1e-6 {
-                best = (cost, s.row.clone(), s.x.clone());
-            }
-        }
-        s.row = best.1;
-        s.x = best.2;
+    // The phases below score whole pictures, and one such score tests every
+    // line against every card and every other line. On a component so big
+    // that a handful of those would eat the budget, greedy (which scores
+    // moves locally) is all it gets.
+    let m = edges.len() as u64;
+    let whole_picture = m * (n as u64 + m);
+    if whole_picture * WHOLE_PICTURES > budget {
+        s.limit = budget;
+        greedy(&mut s, &xs);
+        return finish(s, row, x);
+    }
+    if !s.lines_through_cards().is_empty() {
+        s.limit = budget * (GREEDY_PERCENT + REPAIR_PERCENT) / 100;
+        repair(&mut s, &xs);
     }
 
-    // Shift the component up so its first card is on row 0. Moving every
-    // card the same distance changes no line's shape, so this is always
-    // safe — and no single move in the search can do it, which is how
-    // empty rows at the top survive it. Empty rows further down are left
-    // alone: closing one changes the slope of every line across it, and the
-    // search (which pays per row) kept it because closing it costs more.
+    // Then anneal: greedy stops at the first arrangement no single move
+    // improves, and chains of transitive links routinely need two or three
+    // cards moved together. Each run starts from the greedy result with its
+    // own fixed seed, and the cheapest outcome wins — one run can settle in
+    // a different valley from another. Each run gets an equal share of what
+    // is left, so the last run ends at the budget. Effort follows need:
+    // another run is made only while the best picture so far still has a
+    // line through a card or a crossing, so a clean component stops early.
+    let (start_row, start_x) = (s.row.clone(), s.x.clone());
+    let mut best = (s.total_cost(), start_row.clone(), start_x.clone());
+    let anneal_end = s.work.get() + budget * ANNEAL_PERCENT / 100;
+    for run in 0..ANNEAL_MAX_RUNS {
+        if run > 0 {
+            let (run_row, run_x) = (s.row.clone(), s.x.clone());
+            s.row.clone_from(&best.1);
+            s.x.clone_from(&best.2);
+            let clean = s.faults() == (0, 0);
+            s.row = run_row;
+            s.x = run_x;
+            if clean {
+                break;
+            }
+        }
+        let spent = s.work.get();
+        if spent >= anneal_end {
+            break;
+        }
+        s.limit = spent + (anneal_end - spent) / (ANNEAL_MAX_RUNS - run);
+        s.row.clone_from(&start_row);
+        s.x.clone_from(&start_x);
+        anneal(&mut s, &xs, run);
+        greedy(&mut s, &xs);
+        let cost = s.total_cost();
+        if cost < best.0 - 1e-6 {
+            best = (cost, s.row.clone(), s.x.clone());
+        }
+    }
+    s.row = best.1;
+    s.x = best.2;
+
+    // Last, on the best picture, the rest of the budget: re-slot each
+    // column exhaustively (the move the other phases cannot make), then
+    // descend once more from wherever that lands.
+    if s.faults() != (0, 0) {
+        s.limit = budget;
+        repair(&mut s, &xs);
+        slot_columns(&mut s, &xs);
+        greedy(&mut s, &xs);
+    }
+
+    finish(s, row, x)
+}
+
+/// Hand a finished search's picture back through `row` and `x`, and return
+/// the work it spent.
+///
+/// The component is first shifted up so its first card is on row 0. Moving
+/// every card the same distance changes no line's shape, so this is always
+/// safe — and no single move in the search can do it, which is how empty
+/// rows at the top survive it. Empty rows further down are left alone:
+/// closing one changes the slope of every line across it, and the search
+/// (which pays per row) kept it because closing it costs more.
+fn finish(mut s: Search, row: &mut Vec<usize>, x: &mut Vec<f64>) -> u64 {
     let top = s.row.iter().copied().min().unwrap_or(0);
     for r in &mut s.row {
         *r -= top;
     }
+    let spent = s.work.get();
     *row = s.row;
     *x = s.x;
+    spent
 }
 
 /// Greedy descent: for each card in turn, make the single relocation or
 /// swap that lowers the cost most, until a full pass improves nothing (or
-/// the shared evaluation budget runs out).
-fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_evals: usize) {
+/// the phase's budget runs out).
+fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
     let n = s.row.len();
     'passes: for _ in 0..MAX_PASSES {
         let mut improved = false;
@@ -942,7 +1093,7 @@ fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_
             let (home_row, home_x) = (s.row[l], s.x[l]);
             let max_row = s.row.iter().copied().max().unwrap_or(0) + 1;
             // Every row of a small component; nearby rows of a big one.
-            let reach = if n <= ANNEAL_MAX_NODES {
+            let reach = if n <= FULL_REACH_MAX_NODES {
                 max_row
             } else {
                 MOVE_ROWS
@@ -957,8 +1108,7 @@ fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_
                     if s.overlaps(l, r, cx, &[]) {
                         continue;
                     }
-                    *evals += 1;
-                    if *evals > max_evals {
+                    if s.exhausted() {
                         break 'passes;
                     }
                     s.row[l] = r;
@@ -979,8 +1129,7 @@ fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_
                 if o == l || s.col[o] != s.col[l] {
                     continue;
                 }
-                *evals += 1;
-                if *evals > max_evals {
+                if s.exhausted() {
                     break 'passes;
                 }
                 let pair_before = s.local_cost(&[l, o]);
@@ -1017,6 +1166,102 @@ fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_
     }
 }
 
+/// A [`repair`] candidate: its rank (lines through cards, then cost) and the
+/// whole picture's rows and x positions.
+type RepairPick = ((usize, f64), Vec<usize>, Vec<f64>);
+
+/// Targeted repair of the lines that still run through a card. For each such
+/// line, the blocking card and both of the line's ends are tried in every
+/// slot of every row of their column — and also in a freshly opened row at
+/// each height, which is the one move that gives a transitive link a clear
+/// corridor past a chain when the rows are packed (122 → 119 past 121 and
+/// 120 in a one-slot column). Candidates are ranked by how many lines then
+/// run through cards, then by the whole picture's cost.
+///
+/// Such a fix often takes two moves, and the first only trades one line
+/// through a card for another (121 steps aside, and 121 → 119 now runs
+/// through 120 until a row opens below it). So when nothing improves, up
+/// to [`REPAIR_SIDEWAYS`] moves that leave the count unchanged are taken,
+/// never returning to an arrangement already visited. The best arrangement
+/// seen is kept; the budget bounds the whole thing.
+fn repair(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
+    let rank = |s: &Search| (s.lines_through_cards().len(), s.total_cost());
+    let better = |a: (usize, f64), b: (usize, f64)| a.0 < b.0 || (a.0 == b.0 && a.1 < b.1 - 1e-6);
+    let mut best = (rank(s), s.row.clone(), s.x.clone());
+    let mut seen: HashSet<Vec<u64>> = HashSet::new();
+    // An arrangement's fingerprint: every card's row and x, as integers.
+    let key = |s: &Search| -> Vec<u64> {
+        s.row
+            .iter()
+            .zip(&s.x)
+            .flat_map(|(&r, &x)| [r as u64, x.round() as u64])
+            .collect()
+    };
+    seen.insert(key(s));
+    let mut sideways = 0;
+    loop {
+        let faults = s.lines_through_cards();
+        if faults.is_empty() || s.exhausted() {
+            break;
+        }
+        let current = (faults.len(), s.total_cost());
+        // The best candidate so far: its rank and the whole picture.
+        let mut pick: Option<RepairPick> = None;
+        // Each candidate is undone before the next, so stopping anywhere
+        // (at the budget) leaves the picture as it was.
+        'candidates: for (e, blocker) in faults {
+            let (u, v, _) = s.edges[e];
+            for l in [blocker, u, v] {
+                let (home_row, home_x) = (s.row.clone(), s.x.clone());
+                let max_row = s.row.iter().copied().max().unwrap_or(0) + 1;
+                for r in 0..=max_row {
+                    for open in [false, true] {
+                        for &cx in &xs[&s.col[l]] {
+                            if s.exhausted() {
+                                break 'candidates;
+                            }
+                            if open {
+                                s.insert_row(r);
+                            }
+                            s.row[l] = r;
+                            s.x[l] = cx;
+                            if !s.overlaps(l, r, cx, &[])
+                                && s.order_holds(l)
+                                && !seen.contains(&key(s))
+                            {
+                                let candidate = rank(s);
+                                if pick.as_ref().is_none_or(|(c, _, _)| better(candidate, *c)) {
+                                    pick = Some((candidate, s.row.clone(), s.x.clone()));
+                                }
+                            }
+                            s.row.clone_from(&home_row);
+                            s.x.clone_from(&home_x);
+                        }
+                    }
+                }
+            }
+        }
+        let Some((candidate, row, x)) = pick else {
+            break;
+        };
+        if better(candidate, current) {
+            // A real improvement.
+        } else if candidate.0 == current.0 && sideways < REPAIR_SIDEWAYS {
+            sideways += 1;
+        } else {
+            break;
+        }
+        s.row = row;
+        s.x = x;
+        seen.insert(key(s));
+        if better(candidate, best.0) {
+            best = (candidate, s.row.clone(), s.x.clone());
+        }
+    }
+    s.row = best.1;
+    s.x = best.2;
+}
+
 /// For each column of the component, try every way of putting its cards in
 /// that column's x positions — rows unchanged — and keep the cheapest
 /// (if it beats what is there). A chain with transitive links
@@ -1024,7 +1269,7 @@ fn greedy(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, evals: &mut usize, max_
 /// zig-zagged across the column so every line has a clear corridor, which
 /// means moving several cards at once — a move neither [`greedy`] nor
 /// [`anneal`] makes. Skipped for a column with more combinations than
-/// [`MAX_SLOT_COMBOS`].
+/// [`MAX_SLOT_COMBOS`]; stops at the phase's budget.
 fn slot_columns(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
     let n = s.row.len();
     let mut columns: Vec<usize> = s.col.to_vec();
@@ -1043,6 +1288,9 @@ fn slot_columns(s: &mut Search, xs: &HashMap<usize, Vec<f64>>) {
         let original: Vec<f64> = cards.iter().map(|&l| s.x[l]).collect();
         let mut best = (s.total_cost(), original.clone());
         for combo in 0..combos {
+            if s.exhausted() {
+                break;
+            }
             // Read `combo` as a number in base `options.len()`: digit i is
             // the option for card i.
             let mut rest = combo;
@@ -1100,9 +1348,14 @@ fn anneal(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, run: u64) {
     let n = s.row.len();
     let e = s.edges.len();
     let mut rng = Lcg(0x5eed_6a7a + n as u64 * 31 + e as u64 + run * 7919);
-    // Roughly what one step costs, to turn the work budget into steps.
-    let degree = (2 * e).div_ceil(n).max(1);
-    let steps = (ANNEAL_WORK / (degree * (n + e)).max(1)).clamp(ANNEAL_MIN_STEPS, ANNEAL_MAX_STEPS);
+    // Roughly what one step costs (two local costs over a card's links), to
+    // turn the run's share of the budget into a number of steps; the
+    // temperature schedule needs to know it. The loop also stops at the
+    // budget, should the estimate be low.
+    let degree = (2 * e).div_ceil(n).max(1) as u64;
+    let per_step = 2 * (degree * (n + e) as u64 + e as u64) + 4;
+    let share = s.limit.saturating_sub(s.work.get());
+    let steps = (share / per_step).max(1);
     // Each step multiplies the temperature by `cool`, so it falls
     // geometrically from the start value to the end value.
     let cool = (ANNEAL_T_END / ANNEAL_T_START).powf(1.0 / steps as f64);
@@ -1114,6 +1367,9 @@ fn anneal(s: &mut Search, xs: &HashMap<usize, Vec<f64>>, run: u64) {
     let (mut best_cost, mut best_row, mut best_x) = (cost, s.row.clone(), s.x.clone());
 
     for _ in 0..steps {
+        if s.exhausted() {
+            break;
+        }
         temperature *= cool;
         let l = rng.below(n);
         let (home_row, home_x) = (s.row[l], s.x[l]);
