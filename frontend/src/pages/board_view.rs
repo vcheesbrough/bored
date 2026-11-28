@@ -1,6 +1,7 @@
 use leptos::leptos_dom::helpers::window_event_listener;
 use leptos::prelude::*;
-use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
+use leptos_router::components::Outlet;
+use leptos_router::hooks::{use_location, use_navigate, use_params_map, use_query_map};
 use wasm_bindgen::prelude::*;
 
 use crate::collapsed::CollapsedColumns;
@@ -9,10 +10,13 @@ use crate::components::card::ExpandedCardId;
 use crate::components::card_modal::CardModal;
 use crate::components::column::ColumnView;
 use crate::components::connection_status::ConnectionStatus;
+use crate::components::graph_toggle::GraphToggle;
 use crate::components::history_panel::{HistoryDrawer, HistoryIcon, HistoryPanel, HistoryScope};
 use crate::components::search_suggestions::SearchSuggestions;
 use crate::components::user_badge::UserBadge;
 use crate::events::{BoardSseEvent, DragOverColId, DragPayload};
+use crate::graph::view::GraphView;
+use crate::graph::{BoardMode, BoardModeContext};
 use crate::links::BoardLinkIndex;
 use crate::recent::RecentPicks;
 use crate::search::{
@@ -139,6 +143,19 @@ pub fn BoardView() -> AnyView {
     let params = use_params_map();
     let query = use_query_map();
     let navigate = use_navigate();
+    let location = use_location();
+
+    // Text or graph (card #303), from the path: `/boards/:slug` or
+    // `/boards/:slug/graph`. Both are child routes of the one parent route
+    // this view renders for, so flipping between them keeps this component —
+    // and all the board state below — mounted. A `Memo`, so a `?card=` change
+    // (same path) wakes nothing that depends on the mode.
+    let mode = Memo::new(move |_| BoardMode::from_path(&location.pathname.get()));
+    let in_graph = move || mode.try_get() == Some(BoardMode::Graph);
+    provide_context(BoardModeContext(mode));
+    // The column header row, which graph mode measures to place each column's
+    // nodes under its header.
+    let header_row = NodeRef::<leptos::html::Div>::new();
 
     // Board slug (name) from the route path parameter `:slug`.
     let board_slug = move || params.with(|p| p.get("slug").unwrap_or_default());
@@ -528,9 +545,12 @@ pub fn BoardView() -> AnyView {
         }
     });
 
-    // Navigate back to the plain board URL (by slug) when the modal closes.
+    // Navigate back to the board URL (by slug) when the modal closes — in the
+    // mode the board is in, so closing a card opened from the graph returns
+    // to the graph (card #303).
     let on_modal_close = Callback::new(move |_: ()| {
-        navigate(&format!("/boards/{}", board_slug()), Default::default());
+        let mode = mode.try_get_untracked().unwrap_or(BoardMode::Text);
+        navigate(&mode.board_path(&board_slug()), Default::default());
     });
 
     let on_modal_updated = Callback::new(move |_: shared::Card| {});
@@ -992,6 +1012,7 @@ pub fn BoardView() -> AnyView {
             <a href="/" class="navbar-brand">"bored"</a>
             <span class="navbar-sep">"/"</span>
             <BoardChooser board_name=board_name columns=columns column_owner=view_owner.clone() />
+            <GraphToggle board_slug=board_name />
             <div class="navbar-search">
                 <input
                     node_ref=search_input_ref
@@ -1098,12 +1119,16 @@ pub fn BoardView() -> AnyView {
             <UserBadge />
         </nav>
 
-        <div class="page board-view">
+        // `graph-mode` restyles the board (see `style.css`): the columns keep
+        // only their headers — their card lists stay mounted but hidden, so
+        // flipping modes never unmounts a card mid-edit — and `GraphView`
+        // below draws the cards instead.
+        <div class="page board-view" class:graph-mode=in_graph>
             <Show when=move || loading.get() fallback=|| ()>
                 <p class="loading-text">"Loading…"</p>
             </Show>
 
-            <div class="columns-row">
+            <div class="columns-row" node_ref=header_row>
                 <For
                     each=move || columns.get()
                     key=|sig| sig.get_untracked().id.clone()
@@ -1149,7 +1174,16 @@ pub fn BoardView() -> AnyView {
                     }
                 />
             </div>
+
+            <Show when=in_graph fallback=|| ()>
+                <GraphView header_row=header_row board_slug=board_name />
+            </Show>
         </div>
+
+        // The child routes (text and graph) render nothing of their own; the
+        // outlet is here because a parent route's view is expected to have
+        // one.
+        <Outlet />
 
         <CardModal
             card=maximised_card
