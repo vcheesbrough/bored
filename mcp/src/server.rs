@@ -42,6 +42,21 @@ use tokio::sync::Mutex;
 // The doc-comments on fields become the field descriptions in that schema.
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetImageParams {
+    /// The image to fetch: its id, its `/api/images/{id}` URL (as it appears
+    /// in a card body), a full URL, or the whole `![image](/api/images/{id})`
+    /// markdown line.
+    pub image: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UploadImageParams {
+    /// The image file's bytes, base64-encoded (standard alphabet). PNG, JPEG,
+    /// GIF, WebP or SVG, at most 10 MiB once decoded.
+    pub data_base64: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateBoardParams {
     /// The display name for the new board.
     pub name: String,
@@ -418,6 +433,81 @@ async fn require_ok(resp: reqwest::Response) -> Result<reqwest::Response, McpErr
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
     Err(mcp_err(format!("API returned {status}: {body}")))
+}
+
+// ── Images (card #644) ──────────────────────────────────────────────────────
+
+/// The largest image `get_image` hands to an agent: 3.75 MB of bytes, which
+/// is 5 MB once base64-encoded (base64 grows data by a third). MCP clients
+/// commonly cap one image near 5 MB; a larger one is refused with its size
+/// rather than sent to be rejected or truncated.
+const MAX_AGENT_IMAGE_BYTES: usize = 3_750_000;
+
+/// The raster types an agent receives as MCP image content. SVG is text and
+/// comes back as its source instead.
+const RASTER_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// The image id in `input`: a bare id, `/api/images/{id}`, a full URL, or a
+/// `![alt](/api/images/{id})` line. `None` unless what is found is a UUID in
+/// the lowercase hyphenated form the server issues, so nothing else is ever
+/// put into a request path.
+fn image_id_from(input: &str) -> Option<String> {
+    let input = input.trim();
+    // The id is whatever follows the last `/api/images/` (or the whole input
+    // when there is none), up to the first character that cannot be in one:
+    // a closing `)`, a `?query`, a `#fragment` or whitespace.
+    let after = match input.rfind("/api/images/") {
+        Some(at) => &input[at + "/api/images/".len()..],
+        None => input,
+    };
+    let id: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    is_uuid(&id).then_some(id)
+}
+
+/// Whether `id` is shaped like a hyphenated UUID: 8-4-4-4-12 hex digits.
+fn is_uuid(id: &str) -> bool {
+    let groups: Vec<&str> = id.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(group, len)| group.len() == len && group.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The tool result for a fetched image: image content for a raster type, the
+/// source text for an SVG.
+fn image_result(content_type: &str, bytes: &[u8]) -> Result<CallToolResult, McpError> {
+    if bytes.len() > MAX_AGENT_IMAGE_BYTES {
+        return Err(mcp_err(format!(
+            "image is {} bytes, over the {MAX_AGENT_IMAGE_BYTES} an agent can be sent; \
+             open it in the bored web UI instead",
+            bytes.len()
+        )));
+    }
+    let summary = Content::text(format!("{content_type}, {} bytes", bytes.len()));
+    if content_type == "image/svg+xml" {
+        // An SVG is XML: its source is what an agent can read.
+        let source = String::from_utf8_lossy(bytes).into_owned();
+        return Ok(CallToolResult::success(vec![
+            summary,
+            Content::text(source),
+        ]));
+    }
+    if !RASTER_TYPES.contains(&content_type) {
+        return Err(mcp_err(format!(
+            "unexpected image content type {content_type:?}"
+        )));
+    }
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(CallToolResult::success(vec![
+        summary,
+        Content::image(data, content_type),
+    ]))
 }
 
 // Deserialise the response body to a pretty-printed JSON string for Claude.
@@ -864,6 +954,77 @@ impl BoredMcp {
         )]))
     }
 
+    // ── Images (card #644) ──────────────────────────────────────────────────────
+
+    #[tool(
+        description = "View an image from a card body. Card bodies reference images as `![image](/api/images/{id})`; pass that URL, the bare id, or the whole markdown line. PNG, JPEG, GIF and WebP come back as image content; an SVG comes back as its XML source. Images over 3.75 MB are refused with their size."
+    )]
+    async fn get_image(
+        &self,
+        Parameters(GetImageParams { image }): Parameters<GetImageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let Some(id) = image_id_from(&image) else {
+            return Err(mcp_err(
+                "image must be an image id (a UUID) or an /api/images/{id} URL",
+            ));
+        };
+        let resp = self
+            .send(self.client.get(self.api(&format!("images/{id}"))))
+            .await?;
+        let resp = require_ok(resp).await?;
+        // The backend only ever serves one of the five image types; read it
+        // before the body consumes the response.
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = resp.bytes().await.map_err(mcp_err)?;
+        image_result(&content_type, &bytes)
+    }
+
+    #[tool(
+        description = "Upload an image (base64-encoded PNG, JPEG, GIF, WebP or SVG, at most 10 MiB) and get back the markdown line that shows it in a card: put the returned `markdown` into the card's body with update_card or create_card. Returns JSON {id, url, markdown}. Images are permanent; the server detects the type from the bytes."
+    )]
+    async fn upload_image(
+        &self,
+        Parameters(UploadImageParams { data_base64 }): Parameters<UploadImageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use base64::Engine as _;
+        // Line breaks are common in pasted base64; anything else invalid is
+        // refused here, before a request is made.
+        let cleaned: String = data_base64.split_whitespace().collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(cleaned)
+            .map_err(|_| mcp_err("data_base64 is not valid base64"))?;
+        if bytes.len() > shared::MAX_IMAGE_BYTES {
+            return Err(mcp_err(format!(
+                "image is {} bytes; the limit is {} (10 MiB)",
+                bytes.len(),
+                shared::MAX_IMAGE_BYTES
+            )));
+        }
+        let resp = self
+            .send(
+                self.client
+                    .post(self.api("images"))
+                    // The server ignores this and detects the type itself.
+                    .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                    .body(bytes),
+            )
+            .await?;
+        let uploaded: shared::UploadedImage =
+            require_ok(resp).await?.json().await.map_err(mcp_err)?;
+        let reply = serde_json::json!({
+            "id": uploaded.id,
+            "markdown": format!("![image]({})", uploaded.url),
+            "url": uploaded.url,
+        });
+        let text = serde_json::to_string_pretty(&reply).map_err(mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     // ── Card links ────────────────────────────────────────────────────────────
 
     #[tool(
@@ -965,5 +1126,325 @@ impl ServerHandler for BoredMcp {
                 },
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The image tools (card #644) against an in-process stand-in for the
+    //! bored REST API. Each test decides what the stand-in serves, so the
+    //! expected values come from the test, never from the tools.
+
+    use super::*;
+    use axum::{
+        Router,
+        body::Bytes,
+        extract::{Path, State},
+        http::{StatusCode, header},
+        response::IntoResponse,
+        routing::get,
+    };
+    use rmcp::model::RawContent;
+    use std::sync::Arc;
+
+    const PNG_ID: &str = "0b6f9a4e-3f51-4a8e-9b7e-2f1d6c5a4b3c";
+    const SVG_ID: &str = "11111111-2222-4333-8444-555555555555";
+    const BIG_ID: &str = "99999999-8888-4777-8666-555555555555";
+    const NEW_ID: &str = "abcdef01-2345-4678-89ab-cdef01234567";
+    const CARD_ID: &str = "01kpkmm9ytysndxgzv586svckv";
+    /// Any bytes will do for a PNG here: the stand-in serves them as such.
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nnot-really-the-rest";
+    const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+
+    /// What the stand-in saw: each request's method and path, and the last
+    /// upload's body.
+    #[derive(Default)]
+    struct Seen {
+        requests: Vec<String>,
+        uploaded: Option<Vec<u8>>,
+    }
+
+    type Shared = Arc<std::sync::Mutex<Seen>>;
+
+    async fn image(State(seen): State<Shared>, Path(id): Path<String>) -> impl IntoResponse {
+        seen.lock()
+            .unwrap()
+            .requests
+            .push(format!("GET /api/images/{id}"));
+        match id.as_str() {
+            PNG_ID => ([(header::CONTENT_TYPE, "image/png")], PNG.to_vec()).into_response(),
+            SVG_ID => ([(header::CONTENT_TYPE, "image/svg+xml")], SVG).into_response(),
+            BIG_ID => (
+                [(header::CONTENT_TYPE, "image/png")],
+                vec![0u8; MAX_AGENT_IMAGE_BYTES + 1],
+            )
+                .into_response(),
+            _ => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn upload(State(seen): State<Shared>, body: Bytes) -> impl IntoResponse {
+        let mut seen = seen.lock().unwrap();
+        seen.requests.push("POST /api/images".to_string());
+        seen.uploaded = Some(body.to_vec());
+        if body.starts_with(b"text") {
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+        }
+        (
+            StatusCode::CREATED,
+            axum::Json(serde_json::json!({
+                "id": NEW_ID,
+                "url": format!("/api/images/{NEW_ID}"),
+            })),
+        )
+            .into_response()
+    }
+
+    async fn card(State(seen): State<Shared>, Path(id): Path<String>) -> impl IntoResponse {
+        seen.lock()
+            .unwrap()
+            .requests
+            .push(format!("GET /api/cards/{id}"));
+        axum::Json(serde_json::json!({
+            "id": id,
+            "body": format!("# Shot\n\n![image](/api/images/{PNG_ID})"),
+        }))
+    }
+
+    /// A `BoredMcp` pointed at a fresh stand-in, and what that stand-in sees.
+    async fn stand_in() -> (BoredMcp, Shared) {
+        let seen = Shared::default();
+        let app = Router::new()
+            .route("/api/images", axum::routing::post(upload))
+            .route("/api/images/:id", get(image))
+            .route("/api/cards/:id", get(card))
+            // The routes' default 2 MB body limit would refuse the 10 MiB
+            // boundary upload before the handler saw it.
+            .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (BoredMcp::new(format!("http://{addr}")), seen)
+    }
+
+    fn requests(seen: &Shared) -> Vec<String> {
+        seen.lock().unwrap().requests.clone()
+    }
+
+    /// The text of a text content block, panicking on any other kind.
+    fn text_of(content: &Content) -> &str {
+        match &content.raw {
+            RawContent::Text(text) => &text.text,
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_png_comes_back_as_image_content_with_its_exact_bytes() {
+        let (mcp, seen) = stand_in().await;
+        let result = mcp
+            .get_image(Parameters(GetImageParams {
+                image: format!("/api/images/{PNG_ID}"),
+            }))
+            .await
+            .expect("fetched");
+        assert_eq!(result.content.len(), 2);
+        assert_eq!(
+            text_of(&result.content[0]),
+            format!("image/png, {} bytes", PNG.len())
+        );
+        let RawContent::Image(image) = &result.content[1].raw else {
+            panic!("expected image content");
+        };
+        assert_eq!(image.mime_type, "image/png");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .expect("base64");
+        assert_eq!(decoded, PNG);
+        assert_eq!(requests(&seen), [format!("GET /api/images/{PNG_ID}")]);
+    }
+
+    #[tokio::test]
+    async fn every_way_of_naming_an_image_resolves_to_the_same_request() {
+        let (mcp, seen) = stand_in().await;
+        let forms = [
+            PNG_ID.to_string(),
+            PNG_ID.to_ascii_uppercase(),
+            format!("/api/images/{PNG_ID}"),
+            format!("https://bored.example/api/images/{PNG_ID}"),
+            format!("https://bored.example/api/images/{PNG_ID}?x=1"),
+            format!("![image](/api/images/{PNG_ID})"),
+            format!("  {PNG_ID}\n"),
+        ];
+        for form in &forms {
+            mcp.get_image(Parameters(GetImageParams {
+                image: form.clone(),
+            }))
+            .await
+            .unwrap_or_else(|_| panic!("{form:?} resolves"));
+        }
+        let expected = format!("GET /api/images/{PNG_ID}");
+        assert_eq!(requests(&seen), vec![expected; forms.len()]);
+    }
+
+    #[tokio::test]
+    async fn something_that_is_not_an_image_id_makes_no_request() {
+        let (mcp, seen) = stand_in().await;
+        for bad in [
+            "",
+            "not-an-id",
+            CARD_ID,
+            "../cards/01kpkmm9ytysndxgzv586svckv",
+            "0b6f9a4e-3f51-4a8e-9b7e-2f1d6c5a4b3",
+            "0b6f9a4e3f514a8e9b7e2f1d6c5a4b3c",
+        ] {
+            assert!(
+                mcp.get_image(Parameters(GetImageParams {
+                    image: bad.to_string(),
+                }))
+                .await
+                .is_err(),
+                "{bad:?} is refused"
+            );
+        }
+        assert!(requests(&seen).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_svg_comes_back_as_its_source_text() {
+        let (mcp, _) = stand_in().await;
+        let result = mcp
+            .get_image(Parameters(GetImageParams {
+                image: SVG_ID.to_string(),
+            }))
+            .await
+            .expect("fetched");
+        assert_eq!(
+            text_of(&result.content[0]),
+            format!("image/svg+xml, {} bytes", SVG.len())
+        );
+        assert_eq!(text_of(&result.content[1]), SVG);
+        assert!(
+            result
+                .content
+                .iter()
+                .all(|content| !matches!(content.raw, RawContent::Image(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_image_over_the_agent_cap_is_refused_with_its_size() {
+        let (mcp, _) = stand_in().await;
+        let error = mcp
+            .get_image(Parameters(GetImageParams {
+                image: BIG_ID.to_string(),
+            }))
+            .await
+            .expect_err("too large");
+        // 3 750 001 bytes: the stand-in's one byte over the cap.
+        assert!(error.message.contains("3750001 bytes"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn a_missing_image_is_an_error_naming_the_status() {
+        let (mcp, _) = stand_in().await;
+        let error = mcp
+            .get_image(Parameters(GetImageParams {
+                image: "22222222-3333-4444-8555-666666666666".to_string(),
+            }))
+            .await
+            .expect_err("404");
+        assert!(error.message.contains("404"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn an_upload_sends_the_decoded_bytes_and_returns_the_markdown() {
+        let (mcp, seen) = stand_in().await;
+        // With a line break in it, as pasted base64 often has.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(PNG);
+        let (head, tail) = encoded.split_at(8);
+        let result = mcp
+            .upload_image(Parameters(UploadImageParams {
+                data_base64: format!("{head}\n{tail}"),
+            }))
+            .await
+            .expect("uploaded");
+        assert_eq!(seen.lock().unwrap().uploaded.as_deref(), Some(PNG));
+        let reply: serde_json::Value =
+            serde_json::from_str(text_of(&result.content[0])).expect("json");
+        assert_eq!(reply["id"], NEW_ID);
+        assert_eq!(reply["url"], format!("/api/images/{NEW_ID}"));
+        assert_eq!(reply["markdown"], format!("![image](/api/images/{NEW_ID})"));
+    }
+
+    #[tokio::test]
+    async fn invalid_or_oversized_uploads_make_no_request() {
+        let (mcp, seen) = stand_in().await;
+        assert!(
+            mcp.upload_image(Parameters(UploadImageParams {
+                data_base64: "not base64 at all!".to_string(),
+            }))
+            .await
+            .is_err()
+        );
+        let over = vec![0u8; shared::MAX_IMAGE_BYTES + 1];
+        let error = mcp
+            .upload_image(Parameters(UploadImageParams {
+                data_base64: base64::engine::general_purpose::STANDARD.encode(over),
+            }))
+            .await
+            .expect_err("too large");
+        assert!(
+            error.message.contains("10485761 bytes"),
+            "{}",
+            error.message
+        );
+        assert!(requests(&seen).is_empty());
+
+        // Control: exactly 10 MiB is sent.
+        let at_limit = vec![0u8; shared::MAX_IMAGE_BYTES];
+        mcp.upload_image(Parameters(UploadImageParams {
+            data_base64: base64::engine::general_purpose::STANDARD.encode(at_limit),
+        }))
+        .await
+        .expect("sent");
+        assert_eq!(requests(&seen), ["POST /api/images"]);
+    }
+
+    #[tokio::test]
+    async fn the_servers_refusal_of_an_upload_is_an_error() {
+        let (mcp, _) = stand_in().await;
+        let error = mcp
+            .upload_image(Parameters(UploadImageParams {
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(b"text, not an image"),
+            }))
+            .await
+            .expect_err("415");
+        assert!(error.message.contains("415"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn get_card_still_returns_the_body_as_markdown() {
+        let (mcp, _) = stand_in().await;
+        let result = mcp
+            .get_card(Parameters(CardIdParams {
+                card_id: CARD_ID.to_string(),
+            }))
+            .await
+            .expect("card");
+        let card: serde_json::Value =
+            serde_json::from_str(text_of(&result.content[0])).expect("json");
+        assert_eq!(
+            card["body"],
+            format!("# Shot\n\n![image](/api/images/{PNG_ID})")
+        );
+        // One text block, no image content: bytes never ride along.
+        assert_eq!(result.content.len(), 1);
     }
 }

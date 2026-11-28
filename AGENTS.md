@@ -134,10 +134,10 @@ If you genuinely cannot get one, run the same checks the image runs — these
 need only your own git access to the private dependency, not the build secret:
 
 ```bash
-cargo fmt -p backend -p shared --check                # Dockerfile backend-builder
-cargo clippy -p backend -p shared -- -D warnings      # Dockerfile backend-builder
+cargo fmt -p backend -p shared -p mcp --check         # Dockerfile backend-builder
+cargo clippy -p backend -p shared -p mcp -- -D warnings  # Dockerfile backend-builder
 ./scripts/with-test-postgres.sh \
-  cargo test -p backend -p shared                     # Dockerfile backend-builder (needs Postgres)
+  cargo test -p backend -p shared -p mcp              # Dockerfile backend-builder (needs Postgres)
 cargo test -p frontend                                # HOST target, not wasm32 — see below
 sh scripts/test-docker-git-credential.sh              # Dockerfile frontend-builder
 sh scripts/test-deploy-app.sh </dev/null              # Dockerfile frontend-builder
@@ -151,7 +151,9 @@ sh scripts/test-deploy-app.sh </dev/null              # Dockerfile frontend-buil
 `cargo test -p frontend` is deliberately untargeted: `frontend` is a
 `[[bin]]`-only crate of plain logic tests, and a `wasm32-unknown-unknown` test
 binary has no runner in the image. That is the full set — the Dockerfile runs
-no wasm32 clippy and no `fmt`/`clippy` over `frontend` or `mcp`.
+no wasm32 clippy and no `fmt`/`clippy` over `frontend`. `mcp` is checked and
+tested beside the backend since card #644; its tests need no Postgres (they
+stand up their own in-process stand-in for the REST API).
 
 These do **not** run without a token: the `docker build` itself, `trunk build`,
 and therefore the **whole** e2e compose run, which needs the
