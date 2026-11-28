@@ -43,6 +43,8 @@ pub fn CardModal(
     let save_status = RwSignal::new(SaveStatus::Idle);
     // One modal open = one audit merge group for autosaved body edits.
     let modal_audit_session: RwSignal<Option<String>> = RwSignal::new(None);
+    // Why the last image paste failed (card #67), shown under the editor.
+    let upload_error: RwSignal<Option<&'static str>> = RwSignal::new(None);
 
     // Reset all local state when a new card is opened.
     Effect::new(move |_| {
@@ -52,6 +54,8 @@ pub fn CardModal(
             editing.set(false);
             save_status.set(SaveStatus::Idle);
             modal_audit_session.set(Some(crate::audit_edit_session::new()));
+            // An upload error belongs to the card it happened on.
+            upload_error.set(None);
         } else {
             modal_audit_session.set(None);
         }
@@ -232,7 +236,6 @@ pub fn CardModal(
 
     // Pasting an image (card #67): upload it and write its markdown into the
     // body. Plain text pastes are left to the browser — see `image_paste`.
-    let upload_error: RwSignal<Option<&'static str>> = RwSignal::new(None);
     // The id of the card the modal shows now, if it is still open.
     let open_card_id = move || card.try_get_untracked().flatten().map(|c| c.id);
     let on_body_paste = move |ev: leptos::ev::Event| {
@@ -240,6 +243,7 @@ pub fn CardModal(
             return;
         };
         let read_id = card_id.clone();
+        let report_id = card_id.clone();
         let save_id = card_id.clone();
         crate::image_paste::handle_paste(
             &ev,
@@ -253,16 +257,24 @@ pub fn CardModal(
                         .then(|| body.try_get_untracked())
                         .flatten()
                 },
-                write: move |new_body: String| {
+                write: move |new_body: String, save: bool| {
                     if open_card_id().as_ref() != Some(&save_id)
                         || body.try_set(new_body.clone()).is_some()
                     {
                         return false;
                     }
-                    do_save(save_id.clone(), new_body);
+                    if save {
+                        do_save(save_id.clone(), new_body);
+                    }
                     true
                 },
-                report: crate::image_paste::reporter(upload_error),
+                // The modal outlives the card it shows: a late failure for a
+                // card that is no longer open must not appear on the next one.
+                report: move |message: Option<&'static str>| {
+                    if open_card_id().as_ref() == Some(&report_id) {
+                        let _ = upload_error.try_set(message);
+                    }
+                },
             },
         );
     };

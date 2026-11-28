@@ -10,9 +10,17 @@
 //! # The placeholder
 //!
 //! An upload takes time, and the user keeps typing. So the paste first
-//! inserts a placeholder at the caret, `![Uploading image…](#upload-<token>)`,
+//! inserts a placeholder at the caret, `[Uploading image…](#upload-<token>)`,
 //! and the upload's answer later swaps *that exact text* for the real
-//! markdown, wherever it has moved to by then. On failure the placeholder is
+//! markdown, wherever it has moved to by then.
+//!
+//! The placeholder is a *link*, not an image: if it is ever left behind (the
+//! tab closed mid-upload after the body was saved), it renders as harmless
+//! text, where an `![…](#…)` image would make every viewer's browser request
+//! the page itself as an image. It is also not saved when it is inserted,
+//! only shown; it reaches the server only if the editor saves for its own
+//! reasons (more typing, closing), which is exactly when the server-side
+//! fallback below needs it there. On failure the placeholder is
 //! removed. Each paste gets its own token, so two uploads in flight each find
 //! their own placeholder.
 //!
@@ -32,7 +40,7 @@ use wasm_bindgen::JsCast as _;
 
 /// The text inserted while an upload with this `token` is in flight.
 pub fn placeholder(token: &str) -> String {
-    format!("![Uploading image…](#upload-{token})")
+    format!("[Uploading image…](#upload-{token})")
 }
 
 /// The markdown an uploaded image is written as.
@@ -120,8 +128,9 @@ pub struct Editor<R, W, E> {
     /// The body as the editor currently holds it, or `None` when the editor
     /// is gone or now shows a different card.
     pub read: R,
-    /// Put a new body into the editor *and save it*. Returns `false` when the
-    /// editor is gone, so the swap must go to the server instead.
+    /// Put a new body into the editor, and save it when the flag is `true`.
+    /// Returns `false` when the editor is gone, so the swap must go to the
+    /// server instead.
     pub write: W,
     /// Show (`Some`) or clear (`None`) the upload error next to the editor.
     pub report: E,
@@ -135,7 +144,7 @@ pub fn handle_paste<R, W, E>(
     editor: Editor<R, W, E>,
 ) where
     R: Fn() -> Option<String> + Clone + 'static,
-    W: Fn(String) -> bool + Clone + 'static,
+    W: Fn(String, bool) -> bool + Clone + 'static,
     E: Fn(Option<&'static str>) + Clone + 'static,
 {
     let Some(file) = clipboard_image(event) else {
@@ -175,7 +184,8 @@ pub fn handle_paste<R, W, E>(
     // unchanged value does not move the caret.
     textarea.set_value(&with_placeholder);
     let _ = textarea.set_selection_range(caret, caret);
-    (editor.write)(with_placeholder);
+    // Shown, not saved: see the module docs.
+    (editor.write)(with_placeholder, false);
 
     // `spawn_local` runs the upload on the browser's event loop; the paste
     // handler returns now.
@@ -193,7 +203,7 @@ async fn finish_upload<R, W, E>(
     outcome: Result<shared::UploadedImage, crate::api::ApiError>,
 ) where
     R: Fn() -> Option<String>,
-    W: Fn(String) -> bool,
+    W: Fn(String, bool) -> bool,
     E: Fn(Option<&'static str>),
 {
     // What to do to the body, as text in → `Some(text out)`, or `None` when
@@ -211,9 +221,9 @@ async fn finish_upload<R, W, E>(
 
     if let Some(current) = (editor.read)() {
         match replace_placeholder(&current, token, &replacement) {
-            // The placeholder is in the editor: swap it there, which saves.
+            // The placeholder is in the editor: swap it there, and save.
             Some(updated) => {
-                if (editor.write)(updated) {
+                if (editor.write)(updated, true) {
                     return;
                 }
             }
@@ -357,6 +367,15 @@ mod tests {
     #[test]
     fn a_deleted_placeholder_is_not_put_back() {
         assert_eq!(replace_placeholder("no marker here", "abc", "[x]"), None);
+    }
+
+    #[test]
+    fn a_left_over_placeholder_renders_as_a_link_not_an_image() {
+        // An `<img src="#upload-…">` would fetch the page itself as an image
+        // for every viewer; a link fetches nothing.
+        let html = crate::components::markdown::to_html(&placeholder("abc"));
+        assert!(!html.contains("<img"), "{html}");
+        assert!(html.contains("href=\"#upload-abc\""), "{html}");
     }
 
     #[test]

@@ -335,12 +335,14 @@ pub fn CardItem(
                 // `try_*`: the upload can finish after this card has been
                 // unmounted; `None`/`false` then sends the swap to the server.
                 read: move || body.try_get_untracked(),
-                write: move |new_body: String| {
+                write: move |new_body: String, save: bool| {
                     // `try_set` hands the value back when the signal is gone.
                     if body.try_set(new_body.clone()).is_some() {
                         return false;
                     }
-                    do_save(save_id.clone(), new_body);
+                    if save {
+                        do_save(save_id.clone(), new_body);
+                    }
                     true
                 },
                 report: crate::image_paste::reporter(upload_error),

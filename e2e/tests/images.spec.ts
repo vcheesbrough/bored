@@ -301,6 +301,76 @@ test.describe('Pasted images (card #67)', () => {
       .toBe('Large still editable');
   });
 
+  test('an upload that finishes after the modal closed still lands in the card', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `images-late-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    const card = await apiCreateCard(request, col.id, 'Late');
+    await gotoBoardView(page, board.name);
+
+    // Hold the upload long enough to close the editor first.
+    let release: () => void = () => {};
+    const held = new Promise<void>(resolve => (release = resolve));
+    await page.route('**/api/images', async route => {
+      await held;
+      await route.continue();
+    });
+
+    const textarea = await openModalEditor(page);
+    await textarea.press('End');
+    await pasteFile(textarea, { base64: PNG_1X1_BASE64, name: 'x.png', type: 'image/png' });
+    // Close mid-upload: the modal flushes the body, placeholder and all.
+    await page.locator('[title="Restore to board"]').click();
+    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
+    await expect
+      .poll(async () => (await apiGetCard(request, card.id)).body)
+      .toContain('Uploading image');
+
+    // Now let the upload finish: the swap is made on the stored card.
+    release();
+    const body = await waitForImageInBody(request, card.id);
+    expect(body).not.toContain('Uploading image');
+    expect(body).toContain('Late');
+    // The card is still expanded after the modal; a fresh load shows the
+    // collapsed preview, from the stored body.
+    await page.reload();
+    await page.waitForSelector('.columns-row');
+    expect(await loadedWidth(page.locator('.card-preview img').first())).toBe(1);
+  });
+
+  test('a failure the server reports removes the placeholder and stays with its card', async ({
+    page,
+    request,
+  }) => {
+    const board = await apiCreateBoard(request, `images-refused-${Date.now()}`);
+    const col = await apiCreateColumn(request, board.name, 'Column');
+    await apiCreateCard(request, col.id, 'Second');
+    const first = await apiCreateCard(request, col.id, 'First');
+    await gotoBoardView(page, board.name);
+
+    // The server refuses the type (as it would a file that is no image).
+    await page.route('**/api/images', route => route.fulfill({ status: 415 }));
+    const textarea = await openModalEditor(page);
+    await textarea.press('End');
+    await pasteFile(textarea, { base64: PNG_1X1_BASE64, name: 'x.png', type: 'image/png' });
+
+    await expect(page.locator('.image-upload-error')).toContainText('supported image');
+    await expect(textarea).toHaveValue('First');
+    // Nothing of the paste reached the stored card.
+    expect((await apiGetCard(request, first.id)).body).toBe('First');
+
+    // The error belongs to that card: opening another one does not show it.
+    await page.locator('[title="Restore to board"]').click();
+    await expect(page.locator('.modal-backdrop')).not.toBeVisible();
+    await page.locator('.card-item').nth(1).click();
+    await page.locator('[title="Maximise"]').first().click();
+    await expect(page.locator('.modal-backdrop')).toBeVisible();
+    await expect(page.locator('.modal-body-rendered')).toContainText('Second');
+    await expect(page.locator('.image-upload-error')).toHaveCount(0);
+  });
+
   test('a text paste is left to the browser', async ({ page, request }) => {
     const board = await apiCreateBoard(request, `images-text-${Date.now()}`);
     const col = await apiCreateColumn(request, board.name, 'Column');
