@@ -116,24 +116,25 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY shared/ shared/
+# The MCP server is checked and tested here too (card #644): before, this
+# stage only stubbed it, so nothing in `mcp/` was compiled in CI at all.
+COPY mcp/ mcp/
 COPY scripts/docker-git-credential.sh scripts/docker-git-credential.sh
 COPY frontend/Cargo.toml frontend/Cargo.toml
-COPY mcp/Cargo.toml mcp/Cargo.toml
-RUN mkdir -p frontend/src && touch frontend/src/lib.rs \
- && mkdir -p mcp/src && touch mcp/src/main.rs
+RUN mkdir -p frontend/src && touch frontend/src/lib.rs
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo fmt -p backend -p shared --check
+    cargo fmt -p backend -p shared -p mcp --check
 RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=bored-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=bored-cargo-target,target=/app/target,sharing=locked \
     --mount=type=secret,id=github_token \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    cargo clippy -p backend -p shared -- -D warnings
+    cargo clippy -p backend -p shared -p mcp -- -D warnings
 # No `--lib`: `backend` is a `[[bin]]`-only crate with no `[lib]` target, so
 # `--lib` silently runs zero of its tests instead of erroring (confirmed by
 # running the previous `--lib` invocation locally — it executed only
@@ -160,7 +161,7 @@ RUN --mount=type=cache,id=bored-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=secret,id=database_url,required=true \
     set -eu; \
     . /app/scripts/docker-git-credential.sh; \
-    DATABASE_URL="$(cat /run/secrets/database_url)" cargo test -p backend -p shared
+    DATABASE_URL="$(cat /run/secrets/database_url)" cargo test -p backend -p shared -p mcp
 # Release tag burned into the backend binary (see shared::app_version). Empty for
 # local builds — the code then falls back to CARGO_PKG_VERSION. Kept below the
 # fmt/clippy/test layers so a tag change only recompiles the crates that read it.

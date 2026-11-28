@@ -37,3 +37,11 @@ anyhow = "1"
 # We don't verify signatures here — the bored backend is the verifier;
 # we just base64-decode the payload to read the expiry.
 base64.workspace = true
+# `MAX_IMAGE_BYTES` and the upload's answer, `UploadedImage` (card #644), so
+# the MCP refuses exactly what the server would.
+shared.workspace = true
+
+[dev-dependencies]
+# An in-process stand-in for the bored REST API in the tool tests (card
+# #644). The same major as the backend's, so nothing new is compiled.
+axum = "0.7"
