@@ -353,3 +353,54 @@ async fn with_oidc(
 // own (`db::connect_test`) — no mocking, no fixtures, every test starts clean.
 #[cfg(test)]
 mod tests;
+
+/// The command line (card #640): nothing serves, exactly `migrate` migrates,
+/// and anything else is refused rather than silently served — a typo in a
+/// compose `command:` must not start a second server.
+#[cfg(test)]
+mod command_tests {
+    use super::{Command, StartupError};
+
+    fn parse(args: &[&str]) -> Result<Command, StartupError> {
+        Command::parse(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn no_argument_serves() {
+        assert_eq!(parse(&[]).ok(), Some(Command::Serve));
+    }
+
+    #[test]
+    fn migrate_migrates() {
+        assert_eq!(parse(&["migrate"]).ok(), Some(Command::Migrate));
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        for args in [
+            &["migrat"][..],
+            &["Migrate"],
+            &["migrate", "extra"],
+            &["serve"],
+            &[""],
+            // The retired one-off import (card #489) is unknown, not served.
+            &["migrate-from-surreal"],
+        ] {
+            assert!(
+                matches!(parse(args), Err(StartupError::Usage)),
+                "{args:?} must be refused"
+            );
+        }
+    }
+
+    /// The refusal names both valid forms and does not echo the argument.
+    #[test]
+    fn the_usage_error_names_the_commands_only() {
+        let message = format!(
+            "{:?}",
+            parse(&["secret-looking-input"]).expect_err("refused")
+        );
+        assert!(message.contains("bored-backend migrate"), "{message}");
+        assert!(!message.contains("secret-looking-input"), "{message}");
+    }
+}

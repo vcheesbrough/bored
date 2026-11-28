@@ -141,16 +141,27 @@ fi
 # the old backend still up (the `migrations` skill §2 "Failure").
 #
 # `up` without `--wait` (which would return as soon as the container is
-# running), then `compose wait`, which blocks until it exits and exits with
-# its code. Postgres comes up first: `migrate` depends on it being healthy.
+# running), then `docker wait` on its container, which blocks until it exits
+# and prints its exit code — at once if it has exited already. Not `compose
+# wait`: compose v2.33 (the deploy image's) only looks at *running*
+# containers, so a `migrate` with nothing to apply that exits before the wait
+# starts reads as "no containers" and fails a good deploy. Postgres comes up
+# first: `migrate` depends on it being healthy.
 "$here/compose-up-with-otel.sh" "$@" up -d --pull always bored-db migrate
 echo "==> waiting for migrate"
-if ! plain_docker compose "$@" wait migrate; then
-  echo "ERROR: migrate failed; the running backend was left in place." >&2
+migrate_id=$(plain_docker compose "$@" ps -aq migrate)
+if [ -z "$migrate_id" ]; then
+  echo "ERROR: no migrate container after up; the running backend was left in place." >&2
+  exit 1
+fi
+migrate_exit=$(plain_docker wait "$migrate_id")
+if [ "$migrate_exit" != 0 ]; then
+  echo "ERROR: migrate failed (exit ${migrate_exit:-unknown}); the running backend was left in place." >&2
   echo "  Its log (also in Loki, service_name=bored):" >&2
   plain_docker compose "$@" logs --no-color --no-log-prefix migrate >&2 || true
   exit 1
 fi
+echo "==> migrate exited 0"
 
 # --- the backend ------------------------------------------------------------
 

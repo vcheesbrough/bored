@@ -401,7 +401,7 @@ card #640. How it runs: README § Migrations.
 | **Command** | `bored-backend migrate` (`backend/src/migrate.rs`), service `migrate` in `deploy/docker-compose.yml` and `e2e/docker-compose.test.yml` |
 | **Steps** | one: `schema`, the embedded `backend/migrations/` (root span `migrate schema`). A backfill or external setup a release needs is added as a later step, never to the server |
 | **Server** | verifies at startup (`migrate::verify`, from `db::connect`) and refuses a pending, changed or failed migration; it never applies one |
-| **Deploy order** | `scripts/deploy-app.sh`: Postgres + `migrate`, `compose wait migrate`, then `up --no-deps bored`. Do not fold `migrate` back into one `up`: compose would stop the running backend before a failing `migrate` |
+| **Deploy order** | `scripts/deploy-app.sh`: Postgres + `migrate`, `docker wait` on its container (not `compose wait`, which misses one that already exited), then `up --no-deps bored`. Do not fold `migrate` back into one `up`: compose would stop the running backend before a failing `migrate` |
 | **Credentials** | the same as the server's: the sovereign-config access URL as the secret file `SOVEREIGN_CONFIG_ACCESS_URL_FILE`, reading `/bored/<env>/server/database/*`. Never a credential in `environment:` (e2e's fixed test password is the one exception) |
 | **Login** | one login, `bored` (the schema owner), for both — the split is card #642 |
 
