@@ -32,8 +32,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 url = "2"
 # Postgres (card #471). The same driver and feature set as v-note's
-# `crates/server`, less `uuid` (bored's ids are ULID text) and
-# `tls-rustls-ring` (the database sits on the deployment's private network,
+# `crates/server`, less `tls-rustls-ring` (the database sits on the deployment's private network,
 # never across a public one). `migrate` embeds `backend/migrations/` in the
 # binary via `sqlx::migrate!`, which runs them at startup.
 sqlx = { version = "0.9", default-features = false, features = [
@@ -44,6 +43,9 @@ sqlx = { version = "0.9", default-features = false, features = [
     "migrate",
     "postgres",
     "runtime-tokio",
+    # `images.id` is a Postgres `uuid` (card #67); bored's other ids stay
+    # ULID text.
+    "uuid",
 ] }
 # `timestamptz` columns decode to `chrono::DateTime<Utc>` (sqlx's `chrono`
 # feature). Already in the tree through sqlx; named here so the row types can
@@ -112,8 +114,13 @@ opentelemetry-semantic-conventions = { version = "0.33", features = [
 opentelemetry-appender-tracing = "0.33"
 tracing-opentelemetry = "0.34"
 # `service.instance.id` is a version-5 UUID of the container hostname, so it is
-# stable across restarts and does not publish the hostname itself.
-uuid = { version = "1", features = ["v5"] }
+# stable across restarts and does not publish the hostname itself. `v4` mints
+# image ids (card #67): 122 random bits, so an image URL cannot be guessed.
+uuid = { version = "1", features = ["v4", "v5"] }
+# HTTP-date formatting and parsing for the image route's `Last-Modified` and
+# `If-Modified-Since` (card #67). Already in the tree through hyper; it reads
+# all three date formats RFC 9110 requires a recipient to accept.
+httpdate = "1"
 async-trait = "0.1"
 bytes = "1"
 http = "1"

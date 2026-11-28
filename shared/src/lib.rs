@@ -331,6 +331,26 @@ pub struct UserInfo {
     pub picture: Option<String>,
 }
 
+/// The largest image `POST /api/images` accepts: 10 MiB (card #67).
+///
+/// Shared so the server's body limit and the SPA's check before uploading
+/// are the same number.
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Body of `201 Created` from `POST /api/images` (card #67): where the image
+/// that was just stored can be fetched from.
+///
+/// `url` is what the SPA writes into the card body as `![image](url)`. It is
+/// a *relative* URL (`/api/images/{id}`), so the markdown keeps working on any
+/// host the SPA is served from (dev, prod, e2e).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadedImage {
+    /// The image's id: a lowercase, hyphenated UUIDv4 chosen by the server.
+    pub id: String,
+    /// `/api/images/{id}`.
+    pub url: String,
+}
+
 /// Body of `PUT /api/boards/:id/columns/reorder`.
 /// The server assigns `position = index` for each column ID in the list,
 /// allowing the client to express a complete ordering in one round-trip.

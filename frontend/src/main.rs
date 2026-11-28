@@ -5,6 +5,7 @@ mod columns;
 mod components;
 mod connection;
 mod events;
+mod image_paste;
 mod links;
 mod pages;
 mod panic_banner;

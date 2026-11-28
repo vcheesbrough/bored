@@ -2,6 +2,7 @@
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, post, put}, // HTTP method helpers for the router
 };
@@ -140,6 +141,34 @@ pub async fn app(state: AppState, static_dir: &str, deployment: DeploymentInfo) 
             auth_middleware,
         ))
         .with_state(state.clone());
+
+    // Pasted images (card #67). A router of their own so two layers can wrap
+    // them and nothing else:
+    //
+    // - The upload's body limit is 10 MiB, not axum's 2 MB default.
+    //   `DefaultBodyLimit` on the `post(..)` method router applies to that one
+    //   handler's body extractor.
+    // - `no_store_errors` sits *outside* the auth layer (layers added later
+    //   wrap the earlier ones), so it also marks the middleware's 401 as
+    //   uncacheable, not just the handlers' own errors.
+    //
+    // The router is merged into `protected_api` below, so its paths are
+    // nested under `/api` like every other protected route.
+    let image_api = Router::new()
+        .route(
+            "/images",
+            post(routes::images::upload_image)
+                .layer(DefaultBodyLimit::max(routes::images::MAX_IMAGE_BYTES)),
+        )
+        // `get` also answers `HEAD`, with the same headers and no body.
+        .route("/images/:id", get(routes::images::get_image))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(middleware::map_response(routes::images::no_store_errors))
+        .with_state(state.clone());
+    let protected_api = protected_api.merge(image_api);
 
     // Public auth flow routes — no middleware, no auth required to use them.
     let auth_routes = Router::new()

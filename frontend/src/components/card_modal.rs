@@ -230,6 +230,43 @@ pub fn CardModal(
     let pending_caret: RwSignal<Option<(u32, Option<f64>)>> = RwSignal::new(None);
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
 
+    // Pasting an image (card #67): upload it and write its markdown into the
+    // body. Plain text pastes are left to the browser — see `image_paste`.
+    let upload_error: RwSignal<Option<&'static str>> = RwSignal::new(None);
+    // The id of the card the modal shows now, if it is still open.
+    let open_card_id = move || card.try_get_untracked().flatten().map(|c| c.id);
+    let on_body_paste = move |ev: leptos::ev::Event| {
+        let (Some(textarea), Some(card_id)) = (textarea_ref.get_untracked(), open_card_id()) else {
+            return;
+        };
+        let read_id = card_id.clone();
+        let save_id = card_id.clone();
+        crate::image_paste::handle_paste(
+            &ev,
+            &textarea,
+            crate::image_paste::Editor {
+                card_id,
+                // Only while the modal still shows the card the paste was
+                // into; otherwise the swap goes to the server's copy.
+                read: move || {
+                    (open_card_id().as_ref() == Some(&read_id))
+                        .then(|| body.try_get_untracked())
+                        .flatten()
+                },
+                write: move |new_body: String| {
+                    if open_card_id().as_ref() != Some(&save_id)
+                        || body.try_set(new_body.clone()).is_some()
+                    {
+                        return false;
+                    }
+                    do_save(save_id.clone(), new_body);
+                    true
+                },
+                report: crate::image_paste::reporter(upload_error),
+            },
+        );
+    };
+
     let on_rendered_click = move |ev: leptos::ev::MouseEvent| {
         pending_caret.set(crate::caret::event_container(&ev).map(|container| {
             let offset = crate::caret::source_offset_at(
@@ -351,9 +388,14 @@ pub fn CardModal(
                                 class="modal-body-textarea"
                                 prop:value=move || body.get()
                                 on:input=on_body_input
+                                on:paste=on_body_paste
                                 on:blur=move |_| editing.set(false)
                             />
                         </Show>
+                        // Why the last image paste failed, until the next paste.
+                        {move || upload_error.try_get().flatten().map(|message| view! {
+                            <p class="image-upload-error" role="alert">{message}</p>
+                        })}
                     </div>
                 </div>
 

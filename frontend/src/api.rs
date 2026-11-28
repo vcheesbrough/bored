@@ -456,6 +456,37 @@ pub async fn update_card(
     .await
 }
 
+/// `GET /api/cards/{id}`: one card, as stored now. Used by `image_paste` to
+/// finish an upload whose editor has closed.
+pub async fn fetch_card(card_id: &str) -> Result<shared::Card, ApiError> {
+    send(
+        "GET /api/cards/{id}",
+        None,
+        Request::get(&format!("/api/cards/{card_id}")).build(),
+        |r, _| async move { r.json::<shared::Card>().await },
+    )
+    .await
+}
+
+/// `POST /api/images`: upload a pasted image (card #67).
+///
+/// The `File` itself is the request body, so the browser streams it from
+/// memory without the WASM side copying the bytes. The `Content-Type` is the
+/// browser's guess; the server ignores it and detects the type from the bytes.
+pub async fn upload_image(file: &web_sys::File) -> Result<shared::UploadedImage, ApiError> {
+    offline_guard()?;
+    send(
+        "POST /api/images",
+        None,
+        Request::post("/api/images")
+            .header("content-type", &file.type_())
+            // `File` converts into the `JsValue` gloo-net sends as the body.
+            .body(file.clone()),
+        |r, _| async move { r.json::<shared::UploadedImage>().await },
+    )
+    .await
+}
+
 pub async fn delete_card(card_id: &str) -> Result<(), ApiError> {
     offline_guard()?;
     send(

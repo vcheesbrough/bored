@@ -1105,6 +1105,23 @@ mark.search-hit {
 .card-markdown ul, .card-markdown ol,
 .modal-markdown ul, .modal-markdown ol { margin: 0 0 8px; padding-left: 20px; }
 .card-markdown li, .modal-markdown li { margin-bottom: 2px; }
+/* Pasted images (card #67). `.card-markdown` also covers the history
+   drawer's version preview. Never wider than the body; height follows. */
+.card-markdown img,
+.modal-markdown img,
+.card-preview img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+/* A collapsed card stays a summary: a screenshot must not stretch it. */
+.card-preview img { max-height: 6rem; object-fit: contain; }
+/* Why the last image paste failed (`image_paste::failure_message`). */
+.image-upload-error {
+  margin: 6px 12px 0;
+  font-size: 12px;
+  color: var(--danger);
+}
 .card-preview a,
 .card-markdown a,
 .modal-markdown a  { color: var(--yellow); text-decoration: underline; text-underline-offset: 2px; border-radius: 2px; padding: 0 2px; }
