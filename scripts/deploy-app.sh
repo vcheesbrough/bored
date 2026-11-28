@@ -1,7 +1,7 @@
 #!/bin/sh
 # The app half of a deploy: a check that the database volume exists (card
-# #537), the compose up of the backend and its database,
-# then the read-only SQL console (card #473) when it is enabled. (Until card
+# #537), the one-shot `migrate` step (card #640), the compose up of the
+# backend, then the read-only SQL console (card #473) when it is enabled. (Until card
 # #489 it first ran the one-off SurrealDB import check, card #471.) Run under `sovereign-config render
 # … --` so every part sees the rendered telemetry and compose layers.
 #
@@ -130,17 +130,50 @@ else
   exit 1
 fi
 
+# --- the migrate step (card #640) -------------------------------------------
+#
+# The schema is brought up to date by `migrate` (the same image, run as
+# `bored-backend migrate`) before the backend is touched; the backend only
+# checks it. Its own step, not just the backend's `depends_on`, because of
+# how compose orders a recreate: given `up bored`, compose stops the running
+# backend *before* it starts the new `migrate` it depends on, so a failed
+# migration would leave nothing serving. Here a failure stops the deploy with
+# the old backend still up (the `migrations` skill §2 "Failure").
+#
+# `up` without `--wait` (which would return as soon as the container is
+# running), then `docker wait` on its container, which blocks until it exits
+# and prints its exit code — at once if it has exited already. Not `compose
+# wait`: compose v2.33 (the deploy image's) only looks at *running*
+# containers, so a `migrate` with nothing to apply that exits before the wait
+# starts reads as "no containers" and fails a good deploy. Postgres comes up
+# first: `migrate` depends on it being healthy.
+"$here/compose-up-with-otel.sh" "$@" up -d --pull always bored-db migrate
+echo "==> waiting for migrate"
+migrate_id=$(plain_docker compose "$@" ps -aq migrate)
+if [ -z "$migrate_id" ]; then
+  echo "ERROR: no migrate container after up; the running backend was left in place." >&2
+  exit 1
+fi
+migrate_exit=$(plain_docker wait "$migrate_id")
+if [ "$migrate_exit" != 0 ]; then
+  echo "ERROR: migrate failed (exit ${migrate_exit:-unknown}); the running backend was left in place." >&2
+  echo "  Its log (also in Loki, service_name=bored):" >&2
+  plain_docker compose "$@" logs --no-color --no-log-prefix migrate >&2 || true
+  exit 1
+fi
+echo "==> migrate exited 0"
+
 # --- the backend ------------------------------------------------------------
 
-# One `up` starts both: the backend's `depends_on: condition: service_healthy`
-# holds it until Postgres accepts connections, and the backend applies any
-# pending schema migration at startup, before its health check passes.
+# `--no-deps`: Postgres is up and `migrate` has just exited 0, so there is
+# nothing left to start, and compose must not start `migrate` a second time
+# with the old backend already stopped. The backend's startup check refuses a
+# schema `migrate` has not brought up to date, before its health check passes.
 #
-# Named services only: with the console's profile active, a bare `up --wait`
+# Named service only: with the console's profile active, a bare `up --wait`
 # would start pgweb too and wait on it, before its role can log in (the role
-# gets its password below, once the backend has run the migration that
-# creates it).
-"$here/compose-up-with-otel.sh" "$@" up -d --pull always --wait --wait-timeout 120 bored-db bored
+# gets its password below).
+"$here/compose-up-with-otel.sh" "$@" up -d --no-deps --wait --wait-timeout 120 bored
 
 # compose-up-with-otel.sh hides the rendered OTEL_* variables from the docker
 # CLI it runs; the plain `docker compose` calls below must not see them either
@@ -152,7 +185,7 @@ done
 # --- the SQL console --------------------------------------------------------
 
 if [ "$console" = on ]; then
-  # The migration that creates bored_pgweb ran at backend startup, so the role
+  # The migration that creates bored_pgweb ran in `migrate` above, so the role
   # exists by now; only its password and LOGIN are set here, idempotently, on
   # every deploy — rotating the credential is a change to the stored leaf.
   #

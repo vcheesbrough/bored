@@ -2469,3 +2469,72 @@ fn process_memory_is_read_from_proc() {
     );
     assert!(bytes < 64 * 1024 * 1024 * 1024, "implausible RSS: {bytes}");
 }
+
+/// `migrate`'s step is a root span of its own (card #640, the `migrations`
+/// skill §2): named for the step, with no parent, the number of migrations
+/// it applied as an integer, and — when the step fails — `error.type` and an
+/// error status. Read from what the exporter received.
+#[tokio::test]
+async fn the_migrate_step_is_a_root_span_with_its_outcome() {
+    use crate::tests::db_support::empty_test_database;
+
+    let (pipeline, subscriber) = Pipeline::new(CapturedWriter::default(), "info");
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let attribute = |span: &opentelemetry_sdk::trace::SpanData, key: &str| {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.clone())
+    };
+
+    // Success: a fresh database, every migration applied.
+    let (pool, config) = empty_test_database().await.expect("test database");
+    crate::migrate::run(&config).await.expect("migrate");
+    let expected = crate::migrate::migrator().iter().count() as i64;
+    let spans = pipeline.finished_spans();
+    let step = spans
+        .iter()
+        .find(|span| span.name == "migrate schema")
+        .expect("the schema step's span");
+    assert_eq!(
+        step.parent_span_id,
+        opentelemetry::trace::SpanId::INVALID,
+        "a root span"
+    );
+    assert_eq!(
+        attribute(step, "bored.migrate.step"),
+        Some(Value::from("schema"))
+    );
+    assert_eq!(
+        attribute(step, "bored.migrate.applied"),
+        Some(Value::I64(expected))
+    );
+    assert_eq!(attribute(step, semconv::attribute::ERROR_TYPE), None);
+    assert!(
+        !matches!(step.status, opentelemetry::trace::Status::Error { .. }),
+        "a step that succeeded is not an error"
+    );
+
+    // Failure: a recorded checksum that no longer matches its file.
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = '\\x00'")
+        .execute(&pool)
+        .await
+        .expect("corrupt the checksums");
+    crate::migrate::run(&config)
+        .await
+        .expect_err("migrate refuses changed migrations");
+    let spans = pipeline.finished_spans();
+    let failed = spans
+        .iter()
+        .filter(|span| span.name == "migrate schema")
+        .find(|span| attribute(span, semconv::attribute::ERROR_TYPE).is_some())
+        .expect("the failed step's span");
+    assert_eq!(
+        attribute(failed, semconv::attribute::ERROR_TYPE),
+        Some(Value::from("migration_changed"))
+    );
+    assert!(matches!(
+        failed.status,
+        opentelemetry::trace::Status::Error { .. }
+    ));
+}

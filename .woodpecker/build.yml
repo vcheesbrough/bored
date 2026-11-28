@@ -208,6 +208,11 @@ steps:
     # layers stay in the build cache. A pipeline cancelled before its `down`
     # leaks its project for good, so each run first removes bored-e2e-*
     # projects whose containers are hours old — never a live run's.
+    # `--no-attach migrate` (card #640): this compose (v2.33) ends an
+    # `--abort-on-container-exit` run when any attached container exits, and
+    # the one-shot `migrate` exits 0 by design. A failed `migrate` still fails
+    # the run (the backend's `service_completed_successfully` dependency), and
+    # its log, not streamed, is printed then.
     commands:
       - '[ ! -e .lane/e2e.skip ] || { cat .lane/e2e.skip; exit 0; }'
       - |
@@ -216,7 +221,8 @@ steps:
         RELEASE_TAG=$$(cat .release-tag)
         PROJECT=bored-e2e-$$CI_PIPELINE_NUMBER
         REPORT=/srv/dev/playwright-reports/pipeline-$$CI_PIPELINE_NUMBER--$(echo $$CI_COMMIT_BRANCH | tr '/' '-')--$(echo $$CI_COMMIT_SHA | cut -c1-7)
-        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -p $$PROJECT -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright && RC=0 || RC=$$?
+        REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -p $$PROJECT -f e2e/docker-compose.test.yml up --build --force-recreate --abort-on-container-exit --exit-code-from playwright --no-attach migrate && RC=0 || RC=$$?
+        [ "$$RC" = 0 ] || REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -p $$PROJECT -f e2e/docker-compose.test.yml logs --no-color migrate || true
         REPORT_DIR=$$REPORT TEST_IMAGE=registry.desync.link/bored:$$RELEASE_TAG docker compose -p $$PROJECT -f e2e/docker-compose.test.yml down --volumes --rmi local
         echo "Test report: $$REPORT/index.html"
         exit $$RC
@@ -461,8 +467,9 @@ steps:
       # /bored/devops/dev/compose carries POSTGRES_PASSWORD for the database
       # container — an alias of the backend's own /bored/dev/server/database/
       # password, so the two cannot disagree (card #471). deploy-app.sh
-      # brings Postgres and the backend up together; the backend applies any
-      # pending schema migration at startup, before it reports healthy.
+      # brings Postgres up, runs the one-shot `migrate` step and waits for it
+      # to exit 0, then replaces the backend, which only checks the schema
+      # (card #640).
       - |
         export BORED_IMAGE_TAG=$(cat .release-tag) \
           APP_ENV=dev APP_BRANCH=$$CI_COMMIT_BRANCH \

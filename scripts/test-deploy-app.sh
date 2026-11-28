@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tests for scripts/deploy-app.sh (cards #471, #473, #489, #537).
+# Tests for scripts/deploy-app.sh (cards #471, #473, #489, #537, #640).
 #
 # deploy-app.sh is copied into a scratch tree beside a stand-in for the
 # script it runs, and a fake `docker` goes first on PATH. Every stand-in
@@ -16,12 +16,19 @@ trap "rm -rf '$WORK_DIR'" EXIT
 mkdir -p "$WORK_DIR/scripts" "$WORK_DIR/bin"
 cp "$SCRIPT_DIR/deploy-app.sh" "$WORK_DIR/scripts/"
 
+# A test fails one particular `up` by writing a word its arguments end with
+# (`migrate`, `bored`) to $WORK_DIR/up-fails.
 for name in compose-up-with-otel; do
   cat > "$WORK_DIR/scripts/$name.sh" <<FAKE
 #!/bin/sh
 cat > /dev/null
 echo "$name \$*" >> "$WORK_DIR/calls"
-exit "\$(cat "$WORK_DIR/$name.status" 2>/dev/null || echo 0)"
+if [ -e "$WORK_DIR/up-fails" ]; then
+  case "\$*" in
+    *" \$(cat "$WORK_DIR/up-fails")") exit 1 ;;
+  esac
+fi
+exit 0
 FAKE
   chmod +x "$WORK_DIR/scripts/$name.sh"
 done
@@ -46,6 +53,17 @@ case "\$*" in
       exit 1
     fi
     ;;
+  # The migrate container's id, then its exit code as docker wait prints it
+  # (card #640). docker wait prints the code and itself exits 0 either way.
+  *" ps -aq migrate")
+    [ -e "$WORK_DIR/migrate-missing" ] || echo 0123abcd
+    ;;
+  "wait 0123abcd")
+    if [ -e "$WORK_DIR/migrate-fails" ]; then echo 1; else echo 0; fi
+    ;;
+  *" logs --no-color --no-log-prefix migrate")
+    echo "ERROR migrate step failed: the schema migration failed"
+    ;;
 esac
 exit 0
 FAKE
@@ -61,7 +79,7 @@ reset() {
   : > "$WORK_DIR/docker-otel"
   : > "$WORK_DIR/docker-b64"
   : > "$WORK_DIR/docker-pw"
-  rm -f "$WORK_DIR"/*.status "$WORK_DIR/volume-absent" "$WORK_DIR/daemon-down"
+  rm -f "$WORK_DIR/up-fails" "$WORK_DIR/migrate-fails" "$WORK_DIR/migrate-missing" "$WORK_DIR/volume-absent" "$WORK_DIR/daemon-down"
 }
 
 # Run deploy-app.sh with extra environment given as arguments to `env`.
@@ -77,11 +95,14 @@ run() {
 reset
 run COMPOSE_PROFILES=
 expected="docker volume inspect --format {{.Name}} bored-dev-pg
-compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always --wait --wait-timeout 120 bored-db bored
+compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --pull always bored-db migrate
+docker compose -p bored-dev -f deploy/docker-compose.yml ps -aq migrate
+docker wait 0123abcd
+compose-up-with-otel -p bored-dev -f deploy/docker-compose.yml up -d --no-deps --wait --wait-timeout 120 bored
 docker compose -p bored-dev -f deploy/docker-compose.yml --profile sqltool rm -sf sqltool
 docker compose -p bored-dev -f deploy/docker-compose.yml exec -T bored-db psql -v ON_ERROR_STOP=1 -q -U bored -d bored -c ALTER ROLE bored_pgweb NOLOGIN"
 if [ "$status" = 0 ] && [ "$(cat "$WORK_DIR/calls")" = "$expected" ]; then
-  pass "without the profile: volume checked, backend up (named services), console removed, login disabled"
+  pass "without the profile: volume checked, migrate run and waited for, backend up alone, console removed, login disabled"
 else
   fail "console off: status $status, calls: $(cat "$WORK_DIR/calls")"
 fi
@@ -91,8 +112,8 @@ reset
 run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
 exec_line=$(grep -n 'exec -T -e PGWEB_NEW_PASSWORD bored-db psql' "$WORK_DIR/calls" | cut -d: -f1)
 up_line=$(grep -n 'up -d --force-recreate --no-deps --wait --wait-timeout 60 sqltool' "$WORK_DIR/calls" | cut -d: -f1)
-backend_line=$(grep -n '^compose-up-with-otel' "$WORK_DIR/calls" | cut -d: -f1)
-if [ "$status" = 0 ] && [ -n "$exec_line" ] && [ -n "$up_line" ] \
+backend_line=$(grep -n '^compose-up-with-otel .* bored$' "$WORK_DIR/calls" | cut -d: -f1)
+if [ "$status" = 0 ] && [ -n "$exec_line" ] && [ -n "$up_line" ] && [ -n "$backend_line" ] \
     && [ "$backend_line" -lt "$exec_line" ] && [ "$exec_line" -lt "$up_line" ]; then
   pass "with the profile: backend, then the role's password, then the console"
 else
@@ -163,13 +184,63 @@ fi
 
 # --- a failed backend up stops before the console is touched ----------------
 reset
-echo 1 > "$WORK_DIR/compose-up-with-otel.status"
+echo bored > "$WORK_DIR/up-fails"
 run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
-if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 2 ] \
-    && [ "$(tail -n 1 "$WORK_DIR/calls" | cut -d' ' -f1)" = compose-up-with-otel ]; then
+if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 5 ] \
+    && tail -n 1 "$WORK_DIR/calls" | grep -q '^compose-up-with-otel .* bored$'; then
   pass "a failed backend up fails the deploy before the role or console is touched"
 else
   fail "failed backend up: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# --- the migrate step (card #640) ---------------------------------------------
+
+# It exits non-zero: the deploy fails with its log, and the backend is never
+# touched — the running one keeps serving.
+reset
+touch "$WORK_DIR/migrate-fails"
+run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw
+if [ "$status" = 1 ] && ! grep -q ' bored$' "$WORK_DIR/calls" \
+    && ! grep -q 'sqltool' "$WORK_DIR/calls" \
+    && grep -q 'migrate failed (exit 1); the running backend was left in place' "$WORK_DIR/out" \
+    && grep -q 'migrate step failed' "$WORK_DIR/out"; then
+  pass "a failed migrate stops the deploy, shows its log, and leaves the backend alone"
+else
+  fail "migrate fails: status $status, calls: $(cat "$WORK_DIR/calls"), out: $(cat "$WORK_DIR/out")"
+fi
+
+# No migrate container to wait on: fail, never take silence for success.
+reset
+touch "$WORK_DIR/migrate-missing"
+run COMPOSE_PROFILES=
+if [ "$status" = 1 ] && ! grep -q ' bored$' "$WORK_DIR/calls" \
+    && ! grep -q '^docker wait' "$WORK_DIR/calls" \
+    && grep -q 'no migrate container after up' "$WORK_DIR/out"; then
+  pass "a missing migrate container stops the deploy before the backend is touched"
+else
+  fail "migrate missing: status $status, calls: $(cat "$WORK_DIR/calls"), out: $(cat "$WORK_DIR/out")"
+fi
+
+# Its `up` fails (the image unpullable, Postgres never healthy): the same.
+reset
+echo migrate > "$WORK_DIR/up-fails"
+run COMPOSE_PROFILES=
+if [ "$status" = 1 ] && [ "$(grep -c '' "$WORK_DIR/calls")" = 2 ] \
+    && tail -n 1 "$WORK_DIR/calls" | grep -q '^compose-up-with-otel .* bored-db migrate$'; then
+  pass "a failed migrate up stops the deploy before the backend is touched"
+else
+  fail "migrate up fails: status $status, calls: $(cat "$WORK_DIR/calls")"
+fi
+
+# The OTEL_* variables reach the migrate container (through
+# compose-up-with-otel.sh) but never the docker CLI that waits on it.
+reset
+run COMPOSE_PROFILES=
+if [ "$status" = 0 ] && [ ! -s "$WORK_DIR/docker-otel" ] \
+    && grep -q '^compose-up-with-otel .* bored-db migrate$' "$WORK_DIR/calls"; then
+  pass "migrate is started through the telemetry wrapper, and waited on without OTEL_*"
+else
+  fail "migrate telemetry: status $status, otel: $(cat "$WORK_DIR/docker-otel")"
 fi
 
 # --- the database volume (card #537) ------------------------------------------
@@ -202,7 +273,7 @@ reset
 touch "$WORK_DIR/volume-absent"
 run COMPOSE_PROFILES=sqltool PGWEB_DB_PASSWORD=db-pw-123 PGWEB_AUTH_USER=console PGWEB_AUTH_PASS=auth-pw BORED_ALLOW_EMPTY_DB=1
 create_line=$(grep -nx 'docker volume create bored-dev-pg' "$WORK_DIR/calls" | cut -d: -f1)
-backend_line=$(grep -n '^compose-up-with-otel' "$WORK_DIR/calls" | cut -d: -f1)
+backend_line=$(grep -n '^compose-up-with-otel' "$WORK_DIR/calls" | head -n 1 | cut -d: -f1)
 if [ "$status" = 0 ] && [ -n "$create_line" ] && [ -n "$backend_line" ] \
     && [ "$create_line" -lt "$backend_line" ] && grep -q 'sqltool$' "$WORK_DIR/calls"; then
   pass "BORED_ALLOW_EMPTY_DB=1 creates the missing volume, then deploys"

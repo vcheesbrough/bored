@@ -1,5 +1,6 @@
-//! The Postgres connection pool, its migrations, and the span every database
-//! call runs inside (card #471, which replaced the embedded SurrealDB).
+//! The Postgres connection pool and the span every database call runs inside
+//! (card #471, which replaced the embedded SurrealDB). The migrations live in
+//! `crate::migrate` (card #640): the server only verifies them.
 //!
 //! The rest of the backend holds a [`Db`] — a `sqlx::PgPool`, which is an
 //! `Arc`-backed handle, so cloning it is cheap and every clone shares the same
@@ -31,11 +32,6 @@ const MAX_CONNECTIONS: u32 = 10;
 /// Postgres restart, short enough that a stuck pool shows up as errors
 /// rather than as requests that never finish.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The embedded migrations, from `backend/migrations/`, compiled into the
-/// binary. A `static` so the startup path and the test harness run the
-/// identical set.
-pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Database spans (card #415)
@@ -238,14 +234,26 @@ pub(crate) fn with_session_limits(options: PgConnectOptions) -> PgConnectOptions
     ])
 }
 
-/// Open the pool and bring the schema up to date. Called once at startup.
+/// A pool of at most `max_connections` onto the database `config` names,
+/// with the production connection options. Lazy: no connection is opened
+/// until the first query, so this cannot fail.
 ///
-/// `connect_lazy_with` opens no connection here; the migration run below is
-/// the first use, so an unreachable database fails startup on that line,
-/// loudly, before the listener binds.
-pub async fn connect(config: &DatabaseConfig) -> Result<Db, sqlx::Error> {
-    let pool = pool_options(MAX_CONNECTIONS).connect_lazy_with(connect_options(config));
-    MIGRATOR.run(&pool).await?;
+/// Shared by the server ([`connect`]) and the migrate step
+/// (`migrate::run`), so both connect exactly the same way.
+pub(crate) fn open(config: &DatabaseConfig, max_connections: u32) -> Db {
+    pool_options(max_connections).connect_lazy_with(connect_options(config))
+}
+
+/// The server's pool, opened once at startup, after checking the schema is
+/// this release's.
+///
+/// The server never migrates (card #640): [`crate::migrate::verify`] refuses
+/// a database the deploy's `migrate` step has not brought up to date. That
+/// check is also the pool's first use, so an unreachable database fails
+/// startup here, loudly, before the listener binds.
+pub async fn connect(config: &DatabaseConfig) -> Result<Db, crate::migrate::SchemaError> {
+    let pool = open(config, MAX_CONNECTIONS);
+    crate::migrate::verify(&pool).await?;
     // Report the pool's in-use / idle counts as `db.client.connection.count`.
     crate::observability::metrics::watch_pool(pool.clone());
     Ok(pool)
@@ -335,29 +343,6 @@ mod tests {
             "database calls without `.traced(..)`:\n{}",
             untraced.join("\n")
         );
-    }
-
-    /// Running the migrations again on a migrated database changes nothing
-    /// and does not fail: sqlx records what it applied, which is what makes
-    /// every restart safe.
-    #[tokio::test]
-    async fn migrations_are_idempotent() {
-        let db = connect_test().await.expect("test database");
-        let applied = || async {
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
-                .fetch_one(&db)
-                .await
-                .expect("count migrations")
-        };
-        let before = applied().await;
-        assert_eq!(
-            before as usize,
-            MIGRATOR.iter().count(),
-            "every embedded migration is applied once"
-        );
-        MIGRATOR.run(&db).await.expect("second run succeeds");
-        MIGRATOR.run(&db).await.expect("third run succeeds");
-        assert_eq!(applied().await, before);
     }
 
     /// sqlx's own query logging is off: a statement slower than its default

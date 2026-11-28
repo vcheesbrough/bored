@@ -36,6 +36,14 @@ services:
     depends_on:
       bored-db:
         condition: service_healthy
+      # The schema is `migrate`'s to apply (card #640); the backend only
+      # checks it at startup and refuses to serve if `migrate` has not run.
+      # Honoured by a plain `docker compose up`; scripts/deploy-app.sh runs
+      # `migrate` as a step of its own first, so a failed migration leaves the
+      # running backend in place (compose would otherwise stop it before
+      # starting the new `migrate`).
+      migrate:
+        condition: service_completed_successfully
     environment:
       # Container-internal key stays `BORED__OBSERVABILITY__ENVIRONMENT`; the
       # deploy-script-facing variable name stays `APP_ENV` (`.woodpecker/build.yml`
@@ -118,6 +126,65 @@ services:
       - traefik.http.routers.${BORED_CONTAINER_NAME}.tls.certresolver=myresolver
       - traefik.http.services.${BORED_CONTAINER_NAME}.loadbalancer.server.port=443
       - traefik.http.services.${BORED_CONTAINER_NAME}.loadbalancer.server.scheme=https
+
+  # The one-shot migrate step (card #640, the machine-global `migrations`
+  # skill): the same image as the backend, run as `bored-backend migrate`. It
+  # applies any pending schema migration and exits; the backend is replaced
+  # only once it has exited 0 (scripts/deploy-app.sh). An exited `migrate`
+  # is expected — `docker inspect -f '{{.State.ExitCode}}' <project>-migrate-1`
+  # is 0 after every good deploy, and its logs say how many it applied.
+  #
+  # `restart: "no"` and compose honouring `depends_on` only at `up` mean it
+  # runs once per deploy, never on a container restart or a host reboot.
+  #
+  # Credentials: the same as the backend's, and only as a secret *file* — the
+  # sovereign-config access URL, from which it reads
+  # /bored/<env>/server/database/*. Never `environment:`: an exited container
+  # keeps its environment in `docker inspect` until the next `up`. One login
+  # for both, for now (the `bored` owner); the split into an owner login here
+  # and a read/write one for the backend is a follow-up (README § Database).
+  migrate:
+    image: registry.desync.link/bored:${BORED_IMAGE_TAG:?BORED_IMAGE_TAG is required}
+    command: ["./bored-backend", "migrate"]
+    restart: "no"
+    # Stable, like the backend's, so its telemetry's `service.instance.id`
+    # (a v5 UUID of the host name) does not start new series every deploy.
+    hostname: ${BORED_CONTAINER_NAME:?BORED_CONTAINER_NAME is required}-migrate
+    # The image's HEALTHCHECK probes the server's HTTPS port, which this
+    # command never opens.
+    healthcheck:
+      disable: true
+    mem_limit: 256m
+    memswap_limit: 256m
+    depends_on:
+      bored-db:
+        condition: service_healthy
+    environment:
+      # The same environment as the backend's (see there): the backend and
+      # its migrate step must agree on which deployment they are, and
+      # telemetry refuses to start if this and the resource disagree.
+      - BORED__OBSERVABILITY__ENVIRONMENT=${APP_ENV:?APP_ENV is required}
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE=/run/secrets/SOVEREIGN_CONFIG_ACCESS_URL_FILE
+      - BORED__DATABASE__HOST=bored-db
+    # Telemetry exactly as the backend's (see there).
+    env_file:
+      - path: otel.env
+        required: false
+        format: raw
+    secrets:
+      - SOVEREIGN_CONFIG_ACCESS_URL_FILE
+    # Both of the backend's networks: Postgres is on the private one, and the
+    # telemetry endpoint and sovereign-config are reached the way the backend
+    # reaches them. No Traefik labels: it serves nothing.
+    networks:
+      - bored-internal
+      - proxy-backend
+    labels:
+      # Alloy labels its logs as the backend's (card #412): one service, one
+      # environment label, so a single query shows a deploy's migrate lines
+      # beside the server's.
+      - observability.service.name=bored
+      - observability.deployment.environment=${APP_ENV:?APP_ENV is required}
 
   # Postgres (card #471). Pinned by digest, as v-note's is: a third-party
   # image with the data in it, so a rebuild must not change what runs.

@@ -102,6 +102,43 @@ services:
         condition: service_started
       db:
         condition: service_healthy
+      # As in deploy/docker-compose.yml (card #640): the backend refuses a
+      # schema `migrate` has not applied, so this is what proves the step ran.
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - e2e-net
+
+  # The one-shot migrate step (card #640), from the image under test, as
+  # deploy/docker-compose.yml runs it. It exits once the schema is applied;
+  # CI's `up` runs with `--no-attach migrate`, because compose v2.33 (the CI
+  # docker CLI) treats any attached container's exit — even a 0 — as the end
+  # of an `--abort-on-container-exit` run.
+  #
+  # Its database password is a literal environment variable here, unlike a
+  # deployment's secret file: a fixed test password on a throwaway database,
+  # already in this file for the backend and `db`.
+  migrate:
+    image: ${TEST_IMAGE:?TEST_IMAGE must be set}
+    command: ["./bored-backend", "migrate"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      # The backend's own export (see there), so the telemetry spec can see
+      # the step's root span reach a collector.
+      OTEL_SERVICE_NAME: bored
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=test,telemetry_source=otlp
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://receiver:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      BORED__DATABASE__HOST: db
+      BORED__DATABASE__PASSWORD: bored-e2e
+      BORED__OBSERVABILITY__ENVIRONMENT: test
+    depends_on:
+      db:
+        condition: service_healthy
+      receiver:
+        condition: service_started
     networks:
       - e2e-net
 
@@ -246,9 +283,8 @@ services:
       - e2e-net
 
   # Sets the read-only console role's password, as scripts/deploy-app.sh does
-  # in a real environment (card #473). The role itself comes from the
-  # migration the *backend* runs at startup, so this waits for that migration
-  # rather than for the backend's health.
+  # in a real environment (card #473). The role itself comes from a migration
+  # `migrate` applies (card #640), so this waits for that step to finish.
   sqltool-provision:
     image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
     environment:
@@ -261,7 +297,6 @@ services:
       - sh
       - -ec
       - |
-        until psql -h db -U bored -d bored -tAc "SELECT COALESCE((SELECT success FROM _sqlx_migrations WHERE version = 20261020000000), false)" 2>/dev/null | grep -q t; do sleep 1; done
         psql -v ON_ERROR_STOP=1 -h db -U bored -d bored <<'SQL'
         \getenv pgweb_pw PGWEB_NEW_PASSWORD
         ALTER ROLE bored_pgweb WITH LOGIN PASSWORD :'pgweb_pw';
@@ -279,8 +314,8 @@ services:
       timeout: 2s
       retries: 60
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     networks:
       - e2e-net
 

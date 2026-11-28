@@ -14,8 +14,9 @@
 // Declare submodules — Rust looks for each in a file named `src/<name>.rs`.
 // These are private by default; the route handlers are reached via `routes::boards::...`.
 //
-// `main.rs` itself is startup only: load config, connect the database, build
-// the shared state and bind the listener. The router lives in `app.rs` and the
+// `main.rs` itself is startup only: pick the command (serve, or the deploy's
+// one-shot `migrate`), load config, connect the database, build the shared
+// state and bind the listener. The router lives in `app.rs` and the
 // static-file fallback in `spa.rs`.
 mod app;
 mod audit;
@@ -26,6 +27,7 @@ mod error;
 mod events;
 mod http_client;
 mod listen;
+mod migrate;
 mod models;
 mod observability;
 mod redact;
@@ -56,9 +58,12 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 enum StartupError {
     Config(config::ConfigError),
     Telemetry(observability::TelemetryError),
-    /// Postgres could not be reached, or its migrations failed. Carries the
+    /// Postgres could not be reached, or its schema is not this release's
+    /// (the server's check), or applying it failed (`migrate`). Carries the
     /// error's class only (card #366: a driver message can quote values).
-    Database(&'static str),
+    Schema(migrate::SchemaError),
+    /// The command line named something other than `migrate`.
+    Usage,
     /// `run` panicked; the panic hook has already printed where.
     Panicked,
 }
@@ -68,7 +73,13 @@ impl std::fmt::Debug for StartupError {
         match self {
             StartupError::Config(error) => write!(f, "{error}"),
             StartupError::Telemetry(error) => write!(f, "{error}"),
-            StartupError::Database(class) => write!(f, "database unavailable ({class})"),
+            StartupError::Schema(error) => write!(f, "{error}"),
+            // The argument itself is not echoed: nothing about it is needed
+            // to fix the call, and the rule is that input stays out of logs.
+            StartupError::Usage => write!(
+                f,
+                "unknown command: run `bored-backend` to serve, or `bored-backend migrate`"
+            ),
             StartupError::Panicked => write!(f, "panicked (see the message above on stderr)"),
         }
     }
@@ -88,25 +99,30 @@ impl From<observability::TelemetryError> for StartupError {
     }
 }
 
-impl From<sqlx::Error> for StartupError {
-    fn from(error: sqlx::Error) -> Self {
-        StartupError::Database(error::database_error_type(&error).as_str())
+impl From<migrate::SchemaError> for StartupError {
+    fn from(error: migrate::SchemaError) -> Self {
+        StartupError::Schema(error)
     }
 }
 
-impl From<sqlx::migrate::MigrateError> for StartupError {
-    fn from(error: sqlx::migrate::MigrateError) -> Self {
-        match error {
-            // The usual case: the database could not be reached at all.
-            sqlx::migrate::MigrateError::Execute(inner) => inner.into(),
-            // Anything else is a migration bookkeeping problem (a changed or
-            // missing migration file), named by its variant alone.
-            other => StartupError::Database(match other {
-                sqlx::migrate::MigrateError::VersionMismatch(_) => "migration_changed",
-                sqlx::migrate::MigrateError::VersionMissing(_) => "migration_missing",
-                sqlx::migrate::MigrateError::Dirty(_) => "migration_dirty",
-                _ => "migration_failed",
-            }),
+/// What the process was started to do: `bored-backend` serves,
+/// `bored-backend migrate` runs the deploy's one-shot migrate step and exits
+/// (card #640).
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Serve,
+    Migrate,
+}
+
+impl Command {
+    /// Parse the arguments after the program name. Anything but nothing or
+    /// exactly `migrate` is refused rather than ignored, so a typo in a
+    /// compose `command:` cannot quietly start a second server.
+    fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, StartupError> {
+        match (args.next().as_deref(), args.next()) {
+            (None, _) => Ok(Command::Serve),
+            (Some("migrate"), None) => Ok(Command::Migrate),
+            _ => Err(StartupError::Usage),
         }
     }
 }
@@ -139,10 +155,14 @@ fn main() -> Result<(), StartupError> {
             .install_default()
             .expect("failed to install rustls crypto provider");
         let telemetry = observability::init()?;
-        // The binary has one job — serve — so command-line arguments are not
-        // read at all. (Until card #489 a `migrate-from-surreal` argument ran
-        // the one-off SurrealDB import instead; nothing passes it any more.)
-        let outcome = guarded(run(&telemetry)).await;
+        // `migrate` is the deploy's one-shot step (card #640); no argument
+        // serves. (Until card #489 a `migrate-from-surreal` argument ran the
+        // one-off SurrealDB import; it is gone, and now refused as unknown.)
+        let outcome = match Command::parse(std::env::args().skip(1)) {
+            Ok(Command::Serve) => guarded(run(&telemetry)).await,
+            Ok(Command::Migrate) => guarded(run_migrate(&telemetry)).await,
+            Err(error) => guarded(std::future::ready(Err(error))).await,
+        };
         // Always flush, whether we are here after a clean shutdown, a failed
         // startup or a panic — the telemetry of a process going down is the
         // most useful there is.
@@ -180,9 +200,22 @@ async fn guarded<T>(
     outcome
 }
 
-/// Load config, connect the database, build the app, serve until SIGTERM or
-/// Ctrl-C, then drain.
-async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
+/// Build the layered config, and apply the two settings every command needs
+/// before it does anything else: the log level, and the check that the
+/// configured environment and the telemetry resource agree.
+///
+/// Returns the whole config for the caller to take its own groups from, and
+/// the `database` group, which both commands use.
+fn load_config(
+    telemetry: &observability::Telemetry,
+) -> Result<
+    (
+        ::config::Config,
+        config::ObservabilityConfig,
+        config::DatabaseConfig,
+    ),
+    StartupError,
+> {
     // Composition root: build the layered config once, before any other task
     // is scheduled, then hand each validated DTO to the feature that owns it.
     // Every downstream component receives its typed config, never raw env or
@@ -203,25 +236,47 @@ async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
         }
     })?;
     let observability = config::load_group::<config::ObservabilityConfig>(&cfg, "observability")?;
-    let oidc = config::load_optional_oidc(&cfg)?; // None => auth-disabled mode
-    let session = oidc
-        .is_some()
-        .then(|| config::load_group::<config::SessionConfig>(&cfg, "session"))
-        .transpose()?;
-    let server = config::load_group::<config::ServerConfig>(&cfg, "server")?;
     let database = config::load_group::<config::DatabaseConfig>(&cfg, "database")?;
-    // Optional: absent means the SPA is told telemetry is off (card #416).
-    let client_telemetry = config::load_client_telemetry(&cfg)?;
-    drop(cfg);
 
     // Now that config is known: narrow the log level (it filters log lines,
     // never spans), and refuse to start if the configured environment and the
     // telemetry resource name different deployments.
     telemetry.set_log_level(&observability.log_level);
     telemetry.check_environment(&observability.environment)?;
+    Ok((cfg, observability, database))
+}
 
-    // Connects and brings the schema up to date; an unreachable database or a
-    // failed migration stops startup here, before the listener binds.
+/// `bored-backend migrate`: load config, run every migrate step, exit. The
+/// deploy's `migrate` service (card #640); see `migrate.rs`.
+///
+/// It reads the same config the server does — the database login comes from
+/// sovereign-config through the access-URL secret *file* — so the two can
+/// never be pointed at different databases.
+async fn run_migrate(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
+    let (cfg, _observability, database) = load_config(telemetry)?;
+    drop(cfg);
+    migrate::run(&database).await?;
+    Ok(())
+}
+
+/// Load config, connect the database, build the app, serve until SIGTERM or
+/// Ctrl-C, then drain.
+async fn run(telemetry: &observability::Telemetry) -> Result<(), StartupError> {
+    let (cfg, observability, database) = load_config(telemetry)?;
+    let oidc = config::load_optional_oidc(&cfg)?; // None => auth-disabled mode
+    let session = oidc
+        .is_some()
+        .then(|| config::load_group::<config::SessionConfig>(&cfg, "session"))
+        .transpose()?;
+    let server = config::load_group::<config::ServerConfig>(&cfg, "server")?;
+    // Optional: absent means the SPA is told telemetry is off (card #416).
+    let client_telemetry = config::load_client_telemetry(&cfg)?;
+    drop(cfg);
+
+    // Connects and checks the schema is this release's — the deploy's
+    // `migrate` step applied it; the server never does (card #640). An
+    // unreachable database, or one `migrate` has not run on, stops startup
+    // here, before the listener binds.
     let db = db::connect(&database).await?;
 
     // `oidc` is `None` when `oidc.issuer-url` is unset — auth-disabled mode,
@@ -298,3 +353,54 @@ async fn with_oidc(
 // own (`db::connect_test`) — no mocking, no fixtures, every test starts clean.
 #[cfg(test)]
 mod tests;
+
+/// The command line (card #640): nothing serves, exactly `migrate` migrates,
+/// and anything else is refused rather than silently served — a typo in a
+/// compose `command:` must not start a second server.
+#[cfg(test)]
+mod command_tests {
+    use super::{Command, StartupError};
+
+    fn parse(args: &[&str]) -> Result<Command, StartupError> {
+        Command::parse(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn no_argument_serves() {
+        assert_eq!(parse(&[]).ok(), Some(Command::Serve));
+    }
+
+    #[test]
+    fn migrate_migrates() {
+        assert_eq!(parse(&["migrate"]).ok(), Some(Command::Migrate));
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        for args in [
+            &["migrat"][..],
+            &["Migrate"],
+            &["migrate", "extra"],
+            &["serve"],
+            &[""],
+            // The retired one-off import (card #489) is unknown, not served.
+            &["migrate-from-surreal"],
+        ] {
+            assert!(
+                matches!(parse(args), Err(StartupError::Usage)),
+                "{args:?} must be refused"
+            );
+        }
+    }
+
+    /// The refusal names both valid forms and does not echo the argument.
+    #[test]
+    fn the_usage_error_names_the_commands_only() {
+        let message = format!(
+            "{:?}",
+            parse(&["secret-looking-input"]).expect_err("refused")
+        );
+        assert!(message.contains("bored-backend migrate"), "{message}");
+        assert!(!message.contains("secret-looking-input"), "{message}");
+    }
+}
