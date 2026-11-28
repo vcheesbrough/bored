@@ -399,6 +399,7 @@ dependencies = [
  "config",
  "futures-util",
  "http 1.4.0",
+ "httpdate",
  "jsonwebtoken",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -3965,6 +3966,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4031,6 +4033,7 @@ dependencies = [
  "sqlx-core",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4066,6 +4069,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -4092,6 +4096,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

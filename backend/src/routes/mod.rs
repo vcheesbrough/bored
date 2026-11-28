@@ -4,5 +4,6 @@ pub mod boards;
 pub mod cards;
 pub mod cascade;
 pub mod columns;
+pub mod images;
 pub mod links;
 pub mod telemetry;

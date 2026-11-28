@@ -316,6 +316,38 @@ pub fn CardItem(
         });
     };
 
+    // Pasting an image (card #67): upload it and write its markdown into the
+    // body. Plain text pastes are left to the browser — see `image_paste`.
+    let upload_error: RwSignal<Option<&'static str>> = RwSignal::new(None);
+    let on_body_paste = move |ev: leptos::ev::Event| {
+        let Some(textarea) = textarea_ref.get_untracked() else {
+            return;
+        };
+        let Some(card_id) = card.try_get_untracked().map(|c| c.id) else {
+            return;
+        };
+        let save_id = card_id.clone();
+        crate::image_paste::handle_paste(
+            &ev,
+            &textarea,
+            crate::image_paste::Editor {
+                card_id,
+                // `try_*`: the upload can finish after this card has been
+                // unmounted; `None`/`false` then sends the swap to the server.
+                read: move || body.try_get_untracked(),
+                write: move |new_body: String| {
+                    // `try_set` hands the value back when the signal is gone.
+                    if body.try_set(new_body.clone()).is_some() {
+                        return false;
+                    }
+                    do_save(save_id.clone(), new_body);
+                    true
+                },
+                report: crate::image_paste::reporter(upload_error),
+            },
+        );
+    };
+
     let on_body_input = move |ev: leptos::ev::Event| {
         let new_body = event_target_value(&ev);
         body.set(new_body.clone());
@@ -526,6 +558,17 @@ pub fn CardItem(
                 if card_state.get_untracked() != CardState::Collapsed {
                     return;
                 }
+                // A right-click on an image in the preview keeps the browser's
+                // own menu, so "Open image in new tab" works there too
+                // (card #67). `tag_name` is upper-case for HTML elements.
+                use wasm_bindgen::JsCast;
+                let on_image = e
+                    .target()
+                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                    .is_some_and(|element| element.tag_name() == "IMG");
+                if on_image {
+                    return;
+                }
                 e.prevent_default();
                 e.stop_propagation();
                 const MENU_WIDTH: i32 = 176;
@@ -696,6 +739,7 @@ pub fn CardItem(
                         class:card-body-hidden=is_expanded
                         prop:value=move || body.try_get().unwrap_or_default()
                         on:input=on_body_input
+                        on:paste=on_body_paste
                         on:blur=move |ev: web_sys::FocusEvent| {
                             // `relatedTarget` is the element gaining focus, or
                             // `None` when focus is going nowhere in particular
@@ -734,6 +778,10 @@ pub fn CardItem(
                         on:click=|e: leptos::ev::MouseEvent| e.stop_propagation()
                     />
                 </div>
+                // Why the last image paste failed, until the next paste.
+                {move || upload_error.try_get().flatten().map(|message| view! {
+                    <p class="image-upload-error" role="alert">{message}</p>
+                })}
 
             </Show>
 

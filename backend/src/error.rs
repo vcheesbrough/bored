@@ -99,6 +99,12 @@ pub enum ErrorType {
     Conflict,
     /// 422 — well-formed request, but the values are not acceptable.
     Unprocessable,
+    /// 413 — the request body is over the route's limit (an image over
+    /// 10 MiB, card #67).
+    PayloadTooLarge,
+    /// 415 — the body is not a media type the route accepts (an upload that
+    /// is not one of the five image formats, card #67).
+    UnsupportedMediaType,
     /// 500 — Postgres rejected a write on an integrity constraint (SQLSTATE
     /// class `23`: a unique or foreign key, a `NOT NULL`, a `CHECK`) that
     /// bored does not translate into a client error.
@@ -131,6 +137,8 @@ impl ErrorType {
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
             Self::Unprocessable => "unprocessable",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::UnsupportedMediaType => "unsupported_media_type",
             Self::DbConstraint => "db_constraint",
             Self::DbEngine => "db_engine",
             Self::DbClient => "db_client",
@@ -172,6 +180,11 @@ pub(crate) enum ApiError {
     Conflict(Option<&'static str>),
     /// 422 — well-formed request, but the values are not acceptable.
     Unprocessable(Option<&'static str>),
+    /// 413 — the body is over the route's size limit. No body, like the
+    /// other bare-status client errors.
+    PayloadTooLarge,
+    /// 415 — the body is not a media type the route accepts. No body.
+    UnsupportedMediaType,
     /// 500 — our fault. The cause is carried in its redacted form, and logged
     /// when this becomes a response.
     Internal(InternalError),
@@ -208,6 +221,8 @@ impl ApiError {
             Self::NotFound => ErrorType::NotFound,
             Self::Conflict(_) => ErrorType::Conflict,
             Self::Unprocessable(_) => ErrorType::Unprocessable,
+            Self::PayloadTooLarge => ErrorType::PayloadTooLarge,
+            Self::UnsupportedMediaType => ErrorType::UnsupportedMediaType,
             Self::Internal(internal) => internal.error_type,
         }
     }
@@ -374,6 +389,8 @@ impl IntoResponse for ApiError {
             Self::NotFound => StatusCode::NOT_FOUND.into_response(),
             Self::Conflict(message) => client_error(StatusCode::CONFLICT, message),
             Self::Unprocessable(message) => client_error(StatusCode::UNPROCESSABLE_ENTITY, message),
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
             Self::Internal(internal) => {
                 // The one log line the old `map_err(|_| …)` never wrote. It is
                 // emitted here, and only here, so a cause cannot be logged
@@ -455,6 +472,14 @@ mod tests {
         assert_eq!(
             ApiError::UNPROCESSABLE.error_type(),
             ErrorType::Unprocessable
+        );
+        assert_eq!(
+            ApiError::PayloadTooLarge.error_type(),
+            ErrorType::PayloadTooLarge
+        );
+        assert_eq!(
+            ApiError::UnsupportedMediaType.error_type(),
+            ErrorType::UnsupportedMediaType
         );
         assert_eq!(ApiError::internal("x").error_type(), ErrorType::Invariant);
     }

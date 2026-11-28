@@ -3,7 +3,8 @@ use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
 use crate::search::highlight_spans;
 
-fn to_html(md: &str) -> String {
+/// Render `md` with no search highlight and no source positions.
+pub(crate) fn to_html(md: &str) -> String {
     to_html_with(md, "", false)
 }
 

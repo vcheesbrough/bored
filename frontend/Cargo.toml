@@ -44,6 +44,14 @@ web-sys = { version = "0.3", features = [
     "CssStyleDeclaration",
     "NodeList",
     "HtmlTextAreaElement",
+    # Pasting an image into a card body (card #67) — see `image_paste`. The
+    # paste event's `clipboardData` is a `DataTransfer` whose items hold the
+    # pasted `File` (a `Blob`), sent as the upload's raw body.
+    "DataTransfer",
+    "DataTransferItemList",
+    "DataTransferItem",
+    "File",
+    "Blob",
     # Client telemetry (card #416) — see `telemetry::runtime`/`platform`:
     # high-resolution epoch timestamps, random trace/span ids, the keepalive
     # unload flush (a raw `fetch` with a `RequestInit`, since gloo-net cannot

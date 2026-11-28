@@ -102,6 +102,10 @@ impl<B> MakeSpan<B> for ServerSpan {
             url.scheme = request_scheme(request.extensions()).map(Scheme::label),
             http.response.status_code = Empty,
             error.type = Empty,
+            // Set only by the image routes (card #67): the image's size in
+            // bytes and its detected MIME type, one of five literals.
+            bored.image.size = Empty,
+            bored.image.content_type = Empty,
         );
         observability::adopt_parent(&span, request.headers());
         span

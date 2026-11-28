@@ -12,6 +12,7 @@ mod columns;
 mod contract;
 pub(crate) mod db_support;
 mod errors;
+mod images;
 mod links;
 mod logout;
 mod outbound_http;
